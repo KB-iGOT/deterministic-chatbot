@@ -5,6 +5,8 @@
 # =============================================================================
 set -e
 
+export PATH="/app/.venv/bin:$PATH"
+
 
 echo "🚀 Starting iGOT Deterministic Chatbot API…"
 exec "$@"

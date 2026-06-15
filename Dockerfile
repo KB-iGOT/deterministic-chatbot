@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # =============================================================================
 # iGOT Deterministic Chatbot — Production Dockerfile
 # =============================================================================
@@ -43,17 +42,16 @@ COPY README.md .
 # --frozen       : use exact lock file if present (recommended for CI / prod)
 # --no-dev       : skip test / lint tooling
 # --no-install-project : install deps only; project itself is installed next
-RUN --mount=type=cache,target=/root/.cache/uv \
-    ([ -f uv.lock ] && uv sync --frozen --no-dev --no-install-project || uv sync --no-dev --no-install-project)
+RUN ([ -f uv.lock ] && uv sync --frozen --no-dev --no-install-project || uv sync --no-dev --no-install-project)
 
 # Copy application source and install the project package
+COPY README.md     ./
 COPY app/          ./app/
 COPY flows/        ./flows/
 COPY prompts/      ./prompts/
 COPY integrations/ ./integrations/
 COPY dev_ui/       ./dev_ui/
-RUN --mount=type=cache,target=/root/.cache/uv \
-    ([ -f uv.lock ] && uv sync --frozen --no-dev || uv sync --no-dev)
+RUN ([ -f uv.lock ] && uv sync --frozen --no-dev || uv sync --no-dev)
 
 # ── Stage 2: lean runtime image ────────────────────────────────────────────────
 FROM python:3.12-slim AS runtime
@@ -72,6 +70,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd -r igot && useradd -r -g igot -d /app -s /sbin/nologin igot
 
 WORKDIR /app
+
+# Pre-create writable dirs with correct ownership
+# logs/ — only needed if LOG_FILE is set; in Kubernetes leave LOG_FILE unset
+#          and let stdout/stderr be captured by the cluster logging stack instead.
+RUN mkdir -p /app/logs && chown igot:igot /app/logs
 
 # Copy venv and source from builder
 COPY --from=builder --chown=igot:igot /build/.venv       ./.venv
@@ -100,7 +103,7 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -sf http://localhost:8000/health || exit 1
 
 ENTRYPOINT ["/app/entrypoint.sh"]
-CMD ["uvicorn", "app.main:app", \
+CMD ["/app/.venv/bin/python", "-m", "uvicorn", "app.main:app", \
      "--host", "0.0.0.0", \
      "--port", "8000", \
      "--workers", "1", \
