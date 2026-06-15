@@ -75,8 +75,6 @@ services:
       # Override connection strings to point at compose service names
       POSTGRES_URL: postgresql+asyncpg://igot_chatbot:igot_local@postgres:5432/igot_chatbot
       REDIS_URL:    redis://redis:6379/3
-      # Auto-run migrations on startup in compose (safe for dev/staging)
-      RUN_MIGRATIONS: "true"
     ports:
       - "8000:8000"
     volumes:

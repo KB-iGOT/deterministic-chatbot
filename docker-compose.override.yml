@@ -32,5 +32,3 @@ services:
       - ./flows:/app/flows:ro
       - ./prompts:/app/prompts:ro
       - ./dev_ui:/app/dev_ui:ro
-      # Mount alembic for migration development
-      - ./alembic:/app/alembic:rw

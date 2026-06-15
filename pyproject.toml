@@ -47,7 +47,6 @@ dependencies = [
     # Persistence
     "sqlalchemy[asyncio]>=2.0.36",
     "asyncpg>=0.30.0",
-    "alembic>=1.13.0",
 
     # Cache / rate-limiting / pub-sub (optional — app still works without it)
     "redis[hiredis]>=5.2.0",

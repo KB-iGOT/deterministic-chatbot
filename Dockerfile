@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # =============================================================================
 # iGOT Deterministic Chatbot — Production Dockerfile
 # =============================================================================
@@ -43,7 +44,6 @@ COPY README.md .
 # --no-dev       : skip test / lint tooling
 # --no-install-project : install deps only; project itself is installed next
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev --no-install-project 2>/dev/null || true && \
     ([ -f uv.lock ] && uv sync --frozen --no-dev --no-install-project || uv sync --no-dev --no-install-project)
 
 # Copy application source and install the project package
@@ -52,9 +52,6 @@ COPY flows/        ./flows/
 COPY prompts/      ./prompts/
 COPY integrations/ ./integrations/
 COPY dev_ui/       ./dev_ui/
-COPY alembic/      ./alembic/
-COPY alembic.ini*  ./
-
 RUN --mount=type=cache,target=/root/.cache/uv \
     ([ -f uv.lock ] && uv sync --frozen --no-dev || uv sync --no-dev)
 
@@ -83,8 +80,6 @@ COPY --from=builder --chown=igot:igot /build/flows/      ./flows/
 COPY --from=builder --chown=igot:igot /build/prompts/    ./prompts/
 COPY --from=builder --chown=igot:igot /build/integrations/ ./integrations/
 COPY --from=builder --chown=igot:igot /build/dev_ui/     ./dev_ui/
-COPY --from=builder --chown=igot:igot /build/alembic/    ./alembic/
-COPY --from=builder --chown=igot:igot /build/alembic.ini* ./
 
 # Entrypoint script (DB migrations + server start)
 COPY --chown=igot:igot entrypoint.sh ./
@@ -104,10 +99,10 @@ EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -sf http://localhost:8000/health || exit 1
 
-ENTRYPOINT ["./entrypoint.sh"]
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", \
      "--host", "0.0.0.0", \
      "--port", "8000", \
-     "--workers", "2", \
+     "--workers", "1", \
      "--log-level", "info", \
      "--no-access-log"]
