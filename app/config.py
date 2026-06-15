@@ -1,4 +1,4 @@
-"""Saathi runtime configuration loaded from environment."""
+"""iGOT Deterministic Chatbot runtime configuration loaded from environment."""
 
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # Runtime
-    saathi_env: Literal["dev", "staging", "prod"] = "dev"
-    saathi_session_ttl_hours: int = 24
+    igot_env: Literal["dev", "staging", "prod"] = "dev"
+    igot_session_ttl_hours: int = 24
     log_level: str = "INFO"
-    # File logging — set LOG_FILE=/path/to/saathi.log to enable; empty = console only
+    # File logging — set LOG_FILE=/path/to/igot-chatbot.log to enable; empty = console only
     log_file: str = ""
     # Max size per log file before rotation (bytes). Default 10 MB.
     log_file_max_bytes: int = 10 * 1024 * 1024
@@ -24,11 +24,11 @@ class Settings(BaseSettings):
     log_file_backup_count: int = 5
 
     # Database
-    postgres_url: str = "postgresql+asyncpg://saathi:password@localhost:5432/saathi"
+    postgres_url: str = "postgresql+asyncpg://igot_chatbot:password@localhost:5432/igot_chatbot"
 
     # Redis
     redis_url: str = "redis://localhost:6379/3"
-    saathi_redis_namespace: str = "saathi"
+    igot_redis_namespace: str = "igot_chatbot"
 
     # Auth (Karmayogi Keycloak)
     # KEYCLOAK_HOST — Keycloak / SSO server hostname.
@@ -49,8 +49,8 @@ class Settings(BaseSettings):
     # Leave empty to skip role check entirely.
     auth_required_role: str = ""
     # Fallback user ID when auth is disabled and no token is sent (dev/testing).
-    # Maps to SAATHI_TEST_USER_ID — reused from existing config.
-    # (saathi_test_user_id already declared below)
+    # Maps to IGOT_TEST_USER_ID — reused from existing config.
+    # (igot_test_user_id already declared below)
 
     # LLM provider selection
     llm_provider: Literal["vertex", "vllm"] = "vertex"
@@ -116,7 +116,7 @@ class Settings(BaseSettings):
     google_translate_api_key: str = ""
 
     # Session expiry (sliding TTL — reset on every user turn)
-    saathi_web_session_ttl_minutes: int = 30   # web + mobile app
+    igot_web_session_ttl_minutes: int = 30   # web + mobile app
     # WhatsApp: Meta's 24h window is the binding constraint; pass 1440 to initial_state()
 
     # YP (Young Professional) allocation data
@@ -126,7 +126,7 @@ class Settings(BaseSettings):
     yp_allocation_file: str = ""
 
     # Dev / testing
-    saathi_test_user_id: str = ""   # SAATHI_TEST_USER_ID — used as the default Bearer sub in dev
+    igot_test_user_id: str = ""   # IGOT_TEST_USER_ID — used as the default Bearer sub in dev
 
     # CORS
     cors_allowed_origins: str = "http://localhost:3000"

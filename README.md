@@ -1,4 +1,4 @@
-# Saathi — Developer Guide
+# iGOT Deterministic Chatbot — Developer Guide
 
 iGOT Karmayogi Bharat support chatbot. LangGraph engine, YAML-defined flows, deterministic-first (Mode A/B). Modes C/D (LLM-guided) are wired but Phase 2.
 
@@ -28,7 +28,6 @@ iGOT Karmayogi Bharat support chatbot. LangGraph engine, YAML-defined flows, det
 ### Option A — Docker (recommended)
 
 ```bash
-cd saathi
 cp .env.example .env          # fill in KARMAYOGI_API_KEY, ZOHO_* creds, GOOGLE_* creds
 docker compose up
 ```
@@ -53,7 +52,6 @@ docker compose down -v
 **Requirements:** Python 3.11+, Postgres.
 
 ```bash
-cd saathi
 pip install uv
 uv sync --dev                  # creates .venv + installs all deps
 source .venv/bin/activate
@@ -124,7 +122,7 @@ curl -s -X POST "http://localhost:8000/ai-chatbot/v1/sessions/$SESSION/turn" \
 ## 2. Project layout
 
 ```
-saathi/
+det-chatbot/
 ├── flows/                         ← YOU WORK HERE for new use cases
 │   ├── README.md                  ← YAML reference for flow authors (start here)
 │   ├── mode_b_certificate_download.yaml
@@ -367,9 +365,9 @@ NDJSON, one JSON object per line — easy to ship to Loki / CloudWatch / ELK.
 
 Set `LOG_FILE` in `.env` to enable:
 ```dotenv
-LOG_FILE=logs/saathi.log          # relative to project root
+LOG_FILE=logs/igot-chatbot.log    # relative to project root
 # or absolute:
-LOG_FILE=/var/log/saathi/saathi.log
+LOG_FILE=/var/log/igot-chatbot/igot-chatbot.log
 ```
 
 Files rotate at 10 MB, 5 backups kept. Override with:
@@ -441,17 +439,17 @@ Every significant user action emits a structured `[activity]` event at `INFO` le
  "session_id": "e3b7c1a2-...", "flow_id": "CERTIFICATE_DOWNLOAD", "outcome": "ticket_raised"}
 ```
 
-**Querying activity events** (from `logs/saathi.log`):
+**Querying activity events** (from `logs/igot-chatbot.log`):
 
 ```bash
 # All session starts today
-grep '"event":"session_start"' logs/saathi.log | jq .
+grep '"event":"session_start"' logs/igot-chatbot.log | jq .
 
 # All flows that raised a ticket
-grep '"event":"flow_ended"' logs/saathi.log | jq 'select(.outcome=="ticket_raised")'
+grep '"event":"flow_ended"' logs/igot-chatbot.log | jq 'select(.outcome=="ticket_raised")'
 
 # Activity funnel for a specific session
-grep '"session_id":"e3b7c1a2-..."' logs/saathi.log | grep '"event_type":"activity"' | jq .
+grep '"session_id":"e3b7c1a2-..."' logs/igot-chatbot.log | grep '"event_type":"activity"' | jq .
 ```
 
 ---
@@ -520,7 +518,7 @@ python scripts/llm_judge_runner.py --flow LEADERBOARD_ISSUE --dry-run
 ```
 
 **Requires** `ANTHROPIC_API_KEY` in `.env` (used to call Claude as the judge).
-**Requires** `SAATHI_TEST_USER_ID` in `.env` (a real Karmayogi user ID for API calls).
+**Requires** `IGOT_TEST_USER_ID` in `.env` (a real Karmayogi user ID for API calls).
 
 **What the judge evaluates:**
 - Correctness against the SOP document (ground truth — not the YAML)
@@ -535,7 +533,7 @@ python scripts/llm_judge_runner.py --flow LEADERBOARD_ISSUE --dry-run
 - Per-path conversation transcript
 - Claude's detailed verdict and fix suggestions for each path
 
-**SOP files** live at `../reference/SOPs_md/` (one level above `saathi/`). The judge uses these as the source of truth — if a flow says something that contradicts the SOP, that is a FAIL. If a flow is missing a SOP, the judge falls back to general quality principles.
+**SOP files** live at `../reference/SOPs_md/` (one level above the project root). The judge uses these as the source of truth — if a flow says something that contradicts the SOP, that is a FAIL. If a flow is missing a SOP, the judge falls back to general quality principles.
 
 **Run after writing a new flow** to catch routing gaps and message quality issues before release:
 
@@ -578,14 +576,14 @@ open test_reports/MY_NEW_FLOW_*.html
 | `ImportError: cannot import name 'Self'` | Python 3.10 (needs 3.11+) | `uv venv .venv --python 3.11 && uv sync` |
 | Flow compiles but skipped at startup | One broken YAML prevents that flow | Check logs for `⚠️ Skipping flow` lines; run `--validate` to find the error |
 | `watchfiles` log spam in terminal | Logger not suppressed | Should be suppressed by `logging_setup.py` — restart the server |
-| Log file not created | `LOG_FILE` not set | Add `LOG_FILE=logs/saathi.log` to `.env` |
+| Log file not created | `LOG_FILE` not set | Add `LOG_FILE=logs/igot-chatbot.log` to `.env` |
 | `LANGFUSE_ENABLED=true` but no traces appear | Missing Langfuse keys | Ensure `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set in `.env`; check logs for `LangfuseWarning` |
 
 ---
 
 ## 10. Observability (Langfuse)
 
-Saathi integrates with [Langfuse](https://langfuse.com) for distributed tracing of LLM calls and conversation turns. Tracing is opt-in and has zero overhead when disabled.
+iGOT Deterministic Chatbot integrates with [Langfuse](https://langfuse.com) for distributed tracing of LLM calls and conversation turns. Tracing is opt-in and has zero overhead when disabled.
 
 ### Enabling Langfuse
 

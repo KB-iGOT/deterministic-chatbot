@@ -1,5 +1,5 @@
 # =============================================================================
-# Saathi — Production Dockerfile
+# iGOT Deterministic Chatbot — Production Dockerfile
 # =============================================================================
 # Multi-stage build:
 #   builder  — installs Python dependencies via uv
@@ -8,8 +8,8 @@
 # Image size target: ~600 MB  (Presidio spaCy models and Vertex AI SDK are heavy)
 #
 # Quick build & run:
-#   docker build -t saathi:latest .
-#   docker run -p 8000:8000 --env-file .env saathi:latest
+#   docker build -t igot-chatbot:latest .
+#   docker run -p 8000:8000 --env-file .env igot-chatbot:latest
 #
 # Full stack (recommended):
 #   docker compose up
@@ -59,9 +59,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ── Stage 2: lean runtime image ────────────────────────────────────────────────
 FROM python:3.12-slim AS runtime
 
-LABEL org.opencontainers.image.title="Saathi — iGOT Karmayogi Support Chatbot"
+LABEL org.opencontainers.image.title="iGOT Deterministic Chatbot — iGOT Karmayogi Support Chatbot"
 LABEL org.opencontainers.image.description="LangGraph + YAML deterministic-first chatbot for iGOT Karmayogi Bharat"
-LABEL org.opencontainers.image.source="https://github.com/aswinpradeep/igot_deterministic_chatbot"
+LABEL org.opencontainers.image.source="https://github.com/aswinpradeep/deterministic-chatbot"
 
 # Minimal runtime system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -70,22 +70,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user — never run as root in production
-RUN groupadd -r saathi && useradd -r -g saathi -d /app -s /sbin/nologin saathi
+RUN groupadd -r igot && useradd -r -g igot -d /app -s /sbin/nologin igot
 
 WORKDIR /app
 
 # Copy venv and source from builder
-COPY --from=builder --chown=saathi:saathi /build/.venv       ./.venv
-COPY --from=builder --chown=saathi:saathi /build/app/        ./app/
-COPY --from=builder --chown=saathi:saathi /build/flows/      ./flows/
-COPY --from=builder --chown=saathi:saathi /build/prompts/    ./prompts/
-COPY --from=builder --chown=saathi:saathi /build/integrations/ ./integrations/
-COPY --from=builder --chown=saathi:saathi /build/dev_ui/     ./dev_ui/
-COPY --from=builder --chown=saathi:saathi /build/alembic/    ./alembic/
-COPY --from=builder --chown=saathi:saathi /build/alembic.ini* ./
+COPY --from=builder --chown=igot:igot /build/.venv       ./.venv
+COPY --from=builder --chown=igot:igot /build/app/        ./app/
+COPY --from=builder --chown=igot:igot /build/flows/      ./flows/
+COPY --from=builder --chown=igot:igot /build/prompts/    ./prompts/
+COPY --from=builder --chown=igot:igot /build/integrations/ ./integrations/
+COPY --from=builder --chown=igot:igot /build/dev_ui/     ./dev_ui/
+COPY --from=builder --chown=igot:igot /build/alembic/    ./alembic/
+COPY --from=builder --chown=igot:igot /build/alembic.ini* ./
 
 # Entrypoint script (DB migrations + server start)
-COPY --chown=saathi:saathi entrypoint.sh ./
+COPY --chown=igot:igot entrypoint.sh ./
 RUN chmod +x ./entrypoint.sh
 
 # Python runtime flags
@@ -94,7 +94,7 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONPATH=/app
 
-USER saathi
+USER igot
 
 EXPOSE 8000
 

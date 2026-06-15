@@ -1,4 +1,4 @@
-"""Saathi FastAPI entry point."""
+"""iGOT Deterministic Chatbot FastAPI entry point."""
 
 from __future__ import annotations
 
@@ -102,7 +102,7 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
     app.state.sessions: dict[str, dict] = {}  # in-memory session metadata (dev only)
 
     # Dev UI banner — printed after all startup tasks so the port is known.
-    if settings.saathi_env in ("dev", "staging"):
+    if settings.igot_env in ("dev", "staging"):
         _port = os.environ.get("PORT", "8000")
         print(f"🎨 Dev UI  →  http://localhost:{_port}/dev-ui")
 
@@ -116,7 +116,7 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
 
 
 app = FastAPI(
-    title="Saathi — iGOT Karmayogi Bharat Support Assistant",
+    title="iGOT Deterministic Chatbot — Karmayogi Bharat Support Assistant",
     version="0.1.0",
     description=(
         "Multi-channel hybrid support chatbot for iGOT Karmayogi Bharat. "
@@ -139,7 +139,7 @@ app.include_router(chat_router)
 # Single-file HTML/JS chat widget for testing flows locally.
 # Served same-origin → no CORS config needed, JWT auth stub accepts any token.
 # Access at: http://localhost:8000/dev-ui
-if settings.saathi_env in ("dev", "staging"):
+if settings.igot_env in ("dev", "staging"):
     from fastapi.responses import HTMLResponse
 
     _dev_ui_path = Path(__file__).resolve().parent.parent / "dev_ui" / "index.html"
@@ -159,7 +159,7 @@ async def health() -> dict[str, str]:
 @app.get("/", tags=["meta"])
 async def root() -> dict[str, str]:
     return {
-        "service": "saathi",
+        "service": "igot-deterministic-chatbot",
         "version": "0.1.0",
         "docs": "/docs",
     }

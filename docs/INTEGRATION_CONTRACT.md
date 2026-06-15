@@ -1,6 +1,6 @@
-# Saathi — Frontend Integration Contract
+# iGOT Deterministic Chatbot — Frontend Integration Contract
 
-**Audience:** Web / mobile frontend developers integrating the Saathi chat widget into the iGOT Karmayogi portal.  
+**Audience:** Web / mobile frontend developers integrating the iGOT Deterministic Chatbot chat widget into the iGOT Karmayogi portal.  
 **Base URL:** Configured per environment (see §12).  
 **Auth:** Every request requires `x-authenticated-user-token: <keycloak_jwt>` — the user's live Keycloak session token.
 
@@ -159,7 +159,7 @@ After showing the banner, display a **"Start a new conversation"** button. On ta
 ```
 On app / page load
 ─────────────────
-1. Read "saathi_session_id" from storage
+1. Read "igot_session_id" from storage
 2. If found:
      POST /ai-chatbot/v1/sessions  { "channel": "web", "language": "en", "resume_session_id": "<saved_id>" }
      If response is HTTP 404 → session expired → go to step 3
@@ -176,7 +176,7 @@ On every user action (button tap / text submit / picker select)
 3. If any activity has type = "end":
      show outcome banner
      show "Start new conversation" button
-     DELETE "saathi_session_id" from storage
+     DELETE "igot_session_id" from storage
      stop sending turns to this session
 
 On error responses
@@ -199,10 +199,10 @@ On error responses
 
 ## 1. Overview
 
-Saathi is a **structured chatbot API**. Every response is a list of typed **activities** that tell the frontend exactly what to render. The frontend never parses free text to decide what to show — the server handles all logic.
+The iGOT Deterministic Chatbot is a **structured chatbot API**. Every response is a list of typed **activities** that tell the frontend exactly what to render. The frontend never parses free text to decide what to show — the server handles all logic.
 
 ```
-Frontend                          Saathi API
+Frontend                          iGOT Deterministic Chatbot API
    |                                  |
    |  POST /ai-chatbot/v1/sessions             |  ← start a new session
    |  ─────────────────────────────→  |
@@ -242,7 +242,7 @@ This is the **only** auth header. Do not use `Authorization: Bearer`.
 ### Production — Keycloak JWT
 
 ```bash
-curl -X POST https://saathi.example.com/ai-chatbot/v1/sessions \
+curl -X POST https://igot-chatbot.example.com/ai-chatbot/v1/sessions \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..." \
   -d '{"channel": "web", "language": "en"}'
@@ -262,7 +262,7 @@ When `AUTH_DISABLED=true` in `.env`, JWT validation is bypassed entirely:
 | What you send | What the server uses as user_id |
 |---------------|--------------------------------|
 | Any UUID string | That UUID directly |
-| Nothing / empty | `SAATHI_TEST_USER_ID` from `.env` |
+| Nothing / empty | `IGOT_TEST_USER_ID` from `.env` |
 
 ```bash
 # Dev mode — pass a UUID directly as the token value
@@ -272,7 +272,7 @@ curl -X POST http://localhost:8000/ai-chatbot/v1/sessions \
   -d '{"channel": "web", "language": "en"}'
 ```
 
-> ⚠️ `AUTH_DISABLED=true` must **never** be set in staging or production. It is enforced via the `SAATHI_ENV` check — set `SAATHI_ENV=prod` to block this flag.
+> ⚠️ `AUTH_DISABLED=true` must **never** be set in staging or production. It is enforced via the `IGOT_ENV` check — set `IGOT_ENV=prod` to block this flag.
 
 ---
 
@@ -756,7 +756,7 @@ Show a typing/loading animation. In Phase 1 this appears in the `activities` arr
 }
 ```
 
-**Do not render in production.** Only present in `SAATHI_ENV=dev` or `SAATHI_ENV=staging` with debug mode on. Filter by checking `type !== "trace"` before rendering.
+**Do not render in production.** Only present in `IGOT_ENV=dev` or `IGOT_ENV=staging` with debug mode on. Filter by checking `type !== "trace"` before rendering.
 
 ---
 
@@ -944,7 +944,7 @@ Sessions are stored in the **Postgres checkpointer** — they survive server res
 **Recommended Phase 1 approach:**
 ```javascript
 // On page load
-const savedSessionId = localStorage.getItem('saathi_session_id');
+const savedSessionId = localStorage.getItem('igot_session_id');
 if (savedSessionId) {
   // Try to resume — if 404, session expired → start fresh
   const resp = await startSession({ resume_session_id: savedSessionId });
@@ -1437,8 +1437,8 @@ All bot messages in `activities` will be in the requested language.
 | Environment | Base URL | Auth |
 |-------------|----------|------|
 | Local dev | `http://localhost:8000` | `AUTH_DISABLED=true` → pass UUID as token |
-| UAT | `https://saathi-uat.karmayogibharat.net` | Real Keycloak JWT required |
-| Production | `https://saathi.igotkarmayogi.gov.in` | Real Keycloak JWT required |
+| UAT | `https://igot-chatbot-uat.karmayogibharat.net` | Real Keycloak JWT required |
+| Production | `https://igot-chatbot.igotkarmayogi.gov.in` | Real Keycloak JWT required |
 
 **Keycloak hosts:**
 

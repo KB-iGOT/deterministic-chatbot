@@ -1,4 +1,4 @@
-"""Saathi API auth — Keycloak JWT validation.
+"""iGOT Deterministic Chatbot API auth — Keycloak JWT validation.
 
 Token flow:
   1. Client sends:  x-authenticated-user-token: <JWT>   (header name configurable)
@@ -15,7 +15,7 @@ Environment variables (all in .env):
   AUTH_DISABLED          true → bypass all verification (dev/local only)
   AUTH_HEADER_NAME       Header name for token (default: x-authenticated-user-token)
   AUTH_REQUIRED_ROLE     Role that must exist in user_roles claim (empty = skip check)
-  SAATHI_TEST_USER_ID    Fallback user ID when auth is disabled and no token is sent
+  IGOT_TEST_USER_ID      Fallback user ID when auth is disabled and no token is sent
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from app.config import settings
 
 log = logging.getLogger(__name__)
 
-_HMAC_KEY = b"saathi-dev-secret-replace-in-prod"  # TODO: load from secret store in prod
+_HMAC_KEY = b"igot-chatbot-dev-secret-replace-in-prod"  # TODO: load from secret store in prod
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +88,7 @@ def hash_user_id(raw_user_id: str) -> str:
     like ``{{ ctx.user_id_hash }}`` produce the real UUID that Karmayogi APIs
     expect. In prod it is hashed.
     """
-    if settings.saathi_env != "prod":
+    if settings.igot_env != "prod":
         return raw_user_id
     return hmac.new(_HMAC_KEY, raw_user_id.encode(), hashlib.sha256).hexdigest()
 
@@ -183,7 +183,7 @@ async def require_jwt(request: Request) -> dict[str, Any]:
 
     When AUTH_DISABLED=true:
       - Any token present → used as user_id directly (dev convenience)
-      - No token         → falls back to SAATHI_TEST_USER_ID from .env
+      - No token         → falls back to IGOT_TEST_USER_ID from .env
       - Neither set      → returns "dev-stub" (no real Karmayogi data)
     """
     header_name = settings.auth_header_name  # e.g. "x-authenticated-user-token"
@@ -193,8 +193,8 @@ async def require_jwt(request: Request) -> dict[str, Any]:
     if settings.auth_disabled:
         if token and token != "dev-stub":
             user_id = token   # treat raw token as user UUID (dev shortcut)
-        elif settings.saathi_test_user_id:
-            user_id = settings.saathi_test_user_id
+        elif settings.igot_test_user_id:
+            user_id = settings.igot_test_user_id
         else:
             user_id = "dev-stub"
         log.debug("[auth] AUTH_DISABLED — using user_id=%r", user_id)

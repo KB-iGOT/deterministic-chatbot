@@ -1,7 +1,7 @@
 -- =============================================================================
 -- Postgres init script — runs once on first container start
 -- Creates extra databases needed by optional services (Langfuse).
--- The primary 'saathi' database is created by POSTGRES_DB env var.
+-- The primary 'igot_chatbot' database is created by POSTGRES_DB env var.
 -- =============================================================================
 
 -- Langfuse observability DB (used when --profile observability is enabled)

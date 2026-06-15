@@ -392,7 +392,7 @@ def _wire_on_reply_edges(graph: Any, node_cfg: dict[str, Any], on_reply: dict[st
 # ------------------------------------------------------------------
 
 def _cli() -> None:
-    parser = argparse.ArgumentParser(description="Saathi flow compiler / validator")
+    parser = argparse.ArgumentParser(description="iGOT Deterministic Chatbot flow compiler / validator")
     parser.add_argument("--validate", type=Path, help="Validate all YAML in directory")
     args = parser.parse_args()
 

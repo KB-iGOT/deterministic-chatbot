@@ -112,7 +112,7 @@ async def start_session(
 
     ttl_minutes = (
         1440 if body.channel == "whatsapp"
-        else settings.saathi_web_session_ttl_minutes
+        else settings.igot_web_session_ttl_minutes
     )
 
     # Store session metadata

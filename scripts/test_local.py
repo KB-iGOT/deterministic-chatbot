@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Saathi — Local End-to-End Test
-================================
+iGOT Deterministic Chatbot — Local End-to-End Test
+====================================================
 Tests the Certificate Download flow with real credentials from .env.
 
-Run from the saathi/ directory so pydantic-settings picks up .env:
+Run from the project root directory so pydantic-settings picks up .env:
 
-    cd saathi/
     python scripts/test_local.py                # interactive: you choose at each step
     python scripts/test_local.py --auto         # scripted: C2 → "yes, fixed" → satisfied
     python scripts/test_local.py --karmayogi    # direct Karmayogi API probe (no flow)
     python scripts/test_local.py --zoho         # direct Zoho ticket creation test
     python scripts/test_local.py --translate    # translation service test (Gemini)
 
-Test user: set SAATHI_TEST_USER_ID in .env to a real Karmayogi user UUID.
+Test user: set IGOT_TEST_USER_ID in .env to a real Karmayogi user UUID.
 """
 
 from __future__ import annotations
@@ -26,8 +25,8 @@ import textwrap
 from pathlib import Path
 from uuid import uuid4
 
-# ── Bootstrap: point Python at saathi/ and load .env ─────────────────────────
-ROOT = Path(__file__).resolve().parent.parent          # …/saathi
+# ── Bootstrap: point Python at project root and load .env ────────────────────
+ROOT = Path(__file__).resolve().parent.parent          # project root
 os.chdir(ROOT)                                         # so pydantic-settings finds .env
 sys.path.insert(0, str(ROOT))
 
@@ -41,10 +40,10 @@ from app.engine.state import initial_state             # noqa: E402
 from app.services.registry import ServiceRegistry      # noqa: E402
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-# Set SAATHI_TEST_USER_ID in .env to a real Karmayogi user UUID.
+# Set IGOT_TEST_USER_ID in .env to a real Karmayogi user UUID.
 # Karmayogi API calls (course list, cert status) only return real data when this
 # matches an actual enrolled user. Leave empty to skip live API assertions.
-TEST_USER_ID: str = os.getenv("SAATHI_TEST_USER_ID", "")
+TEST_USER_ID: str = os.getenv("IGOT_TEST_USER_ID", "")
 # In dev mode hash_user_id() is a no-op, so the UUID passes through to Karmayogi.
 TEST_USER_HASH = TEST_USER_ID
 
@@ -433,14 +432,14 @@ async def run_zoho_test() -> None:
             method="POST",
             url="/tickets",
             body={
-                "subject": f"[TEST] Saathi E2E Test — {ts}",
+                "subject": f"[TEST] iGOT Deterministic Chatbot E2E Test — {ts}",
                 "description": (
                     "This is an automated test ticket created by scripts/test_local.py.\n"
                     f"Timestamp: {ts}\n"
                     f"Test user: {TEST_USER_ID}\n"
                     "Please delete this ticket."
                 ),
-                "email": "saathi-test@igotkarmayogi.gov.in",
+                "email": "igot-test@igotkarmayogi.gov.in",
                 "priority": "P4",
                 "classification": "Query",
                 "departmentId": settings.zoho_department_id,
@@ -455,7 +454,7 @@ async def run_zoho_test() -> None:
         )
         ticket_id = result.get("ticketNumber") or result.get("id") or "?"
         print(f"  ✅  Ticket created successfully — ID: {ticket_id}")
-        print(f"  🔗  https://desk.zoho.in/support/saathi/ShowHomePage.do#Tickets/dv/")
+        print(f"  🔗  https://desk.zoho.in/support/igot-chatbot/ShowHomePage.do#Tickets/dv/")
     except Exception as exc:
         print(f"  ❌  Ticket creation failed: {exc}")
 
@@ -579,8 +578,8 @@ async def async_main() -> None:
     args = build_parser().parse_args()
 
     print()
-    header("Saathi — Local E2E Test Suite")
-    print(f"  SAATHI_ENV:  {settings.saathi_env}")
+    header("iGOT Deterministic Chatbot — Local E2E Test Suite")
+    print(f"  IGOT_ENV:    {settings.igot_env}")
     print(f"  GCP project: {settings.google_project_id or '(not set)'}")
     print(f"  Zoho org:    {settings.zoho_org_id or '(not set)'}")
     print(f"  Karmayogi:   {settings.karmayogi_portal_base_url}")

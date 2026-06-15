@@ -1,4 +1,4 @@
-# Saathi — Technical Design
+# iGOT Deterministic Chatbot — Technical Design
 
 > **Audience**: engineers, architects, technical reviewers.
 > Timelines, ownership, and phasing live in a separate planning document.
@@ -33,7 +33,7 @@ The previous attempt used an LLM as the conversation orchestrator. That approach
 - Was expensive at scale, with no clear cost ceiling
 - Could not be handed to the SOP team to modify without developer intervention
 
-**Saathi's design premise**: for the vast majority of support queries, an LLM adds zero value on the happy path. A finite-state machine following a scripted SOP resolves the issue faster, more reliably, at zero LLM cost, and produces a fully auditable conversation trace. The LLM is reserved for a single, narrow task — paraphrasing a conversation into a human-readable Zoho ticket summary when the deterministic path could not resolve the issue. Even that call has an automatic template fallback so escalation never blocks on model availability.
+**iGOT Deterministic Chatbot's design premise**: for the vast majority of support queries, an LLM adds zero value on the happy path. A finite-state machine following a scripted SOP resolves the issue faster, more reliably, at zero LLM cost, and produces a fully auditable conversation trace. The LLM is reserved for a single, narrow task — paraphrasing a conversation into a human-readable Zoho ticket summary when the deterministic path could not resolve the issue. Even that call has an automatic template fallback so escalation never blocks on model availability.
 
 ### Goals
 
@@ -56,7 +56,7 @@ The previous attempt used an LLM as the conversation orchestrator. That approach
 graph TB
     User["👤 Civil Servant<br/>(iGOT portal user)"]
     Widget["📱 Chat Widget<br/>Web · Mobile · WhatsApp · Voice"]
-    Engine["🤖 Saathi Engine<br/>LangGraph + YAML Flows"]
+    Engine["🤖 iGOT Deterministic Chatbot Engine<br/>LangGraph + YAML Flows"]
 
     subgraph External["External Services"]
         Karmayogi["iGOT Karmayogi APIs<br/>User profile · Enrolments · Certs"]
@@ -84,7 +84,7 @@ graph TB
 
 ```mermaid
 graph LR
-    subgraph API["Saathi API (FastAPI)"]
+    subgraph API["iGOT Deterministic Chatbot API (FastAPI)"]
         Routes["REST routes<br/>api/routes.py"]
         Auth["JWT auth<br/>api/auth.py"]
     end
@@ -138,7 +138,7 @@ graph LR
 
 ### Channel architecture
 
-Saathi is designed channel-agnostic from day one. Phase 1 ships the web REST channel; WhatsApp and voice are stubbed and ready.
+iGOT Deterministic Chatbot is designed channel-agnostic from day one. Phase 1 ships the web REST channel; WhatsApp and voice are stubbed and ready.
 
 ```mermaid
 graph TD
@@ -158,7 +158,7 @@ graph TD
 
     Runner["Engine Runner<br/>AsyncIterator[Activity]"]
 
-    Engine["🤖 Saathi Engine<br/>always English"]
+    Engine["🤖 iGOT Deterministic Chatbot Engine<br/>always English"]
 
     Web --> WebAdp --> TrSvc
     WA  --> WAAdp  --> TrSvc
@@ -262,7 +262,7 @@ stateDiagram-v2
 ```mermaid
 sequenceDiagram
     participant C as Widget (client)
-    participant A as Saathi API
+    participant A as iGOT Deterministic Chatbot API
     participant R as Engine Runner
     participant T as TranslationService
     participant E as LangGraph Engine
@@ -768,7 +768,7 @@ The LLM sees: redacted transcript + `collected` dict (completion_pct, field name
 ```mermaid
 sequenceDiagram
     participant W as Widget
-    participant A as Saathi API
+    participant A as iGOT Deterministic Chatbot API
     participant K as Karmayogi Keycloak
 
     W->>A: POST /chat/sessions {Authorization: Bearer <JWT>}

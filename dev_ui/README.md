@@ -1,13 +1,12 @@
-# Saathi Dev UI
+# iGOT Chatbot Dev UI
 
-A single-file HTML chat widget for testing Saathi flows during local development.
+A single-file HTML chat widget for testing iGOT Deterministic Chatbot flows during local development.
 
 ## Usage
 
 Start the API server:
 
 ```bash
-cd saathi
 source .venv/bin/activate
 uvicorn app.main:app --reload --reload-include "*.yaml" --reload-exclude "logs" --port 8000
 ```
@@ -20,7 +19,7 @@ http://localhost:8000/dev-ui
 
 No extra install, no npm, no build step. The UI is served by FastAPI itself (same origin), so JWT auth and CORS work automatically.
 
-> Only available when `SAATHI_ENV=dev` (default) or `SAATHI_ENV=staging`. Not mounted in production.
+> Only available when `IGOT_ENV=dev` (default) or `IGOT_ENV=staging`. Not mounted in production.
 
 ---
 
@@ -86,7 +85,7 @@ curl -s -X POST "http://localhost:8000/chat/sessions/$SESSION/turn" \
 
 ### Test session expiry
 
-Set `SAATHI_WEB_SESSION_TTL_MINUTES=1` in `.env`, start a session, wait 1 minute, send any message. The runner should emit the restart prompt.
+Set `IGOT_WEB_SESSION_TTL_MINUTES=1` in `.env`, start a session, wait 1 minute, send any message. The runner should emit the restart prompt.
 
 ### Test translation
 
@@ -124,4 +123,4 @@ The Dev UI is:
 - A **single HTML file** (`dev_ui/index.html`) — no dependencies, no bundler
 - Served by FastAPI at `/dev-ui` via an `HTMLResponse` route
 - **Same-origin** as the API — no CORS adjustments needed
-- **Not deployed to production** — the `if settings.saathi_env in ("dev", "staging")` guard in `main.py` ensures it's never exposed in prod
+- **Not deployed to production** — the `if settings.igot_env in ("dev", "staging")` guard in `main.py` ensures it's never exposed in prod

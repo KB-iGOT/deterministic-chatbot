@@ -1,1 +1,1 @@
-"""Saathi flow engine — YAML-driven LangGraph orchestrator."""
+"""iGOT Deterministic Chatbot flow engine — YAML-driven LangGraph orchestrator."""

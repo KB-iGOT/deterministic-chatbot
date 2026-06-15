@@ -1,4 +1,4 @@
-"""Centralised logging configuration for Saathi.
+"""Centralised logging configuration for iGOT Deterministic Chatbot.
 
 Call ``configure_logging()`` once at application startup (in main.py lifespan).
 
@@ -19,11 +19,11 @@ File location
 -------------
 Set ``LOG_FILE`` in ``.env`` to an absolute path, e.g.::
 
-    LOG_FILE=/var/log/saathi/saathi.log
+    LOG_FILE=/var/log/igot-chatbot/igot-chatbot.log
 
 Or a relative path (resolved from the project root), e.g.::
 
-    LOG_FILE=logs/saathi.log
+    LOG_FILE=logs/igot-chatbot.log
 
 The parent directory is created automatically.
 
@@ -135,12 +135,12 @@ class _JsonFormatter(logging.Formatter):
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def configure_logging(level: str = "INFO", log_file: str = "") -> None:
-    """Configure all loggers for the Saathi application.
+    """Configure all loggers for the iGOT Deterministic Chatbot application.
 
     Parameters
     ----------
     level:
-        Log level for Saathi loggers (DEBUG / INFO / WARNING / ERROR).
+        Log level for iGOT Deterministic Chatbot loggers (DEBUG / INFO / WARNING / ERROR).
     log_file:
         Optional file path for rotating JSON log file.
         If empty, file logging is disabled.
@@ -190,7 +190,7 @@ def configure_logging(level: str = "INFO", log_file: str = "") -> None:
         root.addHandler(h)
     root.setLevel(numeric)
 
-    # ── Saathi app namespaces ─────────────────────────────────────────────────
+    # ── iGOT Deterministic Chatbot app namespaces ─────────────────────────────────────────────────
     for ns in ("app", "app.adapters", "app.engine", "app.api", "app.services"):
         logging.getLogger(ns).setLevel(numeric)
 

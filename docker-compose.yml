@@ -1,10 +1,10 @@
 # =============================================================================
-# Saathi — Docker Compose (full local stack)
+# iGOT Deterministic Chatbot — Docker Compose (full local stack)
 # =============================================================================
 #
 # Quick start:
 #   cp .env.example .env          # fill in credentials
-#   docker compose up             # Postgres + Redis + Saathi API
+#   docker compose up             # Postgres + Redis + iGOT Chatbot API
 #
 # With Langfuse observability:
 #   docker compose --profile observability up
@@ -13,7 +13,7 @@
 #   docker compose -f docker-compose.yml -f docker-compose.override.yml up
 #
 # Rebuild after dep changes:
-#   docker compose build saathi
+#   docker compose build igot-chatbot
 #
 # Reset all data (WARNING: deletes DB volumes):
 #   docker compose down -v
@@ -24,18 +24,18 @@ services:
   # ── PostgreSQL 16 + pgvector ────────────────────────────────────────────────
   postgres:
     image: pgvector/pgvector:pg16-alpine
-    container_name: saathi-postgres
+    container_name: igot-chatbot-postgres
     environment:
-      POSTGRES_DB:       saathi
-      POSTGRES_USER:     saathi
-      POSTGRES_PASSWORD: saathi_local        # override in prod via secrets
+      POSTGRES_DB:       igot_chatbot
+      POSTGRES_USER:     igot_chatbot
+      POSTGRES_PASSWORD: igot_local          # override in prod via secrets
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/postgres-init:/docker-entrypoint-initdb.d:ro   # creates langfuse db
     ports:
       - "5432:5432"                          # expose for local tools (DBeaver, psql)
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U saathi -d saathi"]
+      test: ["CMD-SHELL", "pg_isready -U igot_chatbot -d igot_chatbot"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -45,7 +45,7 @@ services:
   # ── Redis 7 ─────────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
-    container_name: saathi-redis
+    container_name: igot-chatbot-redis
     command: >
       redis-server
       --appendonly yes
@@ -63,17 +63,17 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ── Saathi API ───────────────────────────────────────────────────────────────
-  saathi:
+  # ── iGOT Chatbot API ─────────────────────────────────────────────────────────
+  igot-chatbot:
     build:
       context: .
       dockerfile: Dockerfile
       target: runtime
-    container_name: saathi-api
+    container_name: igot-chatbot-api
     env_file: .env
     environment:
       # Override connection strings to point at compose service names
-      POSTGRES_URL: postgresql+asyncpg://saathi:saathi_local@postgres:5432/saathi
+      POSTGRES_URL: postgresql+asyncpg://igot_chatbot:igot_local@postgres:5432/igot_chatbot
       REDIS_URL:    redis://redis:6379/3
       # Auto-run migrations on startup in compose (safe for dev/staging)
       RUN_MIGRATIONS: "true"
@@ -113,10 +113,10 @@ services:
   #     LANGFUSE_SECRET_KEY=<from Langfuse UI>
   langfuse:
     image: langfuse/langfuse:latest
-    container_name: saathi-langfuse
+    container_name: igot-chatbot-langfuse
     profiles: [observability]
     environment:
-      DATABASE_URL:    postgresql://saathi:saathi_local@postgres:5432/langfuse
+      DATABASE_URL:    postgresql://igot_chatbot:igot_local@postgres:5432/langfuse
       NEXTAUTH_URL:    http://localhost:3001
       NEXTAUTH_SECRET: dev-langfuse-nextauth-secret-change-in-prod
       SALT:            dev-langfuse-salt-change-in-prod

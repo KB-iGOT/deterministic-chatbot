@@ -1,4 +1,4 @@
-"""Request / response models for the Saathi REST API.
+"""Request / response models for the iGOT Deterministic Chatbot REST API.
 
 These are the wire-format types web and mobile clients send/receive.
 Authoritative spec lives in `docs/architecture/INTEGRATION_CONTRACT.md`.

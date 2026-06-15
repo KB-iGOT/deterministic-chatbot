@@ -1,4 +1,4 @@
-"""ConversationState — the single source of truth for a Saathi session.
+"""ConversationState — the single source of truth for an iGOT Deterministic Chatbot session.
 
 LangGraph persists this to Redis after every node execution via the checkpointer.
 """

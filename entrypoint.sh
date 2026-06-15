@@ -1,6 +1,6 @@
 #!/bin/sh
 # =============================================================================
-# Saathi entrypoint
+# iGOT Deterministic Chatbot entrypoint
 # Runs DB migrations (if enabled) then hands off to the CMD.
 # =============================================================================
 set -e
@@ -15,5 +15,5 @@ if [ "${RUN_MIGRATIONS:-false}" = "true" ]; then
     echo "✅ Migrations complete."
 fi
 
-echo "🚀 Starting Saathi API…"
+echo "🚀 Starting iGOT Deterministic Chatbot API…"
 exec "$@"

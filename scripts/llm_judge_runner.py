@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Saathi — LLM-as-Judge Flow Test Runner
-=======================================
+iGOT Deterministic Chatbot — LLM-as-Judge Flow Test Runner
+===========================================================
 Exhaustively walks every user-choice path through a YAML flow, simulates each
 conversation against the live LangGraph engine (with real services), then asks
 Claude to act as a QA judge and evaluate quality. Produces a standalone HTML
 report with pass/warn/fail verdicts, response samples, and fix suggestions.
 
-Usage (run from saathi/ directory):
+Usage (run from project root directory):
 
     # Test a single flow
     python scripts/llm_judge_runner.py --flow LEADERBOARD_ISSUE
@@ -42,7 +42,7 @@ from typing import Any
 from uuid import uuid4
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
-ROOT = Path(__file__).resolve().parent.parent   # …/saathi
+ROOT = Path(__file__).resolve().parent.parent   # project root
 os.chdir(ROOT)
 sys.path.insert(0, str(ROOT))
 
@@ -56,7 +56,7 @@ from app.services.registry import ServiceRegistry             # noqa: E402
 
 _yaml = _YAML(typ="safe", pure=True)
 
-TEST_USER_ID: str = os.getenv("SAATHI_TEST_USER_ID", "")
+TEST_USER_ID: str = os.getenv("IGOT_TEST_USER_ID", "")
 FLOWS_DIR  = ROOT / "flows"
 SOPS_DIR   = ROOT.parent / "reference" / "SOPs_md"
 REPORTS_DIR = ROOT / "test_reports"
@@ -650,7 +650,7 @@ class ConversationRunner:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _JUDGE_SYSTEM = """\
-You are a senior QA engineer reviewing automated test runs of Saathi, an iGOT
+You are a senior QA engineer reviewing automated test runs of the iGOT Deterministic Chatbot, an iGOT
 Karmayogi government learning-platform support chatbot built with LangGraph.
 
 You will be given:
@@ -683,7 +683,7 @@ Respond ONLY with a JSON object — no prose outside JSON:
 }
 """
 
-_JUDGE_USER_PREFIX = "Please evaluate this Saathi conversation against the SOP and criteria above.\n\n"
+_JUDGE_USER_PREFIX = "Please evaluate this iGOT Deterministic Chatbot conversation against the SOP and criteria above.\n\n"
 
 
 def _detect_judge_provider() -> str:
@@ -996,7 +996,7 @@ def generate_html_report(
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Saathi Flow Test — {_esc(flow_id)}</title>
+<title>iGOT Deterministic Chatbot Flow Test — {_esc(flow_id)}</title>
 <style>
   body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
           background:#f3f4f6;color:#111827;margin:0;padding:24px }}
@@ -1012,7 +1012,7 @@ def generate_html_report(
 
   <!-- Header -->
   <div style="background:#1e3a5f;color:#fff;border-radius:12px;padding:24px;margin-bottom:20px">
-    <div style="font-size:0.8em;opacity:.7">Saathi LLM-as-Judge Test Report</div>
+    <div style="font-size:0.8em;opacity:.7">iGOT Deterministic Chatbot LLM-as-Judge Test Report</div>
     <h1 style="margin:4px 0;font-size:1.6em">{_esc(flow_id)}</h1>
     <div style="font-size:0.85em;opacity:.8">Generated {now} · {total} scenarios · {duration_total:.1f}s total</div>
   </div>
@@ -1046,7 +1046,7 @@ def generate_html_report(
   <div>{details_html}</div>
 
   <div style="text-align:center;color:#9ca3af;font-size:0.8em;margin-top:32px;padding-bottom:24px">
-    Saathi LLM Judge · {now} · Test user: {_esc(user_display)}
+    iGOT Deterministic Chatbot LLM Judge · {now} · Test user: {_esc(user_display)}
   </div>
 </div>
 
@@ -1192,8 +1192,8 @@ async def async_main() -> None:
             except Exception:
                 pass
 
-    print(f"\nSaathi LLM-as-Judge Test Runner")
-    print(f"Test user: {TEST_USER_ID[:8]}…" if TEST_USER_ID else "⚠️  SAATHI_TEST_USER_ID not set in .env")
+    print(f"\niGOT Deterministic Chatbot LLM-as-Judge Test Runner")
+    print(f"Test user: {TEST_USER_ID[:8]}…" if TEST_USER_ID else "⚠️  IGOT_TEST_USER_ID not set in .env")
     print(f"Flows to test: {', '.join(flows_to_test)}")
 
     max_sc = args.max_scenarios if args.max_scenarios > 0 else 999_999

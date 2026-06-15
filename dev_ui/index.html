@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Saathi Dev UI</title>
+<title>iGOT Chatbot Dev UI</title>
 <style>
 /* ── Design tokens ──────────────────────────────────────────────────────── */
 :root {
@@ -389,7 +389,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 
 <!-- ── Header ──────────────────────────────────────────────────────────────── -->
 <header>
-  <div class="logo">🤖 Saathi <em>Dev UI</em></div>
+  <div class="logo">🤖 iGOT Chatbot <em>Dev UI</em></div>
   <div class="sp"></div>
   <span id="statusBadge" class="badge">idle</span>
   <select id="langSel" title="Preferred language (set at session start)">
@@ -444,7 +444,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
         <button class="btn-s" onclick="showCollected()" title="Fetch /admin trace">🔍 Trace</button>
       </div>
       <p style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.5">
-        To test session expiry: set <code style="font-size:10px">SAATHI_WEB_SESSION_TTL_MINUTES=1</code> and wait 1 min, then send a message.
+        To test session expiry: set <code style="font-size:10px">IGOT_WEB_SESSION_TTL_MINUTES=1</code> and wait 1 min, then send a message.
       </p>
     </div>
 

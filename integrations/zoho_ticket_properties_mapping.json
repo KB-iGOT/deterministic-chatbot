@@ -1,5 +1,5 @@
 {
-  "_comment": "Maps Saathi internal ticket categories to Zoho Desk custom-field schema. Lifted from legacy/src/services/zoho_utils.py hardcoded templates. Refactor in Phase 1 — load at startup, render Zoho payload via Jinja against this file.",
+  "_comment": "Maps iGOT Deterministic Chatbot internal ticket categories to Zoho Desk custom-field schema. Lifted from legacy/src/services/zoho_utils.py hardcoded templates. Refactor in Phase 1 — load at startup, render Zoho payload via Jinja against this file.",
 
   "departments": {
     "default": "your-dept-id"

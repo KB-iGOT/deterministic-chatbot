@@ -1,4 +1,4 @@
-# Saathi — Development Plan
+# iGOT Deterministic Chatbot — Development Plan
 
 > **Scope of this document**: What the L1/SOP team must deliver, how to pick the right flow type, weekly delivery targets, and acceptance criteria.
 > Day-by-day task breakdown lives in sprint tickets, not here.
@@ -346,7 +346,7 @@ At this point Phase 1 core is stable. Decisions to make:
 
 ## 6. Integration Acceptance — Web / Mobile Team
 
-The web widget team integrates against the Saathi REST API. These are the conditions under which integration can be declared complete.
+The web widget team integrates against the iGOT Deterministic Chatbot REST API. These are the conditions under which integration can be declared complete.
 
 ### What the web team must implement
 
@@ -393,7 +393,7 @@ Resume session (page refresh):
 - [ ] JWT refresh handled: if token expires mid-session, widget re-authenticates silently
 - [ ] Error state: if `/turn` returns 5xx, show "Something went wrong. Please try again." — do not crash widget
 - [ ] DPDP consent banner shown on first chat open (before session is created)
-- [ ] Tested against a real Saathi staging instance, not just mocks
+- [ ] Tested against a real iGOT Deterministic Chatbot staging instance, not just mocks
 
 ### Mobile team (Phase 2)
 

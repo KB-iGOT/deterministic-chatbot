@@ -665,7 +665,6 @@ validation_date:       "❌ Please enter a recognisable date, e.g. **12 May 2026
 ### Step 1 — Compiler validation (always run before committing)
 
 ```bash
-cd saathi
 source .venv/bin/activate
 python -m app.engine.compiler --validate flows/
 ```
@@ -690,7 +689,7 @@ open test_reports/MY_NEW_FLOW_*.html     # macOS
 xdg-open test_reports/MY_NEW_FLOW_*.html  # Linux
 ```
 
-**Requires** `ANTHROPIC_API_KEY` and `SAATHI_TEST_USER_ID` in `.env`.
+**Requires** `ANTHROPIC_API_KEY` and `IGOT_TEST_USER_ID` in `.env`.
 
 The SOP document for your flow should exist at `../reference/SOPs_md/`. The judge uses the SOP as ground truth — disagreements between the YAML and the SOP are marked `FAIL`.
 
