@@ -36,6 +36,8 @@ COPY pyproject.toml ./
 # uv.lock is optional on first run; generate with `uv lock` and commit it
 COPY uv.lock* ./
 
+COPY README.md .
+
 # Install production deps into .venv
 # --frozen       : use exact lock file if present (recommended for CI / prod)
 # --no-dev       : skip test / lint tooling
