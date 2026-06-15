@@ -1,0 +1,949 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Saathi Dev UI</title>
+<style>
+/* ── Design tokens ──────────────────────────────────────────────────────── */
+:root {
+  --bg:           #f1f5f9;
+  --surface:      #ffffff;
+  --surface-2:    #f8fafc;
+  --border:       #e2e8f0;
+  --accent:       #6366f1;
+  --accent-hover: #4f46e5;
+  --accent-light: #eef2ff;
+  --bot-bubble:   #f1f5f9;
+  --user-bubble:  #6366f1;
+  --user-text:    #ffffff;
+  --text:         #1e293b;
+  --muted:        #64748b;
+  --r:            12px;
+  --r-sm:         6px;
+}
+
+/* ── Reset ─────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+  height: 50px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  box-shadow: 0 1px 3px rgba(0,0,0,.06);
+}
+.logo { font-size: 16px; font-weight: 700; color: var(--accent); letter-spacing: -.3px; }
+.logo em { font-style: normal; font-weight: 400; color: var(--muted); font-size: 13px; }
+.sp { flex: 1; }
+
+/* ── Shared controls ─────────────────────────────────────────────────────── */
+select, input[type="text"], input[type="password"] {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 5px 8px;
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+  font-family: inherit;
+}
+select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(99,102,241,.12); }
+
+button {
+  cursor: pointer;
+  font-size: 13px;
+  border-radius: var(--r-sm);
+  border: none;
+  padding: 5px 12px;
+  font-family: inherit;
+  transition: background .15s, color .15s;
+  line-height: 1.4;
+}
+.btn-p  { background: var(--accent); color: #fff; }
+.btn-p:hover { background: var(--accent-hover); }
+.btn-s  { background: transparent; border: 1px solid var(--border); color: var(--text); }
+.btn-s:hover { background: var(--surface-2); }
+.btn-g  { background: transparent; color: var(--muted); padding: 5px 8px; }
+.btn-g:hover { background: var(--surface-2); color: var(--text); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+
+/* ── Status badge ─────────────────────────────────────────────────────────── */
+.badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-weight: 500;
+  background: var(--surface-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.badge.active   { background: #dcfce7; color: #15803d; border-color: #bbf7d0; }
+.badge.awaiting { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; }
+.badge.callback { background: #fef3c7; color: #b45309; border-color: #fde68a; }
+.badge.escalating { background: #fef3c7; color: #d97706; border-color: #fde68a; }
+.badge.ended    { background: var(--surface-2); color: var(--muted); }
+.badge.error    { background: #fee2e2; color: #dc2626; border-color: #fca5a5; }
+
+/* ── Layout ──────────────────────────────────────────────────────────────── */
+.layout { flex: 1; display: flex; overflow: hidden; min-height: 0; }
+
+/* ── Chat pane ───────────────────────────────────────────────────────────── */
+.chat-pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+#messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  scroll-behavior: smooth;
+}
+
+/* ── Bubbles ──────────────────────────────────────────────────────────────── */
+.row { display: flex; gap: 8px; max-width: 78%; animation: pop .18s ease; }
+@keyframes pop { from { opacity:0; transform: translateY(5px); } to { opacity:1; } }
+
+.row.bot  { align-self: flex-start; }
+.row.user { align-self: flex-end; flex-direction: row-reverse; }
+
+.av {
+  width: 30px; height: 30px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px; flex-shrink: 0; margin-top: 2px;
+}
+.av.bot  { background: var(--accent-light); }
+.av.user { background: var(--user-bubble); font-size: 10px; font-weight: 700; color: #fff; letter-spacing: -.3px; }
+
+.bub {
+  padding: 9px 13px;
+  border-radius: var(--r);
+  max-width: 100%;
+  line-height: 1.55;
+  word-break: break-word;
+}
+.bot  .bub { background: var(--bot-bubble); border-bottom-left-radius: 4px; }
+.user .bub { background: var(--user-bubble); color: var(--user-text); border-bottom-right-radius: 4px; }
+
+.bub code {
+  background: rgba(0,0,0,.08);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+}
+.user .bub code { background: rgba(255,255,255,.2); }
+.bub strong { font-weight: 600; }
+.bub em { font-style: italic; }
+
+/* ── Typing dots ─────────────────────────────────────────────────────────── */
+.typing-row { align-self: flex-start; display: flex; gap: 8px; }
+.typing-dots {
+  background: var(--bot-bubble);
+  border-radius: var(--r);
+  border-bottom-left-radius: 4px;
+  padding: 13px 14px;
+  display: flex; gap: 4px;
+}
+.typing-dots span {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--muted);
+  animation: bounce 1.2s infinite;
+}
+.typing-dots span:nth-child(2) { animation-delay: .2s; }
+.typing-dots span:nth-child(3) { animation-delay: .4s; }
+@keyframes bounce {
+  0%,80%,100% { transform: translateY(0); opacity: .4; }
+  40%          { transform: translateY(-5px); opacity: 1; }
+}
+
+/* ── End banner ──────────────────────────────────────────────────────────── */
+.end-banner {
+  margin: 12px 0 4px;
+  padding: 10px 14px;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  display: flex; align-items: center; gap: 8px;
+  border: 1px solid;
+}
+.end-banner.self_served  { background: #f0fdf4; color: #15803d; border-color: #bbf7d0; }
+.end-banner.ticket_raised  { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; }
+.end-banner.ticket_failed  { background: #fff7ed; color: #c2410c; border-color: #fed7aa; }
+.end-banner.ended          { background: var(--surface-2); color: var(--muted); border-color: var(--border); }
+
+/* ── Trace block ─────────────────────────────────────────────────────────── */
+.trace-wrap { margin: 2px 0 2px 38px; }
+.trace-toggle {
+  font-size: 11px; color: var(--muted); cursor: pointer;
+  display: flex; align-items: center; gap: 4px;
+  user-select: none; padding: 2px 0;
+}
+.trace-toggle:hover { color: var(--accent); }
+.trace-body {
+  display: none;
+  margin-top: 4px;
+  font-family: 'Courier New', monospace;
+  font-size: 11px; color: #475569;
+  white-space: pre-wrap;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  padding: 6px 8px;
+  border-radius: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+  line-height: 1.6;
+}
+.trace-body.open { display: block; }
+
+/* ── Error tile ──────────────────────────────────────────────────────────── */
+.err-tile {
+  background: #fee2e2; color: #b91c1c;
+  border: 1px solid #fca5a5;
+  border-radius: var(--r-sm);
+  padding: 8px 12px; font-size: 12px;
+  text-align: center;
+  align-self: stretch;
+}
+
+/* ── Input area ──────────────────────────────────────────────────────────── */
+#inputArea {
+  border-top: 1px solid var(--border);
+  padding: 10px 16px;
+  background: var(--surface);
+  flex-shrink: 0;
+  min-height: 52px;
+}
+
+.text-row { display: flex; gap: 8px; align-items: center; }
+.text-row input[type="text"] {
+  flex: 1; padding: 8px 14px;
+  border-radius: 24px; font-size: 14px;
+}
+.text-row input:disabled { background: var(--surface-2); cursor: not-allowed; }
+
+.send-btn {
+  background: var(--accent); border-radius: 50%;
+  width: 38px; height: 38px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; color: #fff; transition: background .15s;
+}
+.send-btn:hover:not(:disabled) { background: var(--accent-hover); }
+
+/* ── Quick replies ───────────────────────────────────────────────────────── */
+.qr-wrap { display: flex; flex-wrap: wrap; gap: 6px; }
+.qr {
+  background: transparent;
+  border: 1.5px solid var(--accent);
+  color: var(--accent);
+  border-radius: 20px;
+  padding: 5px 14px;
+  font-size: 13px;
+  transition: all .15s;
+}
+.qr:hover { background: var(--accent); color: #fff; }
+.qr.other { border-style: dashed; color: var(--muted); border-color: var(--border); }
+.qr.other:hover { background: var(--surface-2); color: var(--text); border-color: var(--muted); }
+
+/* ── Picker ──────────────────────────────────────────────────────────────── */
+.picker-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  max-height: 200px;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+.picker-search {
+  border: none !important;
+  border-bottom: 1px solid var(--border) !important;
+  border-radius: 0 !important;
+  padding: 8px 12px !important;
+  box-shadow: none !important;
+  width: 100%;
+}
+.picker-list { overflow-y: auto; flex: 1; }
+.pick-item {
+  padding: 8px 12px; cursor: pointer;
+  display: flex; flex-direction: column; gap: 1px;
+  transition: background .1s;
+  border-bottom: 1px solid var(--border);
+}
+.pick-item:last-child { border-bottom: none; }
+.pick-item:hover { background: var(--accent-light); }
+.pick-label { font-size: 13px; color: var(--text); }
+.pick-meta  { font-size: 11px; color: var(--muted); }
+.no-res     { padding: 12px; text-align: center; color: var(--muted); font-size: 12px; }
+
+/* ── Disabled / status strip ─────────────────────────────────────────────── */
+.status-strip {
+  text-align: center; padding: 8px 0;
+  color: var(--muted); font-size: 12px;
+}
+
+/* ── Debug sidebar ───────────────────────────────────────────────────────── */
+#sidebar {
+  width: 270px;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  display: flex; flex-direction: column;
+  overflow: hidden; flex-shrink: 0;
+  transition: width .2s;
+}
+#sidebar.hidden { width: 0; }
+
+.sb-head {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px; font-weight: 700;
+  color: var(--muted); text-transform: uppercase;
+  letter-spacing: .07em;
+}
+
+.sb-section { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.sb-section h4 {
+  font-size: 10px; text-transform: uppercase;
+  letter-spacing: .07em; color: var(--muted);
+  margin-bottom: 8px; font-weight: 600;
+}
+
+.kv { display: flex; justify-content: space-between; margin-bottom: 5px; font-size: 12px; }
+.kv .k { color: var(--muted); }
+.kv .v {
+  font-family: 'Courier New', monospace;
+  font-size: 11px; color: var(--text);
+  max-width: 150px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.sb-scroll { flex: 1; overflow-y: auto; }
+
+.json-pre {
+  font-family: 'Courier New', monospace;
+  font-size: 10px; color: var(--muted);
+  white-space: pre-wrap;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  padding: 6px 8px;
+  border-radius: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+  margin-top: 4px;
+  line-height: 1.5;
+}
+
+.sb-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.sb-actions button { font-size: 11px; padding: 4px 9px; }
+
+/* ── Modal overlay ────────────────────────────────────────────────────────── */
+.overlay {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0,0,0,.35); z-index: 100;
+  align-items: center; justify-content: center;
+}
+.overlay.open { display: flex; }
+.modal {
+  background: var(--surface);
+  border-radius: var(--r);
+  padding: 22px 24px;
+  width: 400px;
+  box-shadow: 0 24px 60px rgba(0,0,0,.2);
+}
+.modal h3 { font-size: 15px; margin-bottom: 18px; display: flex; align-items: center; gap: 6px; }
+.field { margin-bottom: 13px; }
+.field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.field input { width: 100%; }
+.modal-foot { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
+
+/* ── Toast ────────────────────────────────────────────────────────────────── */
+.toast {
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  background: #1e293b; color: #fff;
+  padding: 8px 18px; border-radius: 20px;
+  font-size: 13px; z-index: 200;
+  animation: pop .2s ease;
+  pointer-events: none;
+}
+.toast.err { background: #dc2626; }
+</style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────────────────────── -->
+<header>
+  <div class="logo">🤖 Saathi <em>Dev UI</em></div>
+  <div class="sp"></div>
+  <span id="statusBadge" class="badge">idle</span>
+  <select id="langSel" title="Preferred language (set at session start)">
+    <option value="en">🌐 English</option>
+    <option value="hi">🇮🇳 Hindi</option>
+    <option value="ta">Tamil</option>
+    <option value="te">Telugu</option>
+    <option value="kn">Kannada</option>
+    <option value="ml">Malayalam</option>
+    <option value="mr">Marathi</option>
+    <option value="gu">Gujarati</option>
+    <option value="bn">Bengali</option>
+    <option value="pa">Punjabi</option>
+    <option value="or">Odia</option>
+  </select>
+  <button class="btn-s" onclick="resetSession()" title="Start a new session">↺ Reset</button>
+  <button class="btn-g" onclick="toggleSidebar()" title="Toggle debug panel">⚙ Debug</button>
+  <button class="btn-g" onclick="openSettings()" title="Settings">⚙ Settings</button>
+</header>
+
+<!-- ── Main layout ──────────────────────────────────────────────────────────── -->
+<div class="layout">
+
+  <!-- Chat pane -->
+  <div class="chat-pane">
+    <div id="messages">
+      <div class="status-strip">Connecting to API…</div>
+    </div>
+    <div id="inputArea">
+      <div class="status-strip">Initialising…</div>
+    </div>
+  </div>
+
+  <!-- Debug sidebar -->
+  <div id="sidebar">
+    <div class="sb-head">🛠 Debug</div>
+
+    <div class="sb-section">
+      <h4>Session</h4>
+      <div class="kv"><span class="k">ID</span>    <span class="v" id="dbgId">—</span></div>
+      <div class="kv"><span class="k">Flow</span>  <span class="v" id="dbgFlow">—</span></div>
+      <div class="kv"><span class="k">Node</span>  <span class="v" id="dbgNode">—</span></div>
+      <div class="kv"><span class="k">Status</span><span class="v" id="dbgStatus">—</span></div>
+      <div class="kv"><span class="k">Lang</span>  <span class="v" id="dbgLang">—</span></div>
+    </div>
+
+    <div class="sb-section">
+      <h4>Dev Actions</h4>
+      <div class="sb-actions">
+        <button class="btn-s" onclick="checkHealth()" title="GET /health">💓 Health</button>
+        <button class="btn-s" onclick="copyId()"     title="Copy session UUID">📋 Copy ID</button>
+        <button class="btn-s" onclick="showCollected()" title="Fetch /admin trace">🔍 Trace</button>
+      </div>
+      <p style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.5">
+        To test session expiry: set <code style="font-size:10px">SAATHI_WEB_SESSION_TTL_MINUTES=1</code> and wait 1 min, then send a message.
+      </p>
+    </div>
+
+    <div class="sb-scroll">
+      <div class="sb-section" id="lastRespSection" style="display:none">
+        <h4>Last Response</h4>
+        <div class="json-pre" id="lastResp"></div>
+      </div>
+
+      <div class="sb-section" id="collectedSection" style="display:none">
+        <h4>Collected Data</h4>
+        <div class="json-pre" id="collectedData"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Settings modal ──────────────────────────────────────────────────────── -->
+<div class="overlay" id="settingsModal" onclick="outsideClose(event,'settingsModal')">
+  <div class="modal">
+    <h3>⚙ Dev Settings</h3>
+    <div class="field">
+      <label>API base URL <em style="color:var(--muted)">(empty = same origin)</em></label>
+      <input type="text" id="cfgApi" placeholder="http://localhost:8080">
+    </div>
+    <div class="field">
+      <label>
+        Karmayogi User ID
+        <em style="color:var(--muted)"> — paste real UUID to get live course data &amp; cert status</em>
+      </label>
+      <input type="text" id="cfgJwt"
+             placeholder="dev-stub  (or paste UUID e.g. 91f220ce-412f-46fe-…)"
+             style="font-family:monospace;font-size:12px">
+      <small style="color:var(--muted);display:block;margin-top:4px">
+        This becomes the <code>Bearer</code> token. In dev mode the server uses it directly
+        as the user ID passed to Karmayogi APIs — no real JWT needed.
+      </small>
+    </div>
+    <div class="modal-foot">
+      <button class="btn-s" onclick="closeModal('settingsModal')">Cancel</button>
+      <button class="btn-p" onclick="saveSettings()">Save &amp; Reconnect</button>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ── Config ──────────────────────────────────────────────────────────────────
+const CFG = {
+  api: '',          // empty = same origin (served by FastAPI)
+  jwt: 'dev-stub',  // In dev mode this IS the Karmayogi user ID — paste real UUID for live data
+};
+
+function url(path) { return CFG.api + path; }
+function hdrs() {
+  return {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer ' + CFG.jwt,
+  };
+}
+
+// ── Mutable state ────────────────────────────────────────────────────────────
+let S = mkState();
+
+function mkState() {
+  return {
+    sessionId:    null,
+    language:     'en',
+    status:       'idle',
+    inputMode:    'disabled',  // 'text' | 'quick_replies' | 'picker' | 'disabled'
+    pendingQR:    null,        // last quick_replies activity (for re-enable)
+    pendingPkr:   null,        // last picker activity
+    ended:        false,
+  };
+}
+
+// ── Session lifecycle ────────────────────────────────────────────────────────
+async function startSession() {
+  S = mkState();
+  S.language = langEl().value;
+
+  clearMessages();
+  setStrip('Connecting…');
+
+  try {
+    const r = await fetch(url('/ai-chatbot/v1/sessions'), {
+      method: 'POST',
+      headers: hdrs(),
+      body: JSON.stringify({ channel: 'web', language: S.language }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || 'HTTP ' + r.status);
+    S.sessionId = d.session_id;
+    updateDebug(d);
+    renderActivities(d.activities || []);
+  } catch(e) {
+    showErr('Failed to connect: ' + e.message + '. Is the API running?');
+  }
+}
+
+function resetSession() { startSession(); }
+
+// ── Turn ─────────────────────────────────────────────────────────────────────
+async function turn(payload) {
+  if (!S.sessionId) return;
+  disableInput();
+  showTyping();
+  try {
+    const r = await fetch(url('/ai-chatbot/v1/sessions/' + S.sessionId + '/turn'), {
+      method: 'POST',
+      headers: hdrs(),
+      body: JSON.stringify(payload),
+    });
+    removeTyping();
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || 'HTTP ' + r.status);
+    updateDebug(d);
+    renderActivities(d.activities || []);
+  } catch(e) {
+    removeTyping();
+    showErr('Error: ' + e.message);
+    restoreInput();
+  }
+}
+
+// ── Activity rendering ───────────────────────────────────────────────────────
+function renderActivities(activities) {
+  let nextMode = null, nextQR = null, nextPkr = null, hasEnd = false;
+
+  for (const a of activities) {
+    switch (a.type) {
+
+      case 'text':
+        appendBot(esc(a.content || ''), false);
+        break;
+
+      case 'markdown':
+        appendBot(md(a.content || ''), true);
+        break;
+
+      case 'quick_replies':
+        if (a.content) appendBot(esc(a.content), false);
+        nextMode = 'quick_replies';
+        nextQR   = a;
+        break;
+
+      case 'picker':
+        if (a.content) appendBot(esc(a.content), false);
+        nextMode  = 'picker';
+        nextPkr   = a;
+        break;
+
+      case 'input':
+        if (a.content) appendBot(esc(a.content), false);
+        nextMode = 'text';
+        break;
+
+      case 'typing':
+        // Already shown via showTyping(); real streaming will use this signal.
+        break;
+
+      case 'end':
+        hasEnd = true;
+        appendEndBanner(a);
+        break;
+
+      case 'trace':
+        appendTrace(a.trace_lines || []);
+        break;
+    }
+  }
+
+  if (hasEnd || S.ended) {
+    S.ended = true;
+    setStrip('Session ended. Click Reset ↺ to start again.');
+    return;
+  }
+
+  if (nextMode === 'quick_replies') {
+    S.pendingQR  = nextQR;
+    S.inputMode  = 'quick_replies';
+    renderQR(nextQR);
+  } else if (nextMode === 'picker') {
+    S.pendingPkr = nextPkr;
+    S.inputMode  = 'picker';
+    renderPicker(nextPkr);
+  } else if (nextMode === 'text') {
+    S.inputMode  = 'text';
+    renderTextInput();
+  } else if (activities.length) {
+    // Non-interactive batch (e.g. only text/markdown) — show text input for follow-up
+    S.inputMode  = 'text';
+    renderTextInput();
+  }
+
+  scrollBottom();
+}
+
+// ── DOM: message helpers ─────────────────────────────────────────────────────
+function appendBot(html, safe) {
+  const row = el('div', 'row bot');
+  row.innerHTML = `
+    <div class="av bot">🤖</div>
+    <div class="bub">${safe ? html : html}</div>`;
+  msgs().appendChild(row);
+}
+
+function appendUser(text) {
+  const row = el('div', 'row user');
+  row.innerHTML = `
+    <div class="bub">${esc(text)}</div>
+    <div class="av user">YOU</div>`;
+  msgs().appendChild(row);
+}
+
+function appendEndBanner(a) {
+  const outcome = a.outcome || 'ended';
+  const icons   = { self_served:'✅', ticket_raised:'🎫', ticket_failed:'⚠️', ended:'👋' };
+  const texts   = {
+    self_served:   'Issue resolved — hope that helped!',
+    ticket_raised: 'Ticket raised' + (a.content ? ': ' + a.content : '.'),
+    ticket_failed: 'Ticket could not be raised — please email support@igotkarmayogi.gov.in',
+    ended:         a.content || 'Conversation ended.',
+  };
+  const d = el('div', 'end-banner ' + outcome);
+  d.innerHTML = (icons[outcome] || '—') + ' ' + esc(texts[outcome] || outcome);
+  msgs().appendChild(d);
+}
+
+function appendTrace(lines) {
+  const id = 'tr' + Date.now();
+  const w  = el('div', 'trace-wrap');
+  w.innerHTML = `
+    <div class="trace-toggle" onclick="toggleTrace('${id}')">
+      ▶ trace — ${lines.length} line${lines.length !== 1 ? 's' : ''}
+    </div>
+    <div class="trace-body" id="${id}">${lines.map(esc).join('\n')}</div>`;
+  msgs().appendChild(w);
+}
+
+function toggleTrace(id) {
+  const body = document.getElementById(id);
+  const tog  = body.previousElementSibling;
+  const open = body.classList.toggle('open');
+  const n    = body.textContent.split('\n').filter(Boolean).length;
+  tog.textContent = (open ? '▼' : '▶') + ` trace — ${n} line${n !== 1 ? 's' : ''}`;
+}
+
+function showErr(msg) {
+  const d = el('div', 'err-tile');
+  d.textContent = msg;
+  msgs().appendChild(d);
+  setStrip('Error — click Reset ↺ to try again.');
+  scrollBottom();
+}
+
+// ── DOM: input helpers ───────────────────────────────────────────────────────
+function renderQR(a) {
+  const choices = a.choices || [];
+  let html = '<div class="qr-wrap">';
+  for (const c of choices) {
+    html += `<button class="qr" onclick="doChoice('${escA(c.id)}','${escA(c.label)}')">${esc(c.label)}</button>`;
+  }
+  if (a.other_option) {
+    const o = a.other_option;
+    html += `<button class="qr other" onclick="doChoice('${escA(o.id)}','${escA(o.label)}')">${esc(o.label)}</button>`;
+  }
+  if (!a.disable_input) {
+    html += `<button class="qr other" onclick="switchToText()">Other…</button>`;
+  }
+  html += '</div>';
+  inputArea().innerHTML = html;
+}
+
+function renderPicker(a) {
+  const items = a.items || [];
+  const pid   = 'pl_' + (a.picker_id || 'p');
+  let itemsHtml = items.map(item =>
+    `<div class="pick-item" onclick="doPick('${escA(a.picker_id||'')}','${escA(item.id)}','${escA(item.label)}')">
+       <span class="pick-label">${esc(item.label)}</span>
+       ${item.meta ? `<span class="pick-meta">${esc(item.meta)}</span>` : ''}
+     </div>`
+  ).join('');
+
+  inputArea().innerHTML = `
+    <div class="picker-wrap">
+      <input class="picker-search" type="text" id="${pid}"
+             placeholder="${escA(a.placeholder || 'Search…')}"
+             oninput="filterPicker('${escA(pid)}')">
+      <div class="picker-list" id="pl_items_${escA(a.picker_id||'p')}">${itemsHtml}</div>
+    </div>
+    ${a.other_option
+      ? `<div style="text-align:right">
+           <button class="qr other" style="font-size:12px" onclick="doChoice('${escA(a.other_option.id)}','${escA(a.other_option.label)}')">${esc(a.other_option.label)}</button>
+         </div>`
+      : ''}`;
+  document.getElementById(pid)?.focus();
+}
+
+function filterPicker(searchId) {
+  const q     = document.getElementById(searchId)?.value.toLowerCase() || '';
+  const pkr   = S.pendingPkr;
+  const listId = 'pl_items_' + (pkr?.picker_id || 'p');
+  const list  = document.getElementById(listId);
+  if (!list) return;
+
+  let visible = 0;
+  for (const item of list.querySelectorAll('.pick-item')) {
+    const lbl  = item.querySelector('.pick-label')?.textContent.toLowerCase() || '';
+    const meta = item.querySelector('.pick-meta')?.textContent.toLowerCase() || '';
+    const show = !q || lbl.includes(q) || meta.includes(q);
+    item.style.display = show ? '' : 'none';
+    if (show) visible++;
+  }
+  let noRes = list.querySelector('.no-res');
+  if (!visible && q) {
+    if (!noRes) { noRes = el('div', 'no-res'); list.appendChild(noRes); }
+    noRes.textContent = `No results for "${q}"`;
+    noRes.style.display = '';
+  } else if (noRes) {
+    noRes.style.display = 'none';
+  }
+}
+
+function renderTextInput(ph) {
+  inputArea().innerHTML = `
+    <div class="text-row">
+      <input type="text" id="txtIn" placeholder="${escA(ph || 'Type your message…')}"
+             onkeydown="if(event.key==='Enter')doSend()">
+      <button class="send-btn" onclick="doSend()" title="Send (Enter)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/>
+        </svg>
+      </button>
+    </div>`;
+  document.getElementById('txtIn')?.focus();
+}
+
+function setStrip(msg) {
+  inputArea().innerHTML = `<div class="status-strip">${esc(msg)}</div>`;
+}
+
+function disableInput()  { setStrip('Thinking…'); }
+function restoreInput()  {
+  if (S.inputMode === 'quick_replies' && S.pendingQR)  renderQR(S.pendingQR);
+  else if (S.inputMode === 'picker' && S.pendingPkr)   renderPicker(S.pendingPkr);
+  else if (S.inputMode === 'text')                     renderTextInput();
+}
+function switchToText()  { S.inputMode = 'text'; renderTextInput('Describe your issue…'); }
+
+// ── User actions ─────────────────────────────────────────────────────────────
+function doChoice(id, label) {
+  appendUser(label);
+  turn({ action: 'select_choice', choice_id: id, user_says: label });
+}
+function doPick(pickerId, itemId, itemLabel) {
+  appendUser(itemLabel);
+  turn({ action: 'pick_item', picker_id: pickerId, item_id: itemId, item_label: itemLabel });
+}
+function doSend() {
+  const inp  = document.getElementById('txtIn');
+  if (!inp) return;
+  const text = inp.value.trim();
+  if (!text) return;
+  inp.value = '';
+  appendUser(text);
+  turn({ action: 'send_message', text });
+}
+
+// ── Typing indicator ─────────────────────────────────────────────────────────
+function showTyping() {
+  if (document.getElementById('tyInd')) return;
+  const row = el('div', 'typing-row');
+  row.id = 'tyInd';
+  row.innerHTML = `<div class="av bot">🤖</div>
+    <div class="typing-dots"><span></span><span></span><span></span></div>`;
+  msgs().appendChild(row);
+  scrollBottom();
+}
+function removeTyping() { document.getElementById('tyInd')?.remove(); }
+
+// ── Debug panel ───────────────────────────────────────────────────────────────
+function updateDebug(d) {
+  S.flowId      = d.flow_id;
+  S.currentNode = d.current_node;
+  S.status      = d.status || '—';
+
+  document.getElementById('dbgId').textContent     = S.sessionId ? S.sessionId.slice(0,8)+'…' : '—';
+  document.getElementById('dbgFlow').textContent   = d.flow_id    || '—';
+  document.getElementById('dbgNode').textContent   = d.current_node || '—';
+  document.getElementById('dbgStatus').textContent = d.status     || '—';
+  document.getElementById('dbgLang').textContent   = S.language;
+
+  // Status badge
+  const badge = document.getElementById('statusBadge');
+  badge.textContent = d.status || 'idle';
+  badge.className   = 'badge ' + (d.status?.replace('_awaiting','').replace(/_/g,'') || '');
+  if (d.status?.includes('awaiting')) badge.classList.add('awaiting');
+  else if (d.status === 'active')     badge.classList.add('active');
+  else if (d.status === 'escalating') badge.classList.add('escalating');
+  else if (d.status === 'error')      badge.classList.add('error');
+  else if (['ended','satisfied','ticket_raised'].includes(d.status)) badge.classList.add('ended');
+
+  // Last response JSON
+  const sec = document.getElementById('lastRespSection');
+  sec.style.display = '';
+  document.getElementById('lastResp').textContent = JSON.stringify(d, null, 2);
+}
+
+async function checkHealth() {
+  try {
+    const r = await fetch(url('/health'));
+    const d = await r.json();
+    toast('💓 ' + JSON.stringify(d));
+  } catch(e) { toast('❌ API unreachable: ' + e.message, true); }
+}
+
+function copyId() {
+  if (!S.sessionId) { toast('No session yet'); return; }
+  navigator.clipboard?.writeText(S.sessionId).then(() => toast('Copied: ' + S.sessionId));
+}
+
+async function showCollected() {
+  if (!S.sessionId) { toast('No session'); return; }
+  try {
+    const r = await fetch(url('/ai-chatbot/v1/admin/sessions/' + S.sessionId + '/trace'), { headers: hdrs() });
+    if (r.status === 501) { toast('Trace endpoint not yet wired (Phase 1 stub)'); return; }
+    const d = await r.json();
+    const sec = document.getElementById('collectedSection');
+    sec.style.display = '';
+    document.getElementById('collectedData').textContent = JSON.stringify(d, null, 2);
+    toast('Trace loaded');
+  } catch(e) { toast('Error: ' + e.message, true); }
+}
+
+// ── Settings ───────────────────────────────────────────────────────────────
+function openSettings() {
+  document.getElementById('cfgApi').value = CFG.api;
+  document.getElementById('cfgJwt').value = CFG.jwt;
+  document.getElementById('settingsModal').classList.add('open');
+}
+function saveSettings() {
+  CFG.api = document.getElementById('cfgApi').value.replace(/\/$/, '');
+  CFG.jwt = document.getElementById('cfgJwt').value.trim() || 'dev-stub';
+  closeModal('settingsModal');
+  toast('Settings saved — starting new session…');
+  resetSession();
+}
+function closeModal(id)    { document.getElementById(id).classList.remove('open'); }
+function outsideClose(ev, id) { if (ev.target.id === id) closeModal(id); }
+
+function toggleSidebar() { document.getElementById('sidebar').classList.toggle('hidden'); }
+
+// ── Language change ──────────────────────────────────────────────────────────
+langEl().addEventListener('change', () => {
+  toast('Language changed → resetting session');
+  setTimeout(resetSession, 400);
+});
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+function msgs()        { return document.getElementById('messages'); }
+function inputArea()   { return document.getElementById('inputArea'); }
+function langEl()      { return document.getElementById('langSel'); }
+function clearMessages() { msgs().innerHTML = ''; }
+function scrollBottom() { requestAnimationFrame(() => { msgs().scrollTop = msgs().scrollHeight; }); }
+
+function el(tag, cls) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  return e;
+}
+
+function esc(s)  {
+  return String(s ?? '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function escA(s) { return String(s ?? '').replace(/'/g,"\\'").replace(/"/g,'&quot;'); }
+
+function md(text) {
+  // Minimal markdown: bold, italic, inline code, line breaks.
+  // HTML-escape first to prevent injection, then apply safe markup.
+  return esc(text)
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\n/g, '<br>');
+}
+
+function toast(msg, err) {
+  const t = el('div', 'toast' + (err ? ' err' : ''));
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 2600);
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', startSession);
+</script>
+</body>
+</html>

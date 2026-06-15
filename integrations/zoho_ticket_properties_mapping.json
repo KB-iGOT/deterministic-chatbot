@@ -1,0 +1,80 @@
+{
+  "_comment": "Maps Saathi internal ticket categories to Zoho Desk custom-field schema. Lifted from legacy/src/services/zoho_utils.py hardcoded templates. Refactor in Phase 1 — load at startup, render Zoho payload via Jinja against this file.",
+
+  "departments": {
+    "default": "your-dept-id"
+  },
+
+  "category_mapping": {
+    "CERTIFICATE_ISSUES": {
+      "cf_category": "Certificate",
+      "default_classification": "Query",
+      "default_priority": "P3",
+      "default_severity": "Sev 3",
+      "sub_categories": {
+        "NOT_RECEIVED": "Certificate not received",
+        "INCORRECT_NAME": "Name incorrect on certificate",
+        "DOWNLOAD_FAILS": "Cannot download certificate",
+        "QR_MISSING": "QR code missing on certificate"
+      }
+    },
+    "PROFILE_ISSUES": {
+      "cf_category": "Profile",
+      "default_classification": "Service Request",
+      "default_priority": "P3",
+      "default_severity": "Sev 3",
+      "sub_categories": {
+        "COMPLETION_PERCENT": "Profile completion not 100%",
+        "NAME_UPDATE": "Profile name update",
+        "PHOTO_UPDATE": "Profile / cover photo update",
+        "DESIGNATION_NOT_VERIFIED": "Designation verification pending"
+      }
+    },
+    "COURSE_ACCESS": {
+      "cf_category": "Course Access",
+      "default_classification": "Incident",
+      "default_priority": "P3",
+      "default_severity": "Sev 3",
+      "sub_categories": {
+        "PROGRESS_NOT_UPDATING": "Course progress stuck",
+        "CONTENT_NOT_OPENING": "Cannot open resource",
+        "SCORM_ISSUE": "SCORM module issue",
+        "PROGRESS_TRACKING_DISPUTED": "User claims complete, system shows incomplete"
+      }
+    },
+    "MASTER_DATA_REQUEST": {
+      "cf_category": "Master Data",
+      "default_classification": "Service Request",
+      "default_priority": "P3",
+      "default_severity": "Sev 3",
+      "sub_categories": {
+        "DESIGNATION_NOT_FOUND": "Designation missing from master",
+        "SERVICE_NOT_FOUND": "Service missing from master",
+        "MOTHER_TONGUE_NOT_FOUND": "Language missing from master"
+      }
+    },
+    "TECHNICAL_SUPPORT": {
+      "cf_category": "Technical Support",
+      "default_classification": "Incident",
+      "default_priority": "P2",
+      "default_severity": "Sev 2",
+      "sub_categories": {}
+    },
+    "GENERAL_INQUIRY": {
+      "cf_category": "General",
+      "default_classification": "Query",
+      "default_priority": "P4",
+      "default_severity": "Sev 4",
+      "sub_categories": {}
+    }
+  },
+
+  "common_custom_fields": {
+    "cf_source": "Bot",
+    "cf_layout": "Ticket Layout Form",
+    "cf_channel_source": "{{ ctx.channel }}",
+    "cf_bot_session_id": "{{ ctx.session_id }}",
+    "cf_flow_id": "{{ ctx.flow_id }}",
+    "cf_llm_involved": "{{ ctx.ticket_draft != None }}"
+  }
+}

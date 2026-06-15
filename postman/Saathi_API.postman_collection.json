@@ -1,0 +1,1136 @@
+{
+  "info": {
+    "_postman_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "name": "Saathi — iGOT Karmayogi Support API",
+    "description": "REST API for the Saathi chatbot — iGOT Karmayogi Bharat support assistant.\n\n## Auth modes\n\n**WITHOUT_JWT (local dev / AUTH_DISABLED=true)**\nSet `AUTH_DISABLED=true` in `.env`. The value of the `x-authenticated-user-token` header is used directly as `user_id`. Pass any UUID — no Keycloak required.\n\n**WITH_JWT (production / AUTH_DISABLED=false)**\nSet `AUTH_DISABLED=false` in `.env`. Pass a real Keycloak JWT as the `x-authenticated-user-token` header value. The `sub` claim (`f:<x>:<uuid>`) is automatically extracted as `user_id`.\n\n## Quick Setup\n\n1. **Local dev without JWT:** set `AUTH_DISABLED=true` in `.env`, use the default `auth_token` collection variable (any UUID).\n2. **Production testing:** set `auth_token` collection variable to a real Keycloak JWT, ensure `AUTH_DISABLED=false` in `.env`.\n3. **session_id** is auto-populated by the Start Session test script — run that request first before any turn requests.\n\n## Base URL\n\nDefault: `http://localhost:8000`. Override the `base_url` collection variable if running on a different host/port.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "session_id",
+      "value": "",
+      "type": "string",
+      "description": "Auto-filled by the Start Session test script. Run a Start Session request before using turn endpoints."
+    },
+    {
+      "key": "auth_token",
+      "value": "00000000-0000-0000-0000-000000000001",
+      "type": "string",
+      "description": "When AUTH_DISABLED=true in .env, this UUID is used directly as user_id. For production, replace with a real Keycloak JWT."
+    },
+    {
+      "key": "last_session_id",
+      "value": "",
+      "type": "string",
+      "description": "Backup copy of the most recently created session_id."
+    }
+  ],
+  "item": [
+    {
+      "name": "0 — Health",
+      "description": "Liveness check — no authentication required.",
+      "item": [
+        {
+          "name": "Health check",
+          "id": "f1a2b3c4-d5e6-7890-1234-abcdef012345",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": ["{{base_url}}"],
+              "path": ["health"]
+            },
+            "description": "Simple liveness probe. Returns HTTP 200 with `{\"status\": \"ok\"}` when the server is up. No authentication header needed."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "1 — Auth modes (READ FIRST)",
+      "description": "These two requests both call POST /ai-chatbot/v1/sessions but demonstrate the two authentication modes. Run one of them first — the test script auto-populates the session_id collection variable.\n\n- WITHOUT JWT: AUTH_DISABLED=true in .env — UUID in auth_token is used directly as user_id.\n- WITH JWT: AUTH_DISABLED=false in .env — pass a real Keycloak JWT.",
+      "item": [
+        {
+          "name": "Session Start — WITHOUT JWT (AUTH_DISABLED=true)",
+          "id": "a1111111-1111-1111-1111-111111111111",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text",
+                "description": "When AUTH_DISABLED=true, this UUID is used directly as user_id. No Keycloak required."
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"channel\": \"web\",\n  \"language\": \"en\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions"]
+            },
+            "description": "Creates a new chat session using dev/stub auth mode.\n\n**Pre-requisite:** set `AUTH_DISABLED=true` in your `.env` file.\n\nThe UUID in the `auth_token` collection variable is passed as the `x-authenticated-user-token` header. When AUTH_DISABLED=true, this value is used directly as user_id — no Keycloak JWT validation occurs.\n\nThe test script below auto-extracts `session_id` from the response and saves it to the `session_id` collection variable. All subsequent turn requests will use this value via `{{session_id}}`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const r = pm.response.json();",
+                  "if (r.session_id) {",
+                  "    pm.collectionVariables.set('session_id', r.session_id);",
+                  "    pm.collectionVariables.set('last_session_id', r.session_id);",
+                  "    console.log('session_id set to:', r.session_id);",
+                  "}",
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('session_id present', () => pm.expect(r.session_id).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Session Start — WITH JWT (AUTH_DISABLED=false)",
+          "id": "b2222222-2222-2222-2222-222222222222",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "<paste-real-keycloak-jwt-here>",
+                "type": "text",
+                "description": "Replace this with a real Keycloak JWT obtained from the iGOT portal."
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"channel\": \"web\",\n  \"language\": \"en\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions"]
+            },
+            "description": "Creates a new chat session using a real Keycloak JWT.\n\n**Pre-requisite:** set `AUTH_DISABLED=false` in your `.env` file (or leave it unset — false is the default).\n\nReplace the `x-authenticated-user-token` header value with a real Keycloak JWT from the iGOT portal. The `sub` claim (`f:<x>:<uuid>`) is automatically extracted as `user_id`.\n\nThe test script auto-extracts `session_id` from the response."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const r = pm.response.json();",
+                  "if (r.session_id) {",
+                  "    pm.collectionVariables.set('session_id', r.session_id);",
+                  "    pm.collectionVariables.set('last_session_id', r.session_id);",
+                  "    console.log('session_id set to:', r.session_id);",
+                  "}",
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('session_id present', () => pm.expect(r.session_id).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "2 — Session lifecycle",
+      "description": "Core session management endpoints.",
+      "item": [
+        {
+          "name": "Start Session (web/en)",
+          "id": "c3333333-3333-3333-3333-333333333333",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"channel\": \"web\",\n  \"language\": \"en\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions"]
+            },
+            "description": "Creates a new session in English (web channel). The response contains the greeting message and topic picker. The test script auto-populates the `session_id` collection variable."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const r = pm.response.json();",
+                  "if (r.session_id) {",
+                  "    pm.collectionVariables.set('session_id', r.session_id);",
+                  "    pm.collectionVariables.set('last_session_id', r.session_id);",
+                  "    console.log('session_id set to:', r.session_id);",
+                  "}",
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('session_id present', () => pm.expect(r.session_id).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Start Session (Hindi)",
+          "id": "d4444444-4444-4444-4444-444444444444",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"channel\": \"web\",\n  \"language\": \"hi\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions"]
+            },
+            "description": "Creates a new session in Hindi. The translation pipeline (Gemini → Google Translate → Bhashini fallback) translates bot messages before delivery."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const r = pm.response.json();",
+                  "if (r.session_id) {",
+                  "    pm.collectionVariables.set('session_id', r.session_id);",
+                  "    pm.collectionVariables.set('last_session_id', r.session_id);",
+                  "    console.log('session_id set to:', r.session_id);",
+                  "}",
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Health Check",
+          "id": "e5555555-5555-5555-5555-555555555555",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": ["{{base_url}}"],
+              "path": ["health"]
+            },
+            "description": "Convenience copy of the health check for use within a flow sequence."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "3 — Topic selection",
+      "description": "One request per active flow. All POST to /ai-chatbot/v1/sessions/{{session_id}}/turn with action=select_choice and the flow ID as choice_id.\n\nRun a Start Session request first to populate the session_id variable.",
+      "item": [
+        {
+          "name": "Topic: CERTIFICATE_DOWNLOAD",
+          "id": "f6666661-6666-6666-6666-666666666661",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"select_choice\",\n  \"choice_id\": \"CERTIFICATE_DOWNLOAD\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Selects the CERTIFICATE_DOWNLOAD flow (Certificate not generated / wrong name). The engine loads and starts the flow, returning the first set of bot activities."
+          },
+          "response": []
+        },
+        {
+          "name": "Topic: ACCESS_REVOKED",
+          "id": "f6666662-6666-6666-6666-666666666662",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"select_choice\",\n  \"choice_id\": \"ACCESS_REVOKED\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Selects the ACCESS_REVOKED flow (MDO access revoked)."
+          },
+          "response": []
+        },
+        {
+          "name": "Topic: COURSE_PROGRESS_ISSUE",
+          "id": "f6666663-6666-6666-6666-666666666663",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"select_choice\",\n  \"choice_id\": \"COURSE_PROGRESS_ISSUE\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Selects the COURSE_PROGRESS_ISSUE flow (Course progress stuck)."
+          },
+          "response": []
+        },
+        {
+          "name": "Topic: RESOURCE_NOT_OPENING",
+          "id": "f6666664-6666-6666-6666-666666666664",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"select_choice\",\n  \"choice_id\": \"RESOURCE_NOT_OPENING\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Selects the RESOURCE_NOT_OPENING flow (Resource / content not opening)."
+          },
+          "response": []
+        },
+        {
+          "name": "Topic: FEEDBACK_RATING_ISSUE",
+          "id": "f6666665-6666-6666-6666-666666666665",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"select_choice\",\n  \"choice_id\": \"FEEDBACK_RATING_ISSUE\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Selects the FEEDBACK_RATING_ISSUE flow (Feedback / Rating issue)."
+          },
+          "response": []
+        },
+        {
+          "name": "Topic: PROFILE_VERIFICATION_DESIGNATION",
+          "id": "f6666666-6666-6666-6666-666666666666",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"select_choice\",\n  \"choice_id\": \"PROFILE_VERIFICATION_DESIGNATION\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Selects the PROFILE_VERIFICATION_DESIGNATION flow (Designation / Group not verified)."
+          },
+          "response": []
+        },
+        {
+          "name": "Topic: LEADERBOARD_ISSUE",
+          "id": "f6666667-6666-6666-6666-666666666667",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"select_choice\",\n  \"choice_id\": \"LEADERBOARD_ISSUE\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Selects the LEADERBOARD_ISSUE flow (Leaderboard not showing)."
+          },
+          "response": []
+        },
+        {
+          "name": "Topic: BULK_PROFILE_UPDATE",
+          "id": "f6666668-6666-6666-6666-666666666668",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"select_choice\",\n  \"choice_id\": \"BULK_PROFILE_UPDATE\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Selects the BULK_PROFILE_UPDATE flow (MDO bulk profile upload)."
+          },
+          "response": []
+        },
+        {
+          "name": "Topic: UNENROLL_REQUEST",
+          "id": "f6666669-6666-6666-6666-666666666669",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"select_choice\",\n  \"choice_id\": \"UNENROLL_REQUEST\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Selects the UNENROLL_REQUEST flow (Unenroll from course/program/event)."
+          },
+          "response": []
+        },
+        {
+          "name": "Topic: WEEKLY_CLAP_ISSUE",
+          "id": "f666666a-6666-6666-6666-66666666666a",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"select_choice\",\n  \"choice_id\": \"WEEKLY_CLAP_ISSUE\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Selects the WEEKLY_CLAP_ISSUE flow (Weekly clap not updated)."
+          },
+          "response": []
+        },
+        {
+          "name": "Topic: DOWNLOAD_REPORT_ISSUE",
+          "id": "f666666b-6666-6666-6666-66666666666b",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"select_choice\",\n  \"choice_id\": \"DOWNLOAD_REPORT_ISSUE\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Selects the DOWNLOAD_REPORT_ISSUE flow (Unable to download report)."
+          },
+          "response": []
+        },
+        {
+          "name": "Topic: KARMA_POINTS_ISSUE",
+          "id": "f666666c-6666-6666-6666-66666666666c",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"select_choice\",\n  \"choice_id\": \"KARMA_POINTS_ISSUE\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Selects the KARMA_POINTS_ISSUE flow (Karma points issue)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "4 — User actions",
+      "description": "Generic action templates for use during a running flow. Copy and modify these to interact with any flow step.\n\nAll actions require an active session — run a Start Session request first.",
+      "item": [
+        {
+          "name": "Action: select_choice",
+          "id": "a7777771-7777-7777-7777-777777777771",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"select_choice\",\n  \"choice_id\": \"REPLACE_WITH_CHOICE_ID\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Select a quick-reply button or menu option. Replace `REPLACE_WITH_CHOICE_ID` with the `choice_id` value from the button in the previous response's `pending_activities`."
+          },
+          "response": []
+        },
+        {
+          "name": "Action: send_message",
+          "id": "a7777772-7777-7777-7777-777777777772",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"send_message\",\n  \"text\": \"REPLACE_WITH_TEXT\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Send a free-text message. Used when a `collect` node with input type `text` is active. Replace `REPLACE_WITH_TEXT` with the user's message."
+          },
+          "response": []
+        },
+        {
+          "name": "Action: pick_item",
+          "id": "a7777773-7777-7777-7777-777777777773",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"pick_item\",\n  \"picker_id\": \"REPLACE_PICKER_ID\",\n  \"item_id\": \"REPLACE_ITEM_ID\",\n  \"item_label\": \"REPLACE_LABEL\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Pick an item from a dynamic list (e.g. course picker, enrollment picker). The `picker_id` comes from the active `collect` node's picker configuration in the YAML. The `item_id` and `item_label` come from the list returned by the preceding `api_call` node."
+          },
+          "response": []
+        },
+        {
+          "name": "Action: request_other",
+          "id": "a7777774-7777-7777-7777-777777777774",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"request_other\",\n  \"other_query\": \"REPLACE_WITH_TEXT\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Request help with something not covered by the available choices. Used when the user selects an 'Other' option that triggers a free-text escalation path."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "5 — Complete flow walkthrough (CERTIFICATE_DOWNLOAD)",
+      "description": "Step-by-step scripted walkthrough of the CERTIFICATE_DOWNLOAD flow from start to resolution.\n\nRun each step in order. Step 1 auto-populates session_id. Steps 2–5 use {{session_id}}.\n\nThis demonstrates a complete happy-path: start → topic → cert type → course selection → resolved.",
+      "item": [
+        {
+          "name": "Step 1: Start session",
+          "id": "b8888881-8888-8888-8888-888888888881",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"channel\": \"web\",\n  \"language\": \"en\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions"]
+            },
+            "description": "Step 1 of 5: Start a new session.\n\nExpected response: HTTP 200 with `session_id`, `pending_activities` containing the greeting message and a topic picker with all 12 available flows as choices.\n\nThe test script extracts and saves `session_id` to the collection variable automatically."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const r = pm.response.json();",
+                  "if (r.session_id) {",
+                  "    pm.collectionVariables.set('session_id', r.session_id);",
+                  "    pm.collectionVariables.set('last_session_id', r.session_id);",
+                  "    console.log('[Step 1] session_id set to:', r.session_id);",
+                  "}",
+                  "pm.test('Step 1: Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Step 1: session_id returned', () => pm.expect(r.session_id).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Step 2: Select CERTIFICATE_DOWNLOAD topic",
+          "id": "b8888882-8888-8888-8888-888888888882",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"select_choice\",\n  \"choice_id\": \"CERTIFICATE_DOWNLOAD\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Step 2 of 5: Select the CERTIFICATE_DOWNLOAD topic from the menu.\n\nExpected response: the engine loads the certificate flow and returns the first question — asking what type of certificate is affected (course, program, etc.).\n\nLook for a `message` or `collect` activity in `pending_activities` with quick-reply buttons for certificate type."
+          },
+          "response": []
+        },
+        {
+          "name": "Step 3: Select cert type = course",
+          "id": "b8888883-8888-8888-8888-888888888883",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"select_choice\",\n  \"choice_id\": \"course\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Step 3 of 5: Select 'course' as the certificate type.\n\nExpected response: the engine calls the Karmayogi enrollment API in the background (api_call node) and returns a course picker. The `pending_activities` should contain a `collect` activity with a list of enrolled courses.\n\nNote the `picker_id` and course IDs from the response — you'll need them for Step 4."
+          },
+          "response": []
+        },
+        {
+          "name": "Step 4: Pick a course (example)",
+          "id": "b8888884-8888-8888-8888-888888888884",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"pick_item\",\n  \"picker_id\": \"course_picker\",\n  \"item_id\": \"COURSE_ID_FROM_PREV_RESPONSE\",\n  \"item_label\": \"My Course Name\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Step 4 of 5: Pick a course from the list returned in Step 3.\n\nBefore sending: replace `COURSE_ID_FROM_PREV_RESPONSE` with an actual course ID from Step 3's response, and `My Course Name` with the course's display label.\n\nExpected response: the engine shows a resolution node with troubleshooting steps for certificate issues. Look for `pending_activities` containing a `resolution` activity with numbered steps and a yes/no follow-up."
+          },
+          "response": []
+        },
+        {
+          "name": "Step 5: Mark as resolved",
+          "id": "b8888885-8888-8888-8888-888888888885",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"select_choice\",\n  \"choice_id\": \"yes_resolved\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}/turn",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}", "turn"]
+            },
+            "description": "Step 5 of 5: Indicate that the issue was resolved by the self-serve steps.\n\nExpected response: the engine reaches the `end` node with `outcome: self_served`. The `pending_activities` should contain an `end` activity with a satisfied banner.\n\nThis completes the happy path for the CERTIFICATE_DOWNLOAD flow."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "6 — Admin (Phase 2 — returns 501)",
+      "description": "Admin and DPDP endpoints. These are reserved for Phase 2 and currently return HTTP 501 Not Implemented.",
+      "item": [
+        {
+          "name": "Resume session (501)",
+          "id": "c9999991-9999-9999-9999-999999999991",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["chat", "sessions", "{{session_id}}"]
+            },
+            "description": "Retrieve full session state. Phase 2 — currently returns HTTP 501 Not Implemented."
+          },
+          "response": []
+        },
+        {
+          "name": "Get trace (501)",
+          "id": "c9999992-9999-9999-9999-999999999992",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/admin/sessions/{{session_id}}/trace",
+              "host": ["{{base_url}}"],
+              "path": ["admin", "sessions", "{{session_id}}", "trace"]
+            },
+            "description": "Retrieve the full decision trace for a session (every node visited, branch decisions, API call results). Phase 2 — currently returns HTTP 501 Not Implemented."
+          },
+          "response": []
+        },
+        {
+          "name": "DPDP delete (501)",
+          "id": "c9999993-9999-9999-9999-999999999993",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/admin/sessions/{{session_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["admin", "sessions", "{{session_id}}"]
+            },
+            "description": "Delete all personal data for a session (DPDP / right-to-erasure compliance). Phase 2 — currently returns HTTP 501 Not Implemented."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

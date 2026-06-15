@@ -1,0 +1,364 @@
+# =============================================================================
+# MODE B — DETERMINISTIC + LLM TICKET TAIL
+# =============================================================================
+# Flow: Course / Program / Event Progress Issue (UC-01)
+#
+# Mode B pattern:
+#   1. User picks affected course from their enrollment list
+#   2. Check completion percentage and incomplete resource IDs
+#   3. Fetch resource metadata (name, mimeType) → SCORM vs Non-SCORM guidance
+#   4. If user says still not resolved → transfer_llm (auto_raise:true)
+#      generates ticket summary → Zoho ticket created automatically
+#
+# APIs used:
+#   POST /api/course/private/v4/user/enrollment/list/{user_id}
+#   GET  /api/content/v1/read/{course_id}
+#   POST /api/content/v1/search
+# =============================================================================
+
+flow_id: COURSE_PROGRESS_ISSUE
+flow_type: deterministic_with_llm_fallback
+version: 2
+
+metadata:
+  category:         course
+  menu_label:       "📊 Course progress issue"
+  menu_group:       "Learning"
+  menu_order:       3
+  classification:   Incident
+  default_portal:   Learner Portal
+  default_priority: P3
+  default_severity: Sev 3
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "course progress not updating"
+    - "progress stuck"
+    - "module not marked complete"
+    - "course not completing"
+    - "progress issue"
+    - "course progress problem"
+    - "program progress not updating"
+    - "event progress stuck"
+
+entry_node: pick_course_from_list
+
+imports:
+  - _terminal
+  - fragment: _zoho_ticket
+    with:
+      cf_category:     course
+      cf_sub_category: course_progress
+      cf_flow_id:      COURSE_PROGRESS_ISSUE
+  - fragment: _enrollment_picker
+    with:
+      node_id:       pick_course_from_list
+      prompt_text:   "Here are your enrolled courses. Please select the one you are having trouble with:"
+      field_name:    course_id
+      field_prefix:  ""
+      next:          branch_on_completion
+
+nodes:
+
+  # pick_course_from_list — injected from _shared/_enrollment_picker.yaml
+
+  # ===========================================================================
+  # 2. Branch on completion percentage and incomplete resource IDs
+  # ===========================================================================
+  - id: branch_on_completion
+    type: branch
+    rules:
+      - { if: "ctx.collected.completion_pct == 100",
+          then: resolution_already_complete }
+    default: api_read_course_content
+
+  # Resolution: already complete
+  - id: resolution_already_complete
+    type: message
+    prompt:
+      text: |
+        Our records show that **{{ ctx.collected.course_name }}** is already marked as **100% complete** for your account.
+
+        If your progress isn't reflecting correctly in the UI, try logging out and back in to refresh your view.
+    next: progress_resolution_check
+
+  # ===========================================================================
+  # 2b. Cross-check leaf nodes from content/read API
+  # API: GET /api/content/v1/read/{course_id}
+  # Computes true incomplete_ids = leafNodes − completed_ids (from enrollment).
+  # This catches resources the user has never opened (absent from langContentStatus).
+  # Falls back to enrollment-based incomplete_ids on error.
+  # ===========================================================================
+  - id: api_read_course_content
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/content/v1/read/{{ ctx.collected.course_id }}"
+    response_mapping:
+      - from: "$.content.leafNodes"
+        to: collected.incomplete_ids
+        transform: diff_leaf_nodes
+        transform_ctx_key: collected.completed_ids
+    on_success: branch_on_leaf_ids_available
+    on_error:
+      any: api_fetch_resource_metadata
+    timeout_ms: 8000
+
+  # Branch: if leaf-node diff yields nothing to do, the course is actually complete
+  - id: branch_on_leaf_ids_available
+    type: branch
+    rules:
+      - { if: "len(ctx.collected.incomplete_ids) == 0",
+          then: resolution_already_complete }
+    default: api_fetch_resource_metadata
+
+  # ===========================================================================
+  # 3. Fetch resource metadata for incomplete resources
+  # API: POST /api/content/v1/search
+  # ===========================================================================
+  - id: api_fetch_resource_metadata
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/content/v1/search"
+      body:
+        request:
+          filters:
+            identifier: "{{ ctx.collected.incomplete_ids }}"
+          isSecureSettingsDisabled: true
+          sort_by:
+            createdOn: "desc"
+          fields: ["identifier", "name", "mimeType", "status", "duration", "primaryCategory"]
+          facets: ["status"]
+          limit: 1000
+    response_mapping:
+      - { from: "$.content[*].name",  to: collected.incomplete_resource_names,    transform: extract_all_names }
+      - { from: "$.content[*].mimeType", to: collected.has_scorm_resources,        transform: detect_scorm }
+      - { from: "$.content[*]",        to: collected.scorm_resource_name,          transform: extract_scorm_resource_name }
+      - { from: "$.content[*]",        to: collected.scorm_resource_duration_min,  transform: extract_scorm_duration_minutes }
+      - { from: "$.content[*]",        to: collected.all_resources_assessment,     transform: detect_assessment_only }
+    on_success: branch_on_resource_type
+    on_error:
+      any: resolution_generic_error
+    timeout_ms: 8000
+
+  # ===========================================================================
+  # 4. Route to SCORM or standard guidance
+  # ===========================================================================
+  - id: branch_on_resource_type
+    type: branch
+    rules:
+      - { if: "ctx.collected.all_resources_assessment == true", then: resolution_assessment_guidance }
+      - { if: "ctx.collected.has_scorm_resources == true",      then: resolution_scorm_guidance }
+    default: resolution_non_scorm_guidance
+
+  # Resolution — SCORM resource
+  - id: resolution_scorm_guidance
+    type: resolution
+    prompt:
+      text: |
+        We see that you have enrolled in **{{ ctx.collected.course_name }}**.
+
+        The resource titled **“{{ ctx.collected.scorm_resource_name }}”** is still **In Progress** or **Not Started**.
+
+        The resource is in **SCORM format**.
+
+        Please note the following:
+        - The course is meant to be understood and completed in **one session**.
+        - If you try to increase the playback speed, your progress may **not be recorded correctly**.
+        - This may cause issues while generating your **course certificate**.
+
+        **Additional Instruction:**
+        If the resource duration is **{{ ctx.collected.scorm_resource_duration_min }} minutes**, you must spend at least **{{ ctx.collected.scorm_resource_duration_min }} minutes** on that resource.
+
+        At the end, click the **“Next”** button in the upper-right corner to move to the next resource. Only then will the progress reflect as completed.
+    steps:
+      - "Go to **Profile**"
+      - "Click on **My Learning**"
+      - "Open the **In Progress** section under Contents"
+      - "Locate and select **{{ ctx.collected.course_name }}**"
+      - "Click on **Resume**"
+      - "Expand each module by clicking the **plus (+) icon**"
+      - "Check for content items **without a blue tick mark**"
+      - "All modules must show a **blue tick** to complete the course 100%"
+      - "Resume and complete the pending videos or content from the **top-right corner** until all items are marked complete"
+    follow_up:
+      text: "Has your issue been resolved? Please let us know if you need any further assistance."
+      quick_replies:
+        - { id: YES,     label: "✅ Yes, progress updated" }
+        - { id: NO,      label: "❌ No, still not updating" }
+        - { id: PENDING, label: "🕐 I'll try and come back" }
+    on_reply:
+      YES:     progress_updated_end
+      NO:      progress_collect_email
+      PENDING: progress_pending_end
+
+  # Resolution — Non-SCORM resource
+  - id: resolution_non_scorm_guidance
+    type: resolution
+    prompt:
+      text: |
+        We see that you have enrolled in **{{ ctx.collected.course_name }}**.
+
+        The following resources are still **In Progress** or **Not Started**:
+
+        {{ ctx.collected.incomplete_resource_names }}
+
+        Kindly revisit the course and complete the above resources to update your progress.
+    steps:
+      - "Go to **Profile** → **My Learning** → **In Progress**"
+      - "Locate **{{ ctx.collected.course_name }}** and click **Resume**"
+      - "Expand each module (click the **+** icon)"
+      - "Check for content items **without a blue tick mark**"
+      - "All modules must show a **blue tick** to complete the course 100%"
+      - "Resume and complete the pending videos or content from the **top-right corner** until all items are marked complete"
+    follow_up:
+      text: "Has your issue been resolved? Please let us know if you need any further assistance."
+      quick_replies:
+        - { id: YES,     label: "✅ Yes, progress updated" }
+        - { id: NO,      label: "❌ No, still not updating" }
+        - { id: PENDING, label: "🕐 I'll try and come back" }
+    on_reply:
+      YES:     progress_updated_end
+      NO:      progress_collect_email
+      PENDING: progress_pending_end
+
+  # ===========================================================================
+  # 5. Assessment guidance path
+  # ===========================================================================
+
+  # Resolution — Assessment pending
+  - id: resolution_assessment_guidance
+    type: resolution
+    prompt:
+      text: |
+        We checked your course progress for **{{ ctx.collected.course_name }}** and found that all learning resources have been completed. However, the **assessment** is still pending.
+
+        Kindly complete the assessment to achieve 100% course completion.
+    steps:
+      - "Go to **Profile** → **My Learning** → **In Progress**"
+      - "Open **{{ ctx.collected.course_name }}** → click **Resume**"
+      - "Expand each module (click the **+** icon) and locate the pending assessment"
+      - "Complete the assessment — all modules must show a **blue tick** for 100% completion"
+    follow_up:
+      text: "Were you able to complete the assessment?"
+      quick_replies:
+        - { id: YES,     label: "✅ Yes, completed successfully" }
+        - { id: NO,      label: "❌ No, facing an issue" }
+        - { id: PENDING, label: "🕐 I'll try and come back" }
+    on_reply:
+      YES:     progress_updated_end
+      NO:      assessment_issue_check
+      PENDING: progress_pending_end
+
+  # Ask what kind of issue the user faces with the assessment
+  - id: assessment_issue_check
+    type: message
+    prompt:
+      text: "I'm sorry to hear that. Could you tell me more about the issue you're facing?"
+    quick_replies:
+      - { id: error_msg,      label: "⚠️ Seeing an error message" }
+      - { id: limit_exceeded, label: "🚫 Assessment attempt limit exceeded" }
+      - { id: mobile,         label: "📱 Accessing through mobile" }
+    disable_input: true
+    on_reply:
+      error_msg:      progress_collect_email
+      limit_exceeded: progress_collect_email
+      mobile:         assessment_mobile_guidance
+
+  # Guidance when user is on mobile
+  - id: assessment_mobile_guidance
+    type: message
+    prompt:
+      text: |
+        Kindly try completing the assessment through the **web portal** at [iGOT Karmayogi](https://www.igotkarmayogi.gov.in), as some assessment-related issues may occur on mobile devices.
+    quick_replies:
+      - { id: yes, label: "✅ Yes, completed successfully" }
+      - { id: no,  label: "❌ No, still facing issue" }
+    disable_input: true
+    on_reply:
+      yes: progress_updated_end
+      no:  progress_collect_email
+
+  # Generic API error fallback
+  - id: resolution_generic_error
+    type: message
+    prompt:
+      text: |
+        I'm having trouble fetching your course details right now. Please try again in a few minutes.
+
+        If the issue persists, I can raise a support ticket for you.
+    quick_replies:
+      - { id: raise, label: "📋 Raise a ticket" }
+      - { id: skip,  label: "❌ I'll try later" }
+    disable_input: true
+    on_reply:
+      raise: progress_collect_email
+      skip:  satisfied
+
+  # --------------------------------------------------------------------------
+  # Post-resolution satisfaction check
+  # --------------------------------------------------------------------------
+  - id: progress_resolution_check
+    type: message
+    prompt:
+      text: "Did this resolve your course progress issue?"
+    quick_replies:
+      - { id: yes, label: "✅ Yes, resolved" }
+      - { id: no,  label: "❌ No, still facing issue" }
+    disable_input: true
+    on_reply:
+      yes: satisfied
+      no:  progress_collect_email
+
+  # --------------------------------------------------------------------------
+  # Escalation — collect email then auto-generate ticket
+  # --------------------------------------------------------------------------
+  - id: progress_collect_email
+    type: collect
+    prompt:
+      text: "I'll raise a support ticket for you. Please enter your **registered email address**:"
+    field:
+      name: collected.user_email
+      type: email
+      validation:
+        pattern:   "^[\\w.+-]+@[\\w-]+\\.[a-z]{2,}$"
+        error_msg: "That doesn't look like a valid email. Please try again."
+    next: progress_auto_ticket
+
+  - id: progress_auto_ticket
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user has a course progress issue that was not resolved through self-service.
+        Generate a Zoho support ticket.
+        Subject: "Course Progress Issue — <course_name>"
+        Description: include course_name, course_id, completion_pct,
+        resource_name (the incomplete resource), has_scorm_resources, user_email,
+        and a brief summary of the resolution steps attempted.
+      priority_override: P3
+    on_complete: confirm_ticket
+
+  # ===========================================================================
+  # Terminal shortcut nodes
+  # ===========================================================================
+  - id: progress_updated_end
+    type: message
+    prompt:
+      text: "That's great! 🎉 Remember: the course must be **100% complete** for the certificate to generate."
+    next: satisfied
+
+  - id: progress_pending_end
+    type: message
+    prompt:
+      text: "No problem! Please complete the pending resource at your convenience. If the issue persists, start a new session and choose **Course progress issue**."
+    next: satisfied

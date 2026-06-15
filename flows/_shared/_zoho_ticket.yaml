@@ -1,0 +1,69 @@
+fragment_id: zoho_ticket
+# Params: cf_category (required), cf_flow_id (required), cf_sub_category (optional, default: general)
+#
+# Bot-created ticket identification strategy:
+#   1. Subject prefix  "[ITSM Support v2]" — visible in Zoho ticket list, filterable by search
+#   2. cf_source       "ITSM Support v2"   — custom field, filterable in Zoho reports/views
+#   3. cf_bot_session_id / cf_flow_id      — traceable back to exact bot conversation
+#   4. cf_llm_involved "true"              — flags that LLM generated the ticket draft
+#   Note: Zoho rejects 'tags' in the creation body and /tagAssociation is not enabled on this plan.
+
+nodes:
+  - id: confirm_ticket
+    type: api_call
+    integration: zoho_desk_api
+    request:
+      method: POST
+      url: "/tickets"
+      body:
+        subject:        "[ITSM Support v2] {{ ctx.ticket_draft.subject }}"
+        description:    "{{ ctx.ticket_draft.description }}"
+        email:          "{{ ctx.collected.email | default('') }}"
+        phone:          "{{ ctx.collected.mobile | default('') }}"
+        priority:       "{{ ctx.ticket_draft.priority | default('P3') }}"
+        classification: "Service Request"
+        status:         "Open"
+        language:       "English"
+        channel:        "Bot"
+        departmentId:   "{{ env.ZOHO_DEPARTMENT_ID }}"
+        contact:
+          firstName:    "{{ ctx.collected.first_name | default('iGOT') }}"
+          lastName:     "{{ ctx.collected.last_name | default('User') }}"
+          email:        "{{ ctx.collected.email | default('') }}"
+          phone:        "{{ ctx.collected.mobile | default('') }}"
+        cf:
+          cf_severity:        "{{ ctx.ticket_draft.severity | default('Sev 3') }}"
+          cf_source:          "ITSM Support v2"
+          cf_category:        "{{ params.cf_category }}"
+          cf_sub_category:    "{{ params.cf_sub_category }}"
+          cf_portal:          "Learner Portal"
+          cf_channel_source:  "{{ ctx.channel }}"
+          cf_bot_session_id:  "{{ ctx.session_id }}"
+          cf_flow_id:         "{{ params.cf_flow_id }}"
+          cf_llm_involved:    "true"
+    response_mapping:
+      - { from: $.ticketNumber, to: collected.ticket_id }
+    on_success: ticket_confirmation
+    on_error:
+      any: ticket_failed
+    timeout_ms: 10000
+
+  - id: ticket_confirmation
+    type: message
+    prompt:
+      text: "✅ Ticket **#{{ ctx.collected.ticket_id }}** raised. L2 team will reach you within **2 business days**. 📧"
+    next: ticket_raised_end
+
+  - id: ticket_failed
+    type: message
+    prompt:
+      text: "I couldn't raise the ticket automatically. Please email **support@igotkarmayogi.gov.in** directly."
+    next: ticket_failed_end
+
+  - id: ticket_raised_end
+    type: end
+    outcome: ticket_raised
+
+  - id: ticket_failed_end
+    type: end
+    outcome: ticket_failed

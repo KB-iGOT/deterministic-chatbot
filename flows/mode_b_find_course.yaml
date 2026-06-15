@@ -1,0 +1,647 @@
+# =============================================================================
+# MODE B — DETERMINISTIC FLOW
+# =============================================================================
+# Flow: User Unable to Find a Course / Moderated Course / External Course /
+#       Event / Unable to Enroll in a Course
+#
+# Covers:
+#   PATH A — Marketplace / external course (Coursera, Harvard, etc.)
+#             Pure guidance — no active enrollment cycle. No API needed.
+#   PATH B — Regular iGOT course or program
+#             User profile → Composite Search → Access Settings → MDO/YP contact
+#   PATH C — Event on iGOT
+#             Composite Search → Access Settings → MDO/YP contact
+#
+# APIs used:
+#   GET  /api/user/private/v1/read/{user_id}  (karmayogi — user profile)
+#   POST /api/composite/v4/search             (karmayogi — course/event search)
+#   GET  /api/accessSettings/read/{id}        (cbp_api   — restriction check)
+#   POST /api/user/v1/search                  (karmayogi — MDO admin lookup)
+#   data_lookup: yp_lookup                    (local Excel — YP/AM fallback)
+#
+# KNOWN GAPS:
+#   [GAP-1] Semantic ≥90% match (SOP §4.2) approximated with keyword search;
+#           no embedding similarity available in YAML.
+#   [GAP-2] Multiple-results eligibility loop (SOP §10): only the top result is
+#           fully processed; user can retry with a refined name.
+#   [GAP-3] Course/event hyperlink URL pattern not confirmed by API team.
+#           Placeholder: https://portal.karmayogibharat.net/app/toc/{id}/overview
+#   [GAP-4] RESOLVED: Access Settings API userGroups criteria are now compared against
+#           the user's profileDetails.professionalDetails via the check_user_eligibility
+#           transform (criteriaKey "group", "designation", etc. matched field-by-field).
+# =============================================================================
+
+flow_id: FIND_COURSE
+flow_type: deterministic
+version: 1
+
+metadata:
+  category:         course
+  menu_label:       "🔍 Can't find a course or event"
+  menu_group:       "Learning"
+  menu_order:       5
+  classification:   Service Request
+  default_priority: P3
+  default_severity: Sev 3
+  default_portal:   Learner Portal
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "can't find course"
+    - "course not available"
+    - "unable to find course"
+    - "unable to enroll"
+    - "can't enroll"
+    - "course not found"
+    - "event not found"
+    - "can't find event"
+    - "moderated course"
+    - "external course"
+    - "coursera"
+    - "marketplace course"
+    - "course search"
+    - "find a course"
+
+entry_node: ask_marketplace_question
+
+imports:
+  - _terminal
+  - _karmayogi_user
+  - _mdo_admin_lookup
+  - _yp_lookup
+
+nodes:
+
+  # ===========================================================================
+  # STEP 1 — Identify whether the user is looking for a marketplace/external course
+  # ===========================================================================
+  - id: ask_marketplace_question
+    type: message
+    prompt:
+      text: |
+        Kindly confirm whether you are looking for a marketplace/external course such as Coursera or Harvard.
+    quick_replies:
+      - { id: yes, label: "Yes" }
+      - { id: no,  label: "No" }
+    disable_input: true
+    on_reply:
+      save_to: collected.is_marketplace
+      yes: marketplace_guidance
+      no:  ask_content_type
+
+  # ===========================================================================
+  # PATH A — Marketplace / external course
+  # No API call needed. Pure guidance. No ticket.
+  # ===========================================================================
+  - id: marketplace_guidance
+    type: resolution
+    prompt:
+      text: |
+        Thank you for confirming that you are looking for a marketplace/external course provided by platforms such as Coursera or Harvard.
+
+        Currently, there is no active enrollment cycle for marketplace/external courses this year.
+
+        Thank you for showing interest in learning through the platform. We request you to kindly wait until the next enrollment cycle is announced. You will be notified once the enrollment process starts.
+    steps: []
+    follow_up:
+      text: "Is there anything else I can help you with?"
+      quick_replies:
+        - { id: done, label: "✅ No, thank you" }
+    on_reply:
+      done: satisfied
+
+  # ===========================================================================
+  # STEP 3 — Identify whether the user is looking for a course or event
+  # ===========================================================================
+  - id: ask_content_type
+    type: message
+    prompt:
+      text: |
+        Kindly confirm whether you are looking for:
+    quick_replies:
+      - { id: course, label: "📘 A Course / Program" }
+      - { id: event,  label: "📅 An Event" }
+    disable_input: true
+    on_reply:
+      save_to: collected.content_type
+      course: fetch_user_profile
+      event:  ask_event_name
+
+  # ===========================================================================
+  # PATH B — COURSE / PROGRAM FLOW
+  # ===========================================================================
+
+  # fetch_user_profile — provided by _karmayogi_user fragment
+  # Stores: collected.first_name, collected.root_org_id, collected.org_channel
+  # on_success → diagnose_missing_fields (defined below)
+  # on_error   → escalate_api_error (defined below)
+
+  - id: diagnose_missing_fields
+    type: message
+    prompt:
+      text: |
+        Kindly share the exact course or program name you are searching for.
+    next: ask_course_name
+
+  - id: escalate_api_error
+    type: message
+    prompt:
+      text: |
+        ⚠️ We were unable to fetch your profile details at this moment. Please try again shortly.
+    quick_replies:
+      - { id: retry, label: "🔄 Try again" }
+      - { id: done,  label: "✅ Exit" }
+    on_reply:
+      retry: fetch_user_profile
+      done:  satisfied
+
+  # STEP 4.1 — Collect course name
+  - id: ask_course_name
+    type: collect
+    prompt:
+      text: ""   # preceded by diagnose_missing_fields message
+    field:
+      name:        collected.search_term
+      type:        text
+      placeholder: "e.g. Foundational Course for New Recruits"
+    next: composite_search
+
+  # STEP 4.2 — Composite Content Search
+  # POST /api/composite/v4/search
+  # Searches all statuses so DRAFT/REVIEW/RETIRED results surface with correct status message.
+  - id: composite_search
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/composite/v4/search"
+      body:
+        request:
+          query: "{{ ctx.collected.search_term }}"
+          filters:
+            primaryCategory: ["Course", "Program"]
+            status: ["Live", "Review", "Draft", "Retired"]
+          sort_by:
+            createdOn: "desc"
+          limit: 10
+    response_mapping:
+      - { from: "$.count",                 to: collected.composite_count }
+      - { from: "$.content[0].name",       to: collected.course_name_found }
+      - { from: "$.content[0].status",     to: collected.course_status }
+      - { from: "$.content[0].identifier", to: collected.course_id }
+    on_success: branch_composite_results
+    on_error:
+      any: search_api_error
+    timeout_ms: 8000
+
+  - id: branch_composite_results
+    type: branch
+    rules:
+      # STEP 5 — No result found
+      - { if: "ctx.collected.course_name_found == None or ctx.collected.composite_count == 0",
+          then: course_not_found }
+      # STEP 8 — Course is RETIRED
+      - { if: "ctx.collected.course_status == 'Retired'",
+          then: show_course_retired }
+      # STEP 9 — Course is DRAFT, REVIEW, or any other non-Live status
+      - { if: "ctx.collected.course_status != 'Live'",
+          then: show_course_unavailable }
+      # STEP 10 — Multiple results found (count > 1); still process top result for access
+      - { if: "ctx.collected.composite_count > 1",
+          then: fetch_access_settings_multi }
+    default: fetch_access_settings
+
+  # ===========================================================================
+  # STEP 6 / STEP 7 — Access Settings check for single Live result
+  # GET /api/accessSettings/read/{course_id}  (karmayogi — same portal base URL)
+  # Response: result.accessControl.userGroups[].userGroupCriteriaList[]
+  # Eligibility: user's profile fields compared against each criterion
+  # ===========================================================================
+  - id: fetch_access_settings
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/accessSettings/read/{{ ctx.collected.course_id }}"
+      headers:
+        wid: "{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.accessControl.userGroups",
+          to: collected.access_control_eligible,
+          transform: check_user_eligibility,
+          transform_ctx_key: collected.user_eligibility_ctx }
+    on_success: branch_on_access
+    on_error:
+      # No access config or 404 → treat as publicly accessible (SOP §6 / §14 Note)
+      not_found: show_course_public
+      any:       show_course_public
+    timeout_ms: 5000
+
+  - id: branch_on_access
+    type: branch
+    rules:
+      # STEP 11 — User does NOT meet access criteria → escalate to MDO
+      - { if: "ctx.collected.access_control_eligible == False", then: lookup_mdo_admin }
+    default: show_course_public
+
+  # STEP 7.1.1 — Course is LIVE and user is eligible (no restriction)
+  # [GAP-3] URL pattern not confirmed — using portal TOC path as placeholder
+  - id: show_course_public
+    type: resolution
+    prompt:
+      text: |
+        Upon checking, we found the requested course on the platform.
+
+        📘 **Course Name:** [{{ ctx.collected.course_name_found }}](https://portal.karmayogibharat.net/app/toc/{{ ctx.collected.course_id }}/overview)
+
+        Kindly use the above link to navigate to the course and proceed with enrollment.
+    steps: []
+    follow_up:
+      text: "Were you able to find and enroll in the course?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, found it" }
+        - { id: no,  label: "❌ No, still facing an issue" }
+    on_reply:
+      yes: satisfied
+      no:  ask_course_name
+
+  # ===========================================================================
+  # STEP 10 — Multiple results: access check on top result
+  # ===========================================================================
+  - id: fetch_access_settings_multi
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/accessSettings/read/{{ ctx.collected.course_id }}"
+      headers:
+        wid: "{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.accessControl.userGroups",
+          to: collected.access_control_eligible,
+          transform: check_user_eligibility,
+          transform_ctx_key: collected.user_eligibility_ctx }
+    on_success: branch_on_access_multi
+    on_error:
+      not_found: show_multiple_courses_public
+      any:       show_multiple_courses_public
+    timeout_ms: 5000
+
+  - id: branch_on_access_multi
+    type: branch
+    rules:
+      - { if: "ctx.collected.access_control_eligible == False", then: lookup_mdo_admin }
+    default: show_multiple_courses_public
+
+  # STEP 10.3 — Show top eligible course from multiple results
+  # [GAP-2] Full per-course eligibility loop not possible in YAML; top result shown.
+  - id: show_multiple_courses_public
+    type: resolution
+    prompt:
+      text: |
+        We found multiple courses matching your search criteria on the platform.
+
+        Kindly refer to the eligible course below and proceed with enrollment:
+
+        📘 **Course Name:** [{{ ctx.collected.course_name_found }}](https://portal.karmayogibharat.net/app/toc/{{ ctx.collected.course_id }}/overview)
+
+        If this is not the course you are looking for, please search again with a more specific name.
+    steps: []
+    follow_up:
+      text: "Did you find the course you were looking for?"
+      quick_replies:
+        - { id: yes,   label: "✅ Yes, found it" }
+        - { id: retry, label: "🔍 Search with a different name" }
+    on_reply:
+      yes:   satisfied
+      retry: ask_course_name
+
+  # ===========================================================================
+  # STEP 8 — Course is RETIRED
+  # ===========================================================================
+  - id: show_course_retired
+    type: resolution
+    prompt:
+      text: |
+        Upon checking, we found that the requested course **{{ ctx.collected.course_name_found }}** has already been retired and is no longer available for enrollment on the platform.
+    steps: []
+    follow_up:
+      text: "Is there anything else I can help you with?"
+      quick_replies:
+        - { id: retry, label: "🔍 Search for another course" }
+        - { id: done,  label: "✅ No, thank you" }
+    on_reply:
+      retry: ask_course_name
+      done:  satisfied
+
+  # ===========================================================================
+  # STEP 9 — Course is DRAFT / UNDER REVIEW / other non-Live status
+  # ===========================================================================
+  - id: show_course_unavailable
+    type: resolution
+    prompt:
+      text: |
+        Upon checking, we found that the requested course **{{ ctx.collected.course_name_found }}** is currently under review.
+
+        Hence, the course is temporarily unavailable for enrollment at this moment.
+    steps: []
+    follow_up:
+      text: "Is there anything else I can help you with?"
+      quick_replies:
+        - { id: retry, label: "🔍 Search for another course" }
+        - { id: done,  label: "✅ No, thank you" }
+    on_reply:
+      retry: ask_course_name
+      done:  satisfied
+
+  # ===========================================================================
+  # STEP 5 — Course not found → retry loop (no ticket)
+  # ===========================================================================
+  - id: course_not_found
+    type: resolution
+    prompt:
+      text: |
+        We are unable to find the shared course name **"{{ ctx.collected.search_term }}"** in the system/database.
+
+        We request you to kindly share the exact course name so that we can further check and assist you accordingly.
+    steps: []
+    follow_up:
+      text: "Please share the exact course name to search again."
+      quick_replies:
+        - { id: retry, label: "🔍 Try a different name" }
+        - { id: done,  label: "✅ Exit" }
+    on_reply:
+      retry: ask_course_name
+      done:  satisfied
+
+  # ===========================================================================
+  # MDO Admin lookup — provided by _mdo_admin_lookup fragment
+  # on_success → mdo_found_result (defined below)
+  # on_error   → mdo_api_error (defined below)
+  # ===========================================================================
+
+  # STEP 7.1.2 / STEP 13.1 — Branch on MDO admin count
+  - id: mdo_found_result
+    type: branch
+    rules:
+      - { if: "ctx.collected.mdo_admin_count == 0 or ctx.collected.mdo_admin_count == None",
+          then: lookup_yp_contact }
+    default: show_mdo_contact
+
+  # MDO found — show contact details
+  - id: show_mdo_contact
+    type: resolution
+    prompt:
+      text: |
+        Upon checking, we found that the course access criteria does not match your current profile attributes.
+
+        We request you to connect with the concerned MDO/YP for further assistance regarding course eligibility and access.
+
+        Please find the contact details below:
+
+        👤 **Name:** {{ ctx.collected.mdo_admin_name }}
+        📧 **Email ID:** {{ ctx.collected.mdo_admin_email }}
+    steps: []
+    follow_up:
+      text: "Is there anything else I can help you with?"
+      quick_replies:
+        - { id: done, label: "✅ No, thank you" }
+    on_reply:
+      done: satisfied
+
+  - id: mdo_api_error
+    type: branch
+    rules: []
+    default: lookup_yp_contact
+
+  # ===========================================================================
+  # YP/AM lookup — provided by _yp_lookup fragment
+  # on_success → yp_found_result (defined below)
+  # on_error   → yp_not_found (defined below)
+  # ===========================================================================
+
+  # YP found — show contact details
+  - id: yp_found_result
+    type: resolution
+    prompt:
+      text: |
+        Upon checking, we found that the course access criteria does not match your current profile attributes.
+
+        We request you to connect with the concerned YP/AM for further assistance regarding course eligibility and access.
+
+        Please find the contact details below:
+
+        👤 **Name:** {{ ctx.collected.yp_name }}
+        📧 **Email ID:** {{ ctx.collected.yp_email }}
+        📞 **Mobile:** {{ ctx.collected.yp_mobile }}
+    steps: []
+    follow_up:
+      text: "Is there anything else I can help you with?"
+      quick_replies:
+        - { id: done, label: "✅ No, thank you" }
+    on_reply:
+      done: satisfied
+
+  # MDO not found AND YP not found
+  - id: yp_not_found
+    type: resolution
+    prompt:
+      text: |
+        Upon checking, we found that the course access criteria does not match your current profile attributes.
+
+        We request you to connect with the concerned MDO or YP for further assistance regarding course eligibility and access.
+    steps: []
+    follow_up:
+      text: "Is there anything else I can help you with?"
+      quick_replies:
+        - { id: done, label: "✅ No, thank you" }
+    on_reply:
+      done: satisfied
+
+  # Search API error
+  - id: search_api_error
+    type: message
+    prompt:
+      text: |
+        ⚠️ Search is unavailable right now. Please try again.
+    quick_replies:
+      - { id: retry, label: "🔄 Try again" }
+      - { id: done,  label: "✅ Exit" }
+    on_reply:
+      retry: ask_course_name
+      done:  satisfied
+
+  # ===========================================================================
+  # PATH C — EVENT FLOW
+  # ===========================================================================
+
+  # STEP 15.1 — Ask for event name
+  - id: ask_event_name
+    type: collect
+    prompt:
+      text: |
+        Kindly share the exact event name that you are searching for.
+    field:
+      name:        collected.event_name
+      type:        text
+      placeholder: "e.g. Digital Leadership Summit 2026"
+    next: composite_event_search
+
+  # STEP 15.2 — Composite Event Search
+  # POST /api/composite/v4/search  (no primaryCategory filter so events are included)
+  - id: composite_event_search
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/composite/v4/search"
+      body:
+        request:
+          query: "{{ ctx.collected.event_name }}"
+          filters:
+            primaryCategory: ["Event"]
+            status: ["Live", "Review", "Draft", "Retired"]
+          sort_by:
+            createdOn: "desc"
+          limit: 10
+    response_mapping:
+      - { from: "$.count",                 to: collected.event_search_count }
+      - { from: "$.content[0].name",       to: collected.event_name_found }
+      - { from: "$.content[0].status",     to: collected.event_status }
+      - { from: "$.content[0].identifier", to: collected.event_id }
+    on_success: branch_event_results
+    on_error:
+      any: event_search_error
+    timeout_ms: 8000
+
+  # STEP 17.1 — Branch on event status
+  - id: branch_event_results
+    type: branch
+    rules:
+      # STEP 16 — No event found → retry loop (no ticket)
+      - { if: "ctx.collected.event_name_found == None or ctx.collected.event_search_count == 0",
+          then: event_not_found }
+      # STEP 18 — Event is LIVE → check access eligibility
+      - { if: "ctx.collected.event_status == 'Live'",
+          then: fetch_event_access_settings }
+      # Retired event
+      - { if: "ctx.collected.event_status == 'Retired'",
+          then: show_event_retired }
+    default: show_event_unavailable
+
+  # STEP 17.2 / STEP 19 — Access Settings check for event
+  # GET /api/accessSettings/read/{event_id}  (karmayogi — same portal base URL)
+  - id: fetch_event_access_settings
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/accessSettings/read/{{ ctx.collected.event_id }}"
+      headers:
+        wid: "{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.accessControl.userGroups",
+          to: collected.event_access_control_eligible,
+          transform: check_user_eligibility,
+          transform_ctx_key: collected.user_eligibility_ctx }
+    on_success: branch_event_access
+    on_error:
+      # No access config → treat as publicly accessible
+      not_found: show_event_public
+      any:       show_event_public
+    timeout_ms: 5000
+
+  # STEP 18.1 — Branch on event access eligibility
+  - id: branch_event_access
+    type: branch
+    rules:
+      # User does NOT meet access criteria → MDO/YP escalation
+      - { if: "ctx.collected.event_access_control_eligible == False", then: lookup_mdo_admin }
+    default: show_event_public
+
+  # STEP 18.1 — Event is LIVE and user is eligible
+  # [GAP-3] URL pattern not confirmed — using portal path as placeholder
+  - id: show_event_public
+    type: resolution
+    prompt:
+      text: |
+        Upon checking, we found the requested event on the platform.
+
+        📅 **Event Name:** [{{ ctx.collected.event_name_found }}](https://portal.karmayogibharat.net/app/toc/{{ ctx.collected.event_id }}/overview)
+
+        Kindly use the above link to access the event and proceed accordingly.
+    steps: []
+    follow_up:
+      text: "Were you able to find and join the event?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, found it" }
+        - { id: no,  label: "❌ No, still can't find it" }
+    on_reply:
+      yes: satisfied
+      no:  ask_event_name
+
+  # Event retired
+  - id: show_event_retired
+    type: resolution
+    prompt:
+      text: |
+        The event **{{ ctx.collected.event_name_found }}** has been retired from the platform and is no longer available.
+    steps: []
+    follow_up:
+      text: "Is there anything else I can help you with?"
+      quick_replies:
+        - { id: retry, label: "🔍 Search for another event" }
+        - { id: done,  label: "✅ No, thank you" }
+    on_reply:
+      retry: ask_event_name
+      done:  satisfied
+
+  # Event not Live (DRAFT / REVIEW / other)
+  - id: show_event_unavailable
+    type: resolution
+    prompt:
+      text: |
+        The event **{{ ctx.collected.event_name_found }}** was found but is currently not available (Status: {{ ctx.collected.event_status or "Under Review" }}).
+
+        It may be upcoming or under modification — please check back later.
+    steps: []
+    follow_up:
+      text: "Is there anything else I can help you with?"
+      quick_replies:
+        - { id: retry, label: "🔍 Search for another event" }
+        - { id: done,  label: "✅ No, thank you" }
+    on_reply:
+      retry: ask_event_name
+      done:  satisfied
+
+  # STEP 16.1 — Event not found → retry loop (no ticket)
+  - id: event_not_found
+    type: resolution
+    prompt:
+      text: |
+        We are unable to find the shared event name **"{{ ctx.collected.event_name }}"** in the system/database.
+
+        We request you to kindly share the exact event name so that we can further check and assist you accordingly.
+    steps: []
+    follow_up:
+      text: "Please share the exact event name to search again."
+      quick_replies:
+        - { id: retry, label: "🔍 Try a different name" }
+        - { id: done,  label: "✅ Exit" }
+    on_reply:
+      retry: ask_event_name
+      done:  satisfied
+
+  - id: event_search_error
+    type: message
+    prompt:
+      text: |
+        ⚠️ We are having trouble searching for events right now. Please try again.
+    quick_replies:
+      - { id: retry, label: "🔄 Try again" }
+      - { id: done,  label: "✅ Exit" }
+    on_reply:
+      retry: ask_event_name
+      done:  satisfied

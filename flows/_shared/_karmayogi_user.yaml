@@ -1,0 +1,54 @@
+fragment_id: karmayogi_user
+# Fetches the Karmayogi user profile and stores key fields into collected.
+#
+# IMPORTANT — path notes (verified against live UAT API 2026-06-02):
+#   karmayogi.py unwraps ONLY the top-level "result" envelope.
+#   Profile data is nested under result.response, so JSONPaths start with $.response.*
+#
+# Fields stored (all nullable — guard with == None in branch rules):
+#   collected.first_name             : display first name (e.g. "Suresh")
+#   collected.root_org_id            : rootOrgId for MDO admin lookups
+#   collected.org_channel            : channel field (org/department display name)
+#   collected.avatar_url             : profile photo URL; None = no photo set
+#   collected.completion_pct         : profileCompletionPercentage (float as string, e.g. "33.4")
+#   collected.username_verified      : "True" / "False" (string) — verifiedKarmayogi
+#   collected.designation_status     : "VERIFIED" / "NOT-VERIFIED" / "PENDING"
+#   collected.group_status           : "VERIFIED" / "NOT-VERIFIED" / "PENDING"
+#   collected.banner_url             : cover/banner photo URL; None = no banner set
+#   collected.user_eligibility_ctx   : flat dict keyed by access-settings criteriaKey names
+#                                      (group, designation, rootOrgId, user, userid,
+#                                       department, cadre, service, batch)
+#                                      used as transform_ctx_key for check_user_eligibility
+#
+# The flow that imports this fragment MUST define nodes:
+#   - diagnose_missing_fields  (on_success target)
+#   - escalate_api_error       (on_error target)
+
+nodes:
+  - id: fetch_user_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+    response_mapping:
+      # Top-level response fields (directly under result.response after unwrap)
+      - { from: "$.response.firstName",                               to: collected.first_name }
+      - { from: "$.response.rootOrgId",                               to: collected.root_org_id }
+      - { from: "$.response.channel",                                 to: collected.org_channel }
+      - { from: "$.response.avatar",                                  to: collected.avatar_url }
+      - { from: "$.response.profileCompletionPercentage",             to: collected.completion_pct }
+      # profileDetails sub-fields
+      - { from: "$.response.profileDetails.verifiedKarmayogi",        to: collected.username_verified }
+      - { from: "$.response.profileDetails.profileDesignationStatus", to: collected.designation_status }
+      - { from: "$.response.profileDetails.profileGroupStatus",       to: collected.group_status }
+      - { from: "$.response.profileDetails.profileBannerUrl",         to: collected.banner_url }
+      # Eligibility context — flat dict keyed by access settings criteriaKey names
+      # Populated by build_user_eligibility_ctx transform; used as transform_ctx_key
+      # for check_user_eligibility in access settings API response_mapping.
+      # Covers: group, designation, rootOrgId, user/userid, department, cadre, service, batch
+      - { from: "$.response", to: collected.user_eligibility_ctx, transform: build_user_eligibility_ctx }
+    on_success: diagnose_missing_fields
+    on_error:
+      any: escalate_api_error
+    timeout_ms: 5000

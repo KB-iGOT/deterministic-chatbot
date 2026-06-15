@@ -1,0 +1,68 @@
+# =============================================================================
+# .dockerignore — keep build context lean and secrets out of images
+# =============================================================================
+
+# ── Secrets — NEVER in image ──────────────────────────────────────────────────
+.env
+.env.*
+*.env
+service-account*.json
+*-service-account.json
+credentials*.json
+gcp-key*.json
+*.pem
+*.key
+*.p12
+
+# ── Virtual envs ──────────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+
+# ── Build / dist ──────────────────────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# ── Git ───────────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+
+# ── Local DB / logs ───────────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+langgraph.db
+*.log
+logs/
+
+# ── Test / coverage ───────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# ── Type / lint caches ────────────────────────────────────────────────────────
+.mypy_cache/
+.ruff_cache/
+
+# ── IDEs ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# ── Docs (not needed at runtime) ──────────────────────────────────────────────
+docs/
+
+# ── Tests (not needed at runtime) ─────────────────────────────────────────────
+tests/

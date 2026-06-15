@@ -1,0 +1,556 @@
+# =============================================================================
+# MODE B — DETERMINISTIC
+# =============================================================================
+# Flow: Karma Points Issue (UC-XX)
+#
+# Covers:
+#   1.  Course karma points not credited
+#       1.1  Ask course name (text input)
+#       1.2  If name provided → check via kpList by COURSENAME match
+#       1.3  If not provided  → enrollment picker (last 5 completed courses)
+#            1.3.4 retry loop via counter if picker also skipped
+#
+#       Points status branches:
+#         Both credited           → inform already credited → close
+#         Only rating credited    →
+#           ACBP = true           → training-plan discrepancy → close
+#           ACBP = false          →
+#             monthly rank ≥ 5    → monthly limit message → close
+#             monthly rank < 5    → discrepancy message   → close
+#         Neither credited        → general discrepancy → close
+#
+#   2.  Event karma points not credited
+#       2.1  Ask event name (text input)
+#       2.2  If provided → fetch events list, match by name
+#       2.3  If not provided → dynamic event picker (last 5 events)
+#
+#       Participation window check (4-hour rule):
+#         completedOn − event_start_time ≤ 4 h  → live → check kpList
+#         > 4 h                                  → not-live message → close
+#         start_time unavailable                 → skip to kpList check
+#
+#   3.1 Incorrect karma points received (5 vs 10 vs 15)
+#   3.2 Leaderboard vs overall karma points mismatch (static explanation)
+#   3.3 Learner pathway points (static explanation + Product Team note)
+#   3.4 Course added to Training Plan after completion (Claim Karma Point)
+#
+# APIs used:
+#   POST /api/karmapoints/read                           (karma history, limit 50)
+#   POST /api/course/private/v4/user/enrollment/list/.. (via _enrollment_picker)
+#   GET  /api/user/private/v1/events/list/{user_id}     (event list)
+#
+# Transform notes:
+#   kp_status_by_id   — requires transform_ctx_key in YAML  (kp_list, course_id) → dict
+#   kp_monthly_rank   — requires transform_ctx_key in YAML  (kp_list, course_id) → int
+#   kp_event_credited — requires transform_ctx_key in YAML  (kp_list, event_id)  → bool
+#   All transforms live in app/engine/nodes/api_call_node.py
+#
+# TODO: confirm the exact field name for event scheduled start time in the
+#       events list API response (currently using 'startDate' as placeholder).
+#       Update ev_fetch_events_by_name and ev_fetch_events_list accordingly.
+# =============================================================================
+
+flow_id: KARMA_POINTS_ISSUE
+flow_type: deterministic
+version: 1
+
+metadata:
+  category:         platform
+  menu_label:       "⭐ Karma points issue"
+  menu_group:       "Reports & Data"
+  menu_order:       10
+  classification:   Service Request
+  default_portal:   Learner Portal
+  default_priority: P3
+  default_severity: Sev 3
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "karma points not credited"
+    - "karma points missing"
+    - "karma points not received"
+    - "karma points issue"
+    - "karma not added"
+    - "points not updated"
+    - "karma points not showing"
+    - "event karma not credited"
+    - "wrong karma points"
+    - "incorrect karma points"
+    - "karma points discrepancy"
+    - "karma points less than expected"
+    - "leaderboard karma mismatch"
+    - "learner pathway points"
+    - "claim karma point"
+
+entry_node: ask_karma_issue
+
+imports:
+  - _terminal
+
+nodes:
+
+  # ===========================================================================
+  # ENTRY — Identify issue category
+  # ===========================================================================
+  - id: ask_karma_issue
+    type: message
+    prompt:
+      text: "What karma points issue are you facing? Please select the option that best describes your situation."
+    quick_replies:
+      - { id: COURSE_KARMA,    label: "📚 Course karma points not credited" }
+      - { id: EVENT_KARMA,     label: "📅 Event karma points not credited" }
+      - { id: WRONG_POINTS,    label: "🔢 Received fewer/more points than expected" }
+      - { id: LEADERBOARD,     label: "🏆 Leaderboard vs overall points mismatch" }
+      - { id: PATHWAY,         label: "🛤️ Learner pathway points query" }
+      - { id: ADDED_LATER,     label: "⏰ Course added to Training Plan after completion" }
+    disable_input: true
+    on_reply:
+      save_to: collected.karma_issue_type
+      COURSE_KARMA: kc_pick_course
+      EVENT_KARMA:  ev_fetch_events_list
+      WRONG_POINTS: ec1_pick_course
+      LEADERBOARD:  ec2_leaderboard_explain
+      PATHWAY:      ec3_pathway_explain
+      ADDED_LATER:  ec4_added_later_explain
+
+  # ===========================================================================
+  # SECTION 1 — COURSE KARMA NOT CREDITED
+  # ===========================================================================
+  # kc_pick_course — completed courses only
+  - id: kc_pick_course
+    type: collect
+    prompt:
+      text: "Here are your recently completed courses. Please select the one for which karma points were not credited:"
+    field:
+      name: collected.kc_course_id
+      type: select
+    dynamic_options:
+      source: api
+      integration: karmayogi
+      request:
+        method: POST
+        url: "/api/course/private/v4/user/enrollment/list/{{ ctx.user_id_hash }}"
+        body:
+          request:
+            retiredCoursesEnabled: true
+            status: ["Completed"]
+      response_mapping:
+        list_path:       "$.courses"
+        id_field:        courseId
+        label_field:     courseName
+        sub_label_field: completionPercentage
+        extra_fields:
+          - { from: courseName,  to: collected.kc_course_name }
+          - { from: completedOn, to: collected.kc_completed_on_iso, transform: unix_ms_to_iso }
+      search:     { enabled: true, placeholder: "Search your completed courses..." }
+      pagination: { enabled: true, page_size: 10 }
+      cache_ttl:  300
+    next: kc_fetch_karma_by_id
+
+  # ---------------------------------------------------------------------------
+  # Fetch karma history (match by context_id from picker)
+  # ---------------------------------------------------------------------------
+  - id: kc_fetch_karma_by_id
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/karmapoints/read"
+      headers:
+        x-authenticated-userid: "{{ ctx.user_id_hash }}"
+        x-authenticated-user-orgid: "igot"
+      body:
+        limit: 200
+        offset: 9999999999999
+    response_mapping:
+      - from: "$.kpList"
+        to: collected.kc_kp_status
+        transform: kp_status_by_id
+        transform_ctx_key: collected.kc_course_id
+      - from: "$.kpList"
+        to: collected.kc_monthly_rank
+        transform: kp_monthly_rank
+        transform_ctx_key: collected.kc_course_id
+    on_success: kc_branch_kp_status
+    on_error:
+      any: kc_api_error
+    timeout_ms: 8000
+
+  # ---------------------------------------------------------------------------
+  # 1.2.2  Branch on credit status
+  # ---------------------------------------------------------------------------
+  - id: kc_branch_kp_status
+    type: branch
+    rules:
+      # 1.2.2.1 — BOTH completion AND rating already credited → inform and close
+      - if: >
+          ctx.collected.kc_kp_status != None and
+          ctx.collected.kc_kp_status.completion_credited == True and
+          ctx.collected.kc_kp_status.rating_credited == True
+        then: kc_both_credited
+      # completion credited but rating missing → investigate
+      - if: >
+          ctx.collected.kc_kp_status != None and
+          ctx.collected.kc_kp_status.completion_credited == True and
+          ctx.collected.kc_kp_status.rating_credited == False
+        then: kc_branch_acbp
+      # 1.2.2.2 — Only rating credited; completion NOT credited → investigate
+      - if: >
+          ctx.collected.kc_kp_status != None and
+          ctx.collected.kc_kp_status.rating_credited == True and
+          ctx.collected.kc_kp_status.completion_credited == False
+        then: kc_branch_acbp
+    default: kc_no_points_discrepancy
+
+  # 1.2.2.1 — Completion already credited → inform and close
+  - id: kc_both_credited
+    type: message
+    prompt:
+      text: >
+        The course completion points for
+        **{{ ctx.collected.kc_kp_status.course_name | default(ctx.collected.kc_course_name) }}**
+        have already been credited to your account.
+    next: satisfied
+
+  # 1.2.2.2 — Only rating credited, completion missing → check Training Plan
+  - id: kc_branch_acbp
+    type: branch
+    rules:
+      # 1.2.2.2.1.1 — Part of a Training Plan (ACBP = true)
+      - { if: "ctx.collected.kc_kp_status.acbp == True", then: kc_training_plan_discrepancy }
+    default: kc_branch_monthly_rank
+
+  # 1.2.2.2.1.1 — Training Plan: raise ticket
+  - id: kc_training_plan_discrepancy
+    type: message
+    prompt:
+      text: >
+        There appears to be a discrepancy with the karma points for
+        **{{ ctx.collected.kc_kp_status.course_name | default(ctx.collected.kc_course_name) }}**.
+        This has been escalated to the technical team for investigation.
+    next: satisfied
+
+  # 1.2.2.2.1.2 — NOT Training Plan → check monthly completion rank
+  - id: kc_branch_monthly_rank
+    type: branch
+    rules:
+      # 5th course or beyond in the same calendar month
+      - if: "ctx.collected.kc_monthly_rank != None and ctx.collected.kc_monthly_rank >= 5"
+        then: kc_monthly_limit
+    default: kc_non_acbp_discrepancy
+
+  # Monthly limit: rank ≥ 5
+  - id: kc_monthly_limit
+    type: message
+    prompt:
+      text: "Only the first four completed courses in a month are eligible for karma points."
+    next: satisfied
+
+  # Within limit but still not credited → discrepancy, raise ticket
+  - id: kc_non_acbp_discrepancy
+    type: message
+    prompt:
+      text: >
+        There appears to be a discrepancy with the karma points for
+        **{{ ctx.collected.kc_kp_status.course_name | default(ctx.collected.kc_course_name) }}**.
+        This has been escalated for further investigation.
+    next: satisfied
+
+  # Neither credited → discrepancy, raise ticket
+  - id: kc_no_points_discrepancy
+    type: message
+    prompt:
+      text: >
+        There appears to be a discrepancy with the karma points for
+        **{{ ctx.collected.kc_course_name | default('this course') }}**.
+        This has been escalated for further investigation.
+    next: satisfied
+
+  - id: kc_api_error
+    type: message
+    prompt:
+      text: "Unable to fetch karma points history at this moment. Please try again in a few minutes."
+    next: satisfied
+
+  # ===========================================================================
+  # SECTION 2 — EVENT KARMA NOT CREDITED
+  # ===========================================================================
+  # ---------------------------------------------------------------------------
+  # Show completed-events picker — GET events list, filter client-side to completedOn != null
+  # ---------------------------------------------------------------------------
+  - id: ev_fetch_events_list
+    type: collect
+    prompt:
+      text: "Here are your recently completed events. Please select the event for which karma points were not credited:"
+    field:
+      name: collected.ev_course_id
+      type: select
+    dynamic_options:
+      source: api
+      integration: karmayogi
+      request:
+        method: GET
+        url: "/api/user/private/v1/events/list/{{ ctx.user_id_hash }}"
+      response_mapping:
+        list_path:   "$.events"
+        id_field:    contentId
+        label_field: event.name
+        extra_fields:
+          - { from: event.name,                 to: collected.ev_course_name }
+          - { from: completedOn,                to: collected.ev_completed_on_iso, transform: unix_ms_to_iso }
+          - { from: event.startDateTimeInEpoch, to: collected.ev_start_time_iso,  transform: unix_ms_to_iso }
+      filter_items:
+        field:    status
+        operator: eq
+        value:    2
+      search:     { enabled: true, placeholder: "Search your completed events..." }
+      pagination: { enabled: true, page_size: 10 }
+      cache_ttl:  300
+    next: ev_fetch_karma_for_event
+
+  # ---------------------------------------------------------------------------
+  # Fetch karma history for the event
+  # ---------------------------------------------------------------------------
+  - id: ev_fetch_karma_for_event
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/karmapoints/read"
+      headers:
+        x-authenticated-userid: "{{ ctx.user_id_hash }}"
+        x-authenticated-user-orgid: "igot"
+      body:
+        limit: 200
+        offset: 9999999999999
+    response_mapping:
+      - from: "$.kpList"
+        to: collected.ev_kp_credited
+        transform: kp_event_credited
+        transform_ctx_key: collected.ev_course_id
+    on_success: ev_branch_live_participation
+    on_error:
+      any: ev_api_error
+    timeout_ms: 8000
+
+  # ---------------------------------------------------------------------------
+  # 2.2.2  Check 4-hour live participation window
+  #
+  # Formula (both helpers return hours elapsed since NOW):
+  #   hours_since(start) − hours_since(completedOn)
+  #   = (completedOn − event_start) in hours
+  #
+  # ≤ 4h → live participation → check karma credits
+  # > 4h → post-event (not live) → inform and close
+  # start_time None (field TBD) → skip to karma check
+  # ---------------------------------------------------------------------------
+  - id: ev_branch_live_participation
+    type: branch
+    rules:
+      # If event start time is unknown, skip the window check
+      - { if: "ctx.collected.ev_start_time_iso == None", then: ev_branch_kp_credited }
+      # Completed more than 4 hours after event start → not live
+      - if: >
+          ctx.collected.ev_completed_on_iso != None and
+          hours_since(ctx.collected.ev_start_time_iso) -
+          hours_since(ctx.collected.ev_completed_on_iso) > 4
+        then: ev_not_live_participation
+    default: ev_branch_kp_credited
+
+  # Not live: inform user, close
+  - id: ev_not_live_participation
+    type: message
+    prompt:
+      text: "Karma points are only credited for live event participation."
+    next: satisfied
+
+  # Live participation → check if karma is actually credited
+  - id: ev_branch_kp_credited
+    type: branch
+    rules:
+      - { if: "ctx.collected.ev_kp_credited == True", then: ev_already_credited }
+    default: ev_kp_not_credited
+
+  # Already credited → inform, close
+  - id: ev_already_credited
+    type: message
+    prompt:
+      text: "Karma points for **{{ ctx.collected.ev_course_name }}** have already been credited to your account."
+    next: satisfied
+
+  # Live + not credited → discrepancy
+  - id: ev_kp_not_credited
+    type: message
+    prompt:
+      text: "There appears to be a discrepancy with the karma points for **{{ ctx.collected.ev_course_name }}**. This has been escalated to the technical team for investigation."
+    next: satisfied
+
+  - id: ev_api_error
+    type: message
+    prompt:
+      text: "Unable to retrieve event details at this moment. Please try again in a few minutes."
+    next: satisfied
+
+  # ===========================================================================
+  # SECTION 3.1 — EDGE CASE: INCORRECT KARMA POINTS (5 vs 10 vs 15)
+  # ===========================================================================
+  # ec1_pick_course — completed courses only
+  - id: ec1_pick_course
+    type: collect
+    prompt:
+      text: "Please select the course for which you believe you received incorrect karma points:"
+    field:
+      name: collected.ec1_course_id
+      type: select
+    dynamic_options:
+      source: api
+      integration: karmayogi
+      request:
+        method: POST
+        url: "/api/course/private/v4/user/enrollment/list/{{ ctx.user_id_hash }}"
+        body:
+          request:
+            retiredCoursesEnabled: true
+            status: ["Completed"]
+      response_mapping:
+        list_path:       "$.courses"
+        id_field:        courseId
+        label_field:     courseName
+        sub_label_field: completionPercentage
+        extra_fields:
+          - { from: courseName,  to: collected.ec1_course_name }
+          - { from: completedOn, to: collected.ec1_completed_on_iso, transform: unix_ms_to_iso }
+      search:     { enabled: true, placeholder: "Search your completed courses..." }
+      pagination: { enabled: true, page_size: 10 }
+      cache_ttl:  300
+    next: ec1_fetch_karma
+
+  # 3.1.2 — Fetch karma history (enrollment-picker path)
+  - id: ec1_fetch_karma
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/karmapoints/read"
+      headers:
+        x-authenticated-userid: "{{ ctx.user_id_hash }}"
+        x-authenticated-user-orgid: "igot"
+      body:
+        limit: 200
+        offset: 9999999999999
+    response_mapping:
+      - from: "$.kpList"
+        to: collected.ec1_kp_status
+        transform: kp_status_by_id
+        transform_ctx_key: collected.ec1_course_id
+    on_success: ec1_branch_kp_result
+    on_error:
+      any: ec1_api_error
+    timeout_ms: 8000
+
+  # ---------------------------------------------------------------------------
+  # 3.1.3 / 3.1.4 — Evaluate expected vs actual points
+  #
+  # Rules:
+  #   ACBP=true  + ASSESSMENT=true  → expected 15 pts
+  #   ACBP=true  + ASSESSMENT=false → expected 10 pts
+  #   ACBP=false                    → expected 5 pts (monthly limit also applies)
+  # ---------------------------------------------------------------------------
+  - id: ec1_branch_kp_result
+    type: branch
+    rules:
+      # 3.1.3 — Training Plan + assessment: expected 15
+      - if: >
+          ctx.collected.ec1_kp_status.acbp == True and
+          ctx.collected.ec1_kp_status.has_assessment == True and
+          ctx.collected.ec1_kp_status.completion_points != None and
+          ctx.collected.ec1_kp_status.completion_points != 15
+        then: ec1_mismatch_15
+      # 3.1.3 — Training Plan, no assessment: expected 10
+      - if: >
+          ctx.collected.ec1_kp_status.acbp == True and
+          ctx.collected.ec1_kp_status.has_assessment == False and
+          ctx.collected.ec1_kp_status.completion_points != None and
+          ctx.collected.ec1_kp_status.completion_points != 10
+        then: ec1_mismatch_10
+      # 3.1.4 — Outside Training Plan: expected 5
+      - if: >
+          ctx.collected.ec1_kp_status.acbp == False and
+          ctx.collected.ec1_kp_status.completion_points != None and
+          ctx.collected.ec1_kp_status.completion_points != 5
+        then: ec1_mismatch_5
+    default: ec1_points_correct
+
+  # Mismatch: should be 15
+  - id: ec1_mismatch_15
+    type: message
+    prompt:
+      text: >
+        There appears to be a discrepancy with the karma points for
+        **{{ ctx.collected.ec1_kp_status.course_name | default(ctx.collected.ec1_course_name) }}**.
+        This has been escalated to the technical team for investigation.
+    next: satisfied
+
+  # Mismatch: should be 10
+  - id: ec1_mismatch_10
+    type: message
+    prompt:
+      text: >
+        There appears to be a discrepancy with the karma points for
+        **{{ ctx.collected.ec1_kp_status.course_name | default(ctx.collected.ec1_course_name) }}**.
+        This has been escalated to the technical team for investigation.
+    next: satisfied
+
+  # Mismatch: should be 5
+  - id: ec1_mismatch_5
+    type: message
+    prompt:
+      text: "Only the first four completed courses in a month are eligible for karma points."
+    next: satisfied
+
+  # Points match expected
+  - id: ec1_points_correct
+    type: message
+    prompt:
+      text: >
+        The karma points for
+        **{{ ctx.collected.ec1_kp_status.course_name | default(ctx.collected.ec1_course_name) }}**
+        are credited correctly.
+    next: satisfied
+
+  - id: ec1_api_error
+    type: message
+    prompt:
+      text: "Unable to retrieve karma points history at this moment. Please try again in a few minutes."
+    next: satisfied
+
+  # ===========================================================================
+  # SECTION 3.2 — EDGE CASE: LEADERBOARD VS OVERALL KARMA POINTS MISMATCH
+  # ===========================================================================
+  - id: ec2_leaderboard_explain
+    type: message
+    prompt:
+      text: |
+        - **Top Karmayogi / Leaderboard:** Displays karma points earned in the last month only.
+        - **Overall / Individual Karma Points:** Displays cumulative points from platform start till date.
+    next: satisfied
+
+  # ===========================================================================
+  # SECTION 3.3 — EDGE CASE: LEARNER PATHWAY POINTS
+  # ===========================================================================
+  - id: ec3_pathway_explain
+    type: message
+    prompt:
+      text: "Completing a learner pathway provides additional **25 karma points**."
+    next: satisfied
+
+  # ===========================================================================
+  # SECTION 3.4 — EDGE CASE: COURSE ADDED TO TRAINING PLAN AFTER COMPLETION
+  # ===========================================================================
+  - id: ec4_added_later_explain
+    type: message
+    prompt:
+      text: "You can go to the course TOC page and press the **Claim Karma Point** button to claim the remaining karma points."
+    next: satisfied

@@ -1,0 +1,24 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Bot persona & system messages
+#
+# Edit this file to change any user-facing string without touching Python.
+# All values support plain text or Markdown.
+# Hot-reload: restart the server to pick up changes.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Shown when a new session starts (before the topic menu)
+greeting: |
+  👋 Hi! I'm the **iGOT Karmayogi** support assistant.
+
+  What can I help you with today?
+
+# Shown when the user sends something unexpected during topic selection
+unknown_topic: "🤔 I didn't catch that — please choose one of the options below."
+
+# Shown when the user tries to continue a completed session
+conversation_ended: "This conversation has ended. Please start a new session to continue."
+
+# Field validation messages (used in routes.py / collect node)
+validation_empty:      "❌ This field can't be empty — please enter a value."
+validation_email:      "❌ That doesn't look like a valid email address.\nPlease enter a valid email, e.g. **name@example.com**"
+validation_date:       "❌ Please enter a recognisable date, e.g. **12 May 2026** or **2026-05-12**"

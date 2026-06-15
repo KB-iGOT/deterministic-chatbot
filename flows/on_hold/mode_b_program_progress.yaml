@@ -1,0 +1,372 @@
+# =============================================================================
+# MODE B — DETERMINISTIC + LLM TICKET TAIL
+# =============================================================================
+# Flow: Program Progress Not Updating / Certificate Not Generated (UC-21)
+#
+# SOP: Use Case – Program Progress Not Updating _ Certificate Not Generated.docx
+#      Course _ Program _ Event Progress Issue.docx
+#
+# Covers:
+#   - Program enrollment check
+#   - Child course completion status via Hierarchy Read API
+#   - Guidance to complete pending child courses
+#   - Sync discrepancy detection (partial — Admin Content State API not yet available)
+#   - Ticket for unresolved / suspected sync issues
+#
+# APIs used:
+#   POST /api/course/private/v4/user/enrollment/list/{user_id}
+#        (check program enrollment and completion %)
+#   GET  /api/content/v2/read/{program_id}
+#        (fetch program hierarchy — child course list)
+#   POST /api/content/v1/search  (optional — resolve child course names from IDs)
+#
+# KNOWN GAPS:
+#   [GAP-7] Admin Content State Read API not documented.
+#           SOP §6 requires comparing enrollment status vs. content state per
+#           resource (leaf node) to detect sync discrepancies.
+#           Without this API, sync issues cannot be auto-detected — they go
+#           to ticket for L2 investigation after user confirms "100% but no cert".
+# =============================================================================
+
+flow_id: PROGRAM_PROGRESS
+flow_type: deterministic_with_llm_fallback
+version: 1
+
+metadata:
+  category:         course
+  menu_label:       "📊 Program progress / certificate not generated"
+  menu_group:       "Learning"
+  menu_order:       8
+  classification:   Incident
+  default_priority: P3
+  default_severity: Sev 3
+  default_portal:   Learner Portal
+
+enabled_channels: [web]
+
+imports:
+  - fragment: _zoho_ticket
+    with:
+      cf_category:     "Learning"
+      cf_sub_category: "Program Progress"
+      cf_flow_id:      "PROGRAM_PROGRESS"
+
+entry_node: ask_issue_type
+
+nodes:
+
+  # ===========================================================================
+  # 1. Identify issue type
+  # ===========================================================================
+  - id: ask_issue_type
+    type: message
+    prompt:
+      text: |
+        What is the issue you are facing?
+    quick_replies:
+      - { id: progress, label: "📊 Program progress not updating" }
+      - { id: cert,     label: "🎓 Completed program but certificate not generated" }
+    disable_input: true
+    on_reply:
+      save_to: collected.issue_type
+      progress: ask_program_name
+      cert:     ask_program_name
+
+  # ===========================================================================
+  # 2. Collect program name and find enrollment
+  # ===========================================================================
+  - id: ask_program_name
+    type: collect
+    prompt:
+      text: |
+        Please share the **exact name of the program** you are referring to.
+    field:
+      name:        collected.program_name
+      placeholder: "e.g. Leadership Excellence Program"
+    next: fetch_enrollments
+
+  - id: fetch_enrollments
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/course/private/v4/user/enrollment/list/{{ ctx.user_id_hash }}"
+      body:
+        request:
+          retiredCoursesEnabled: true
+    response_mapping:
+      - { from: "$.courses", to: collected.all_courses, transform: count_courses_total }
+    on_success: search_program_in_enrollments
+    on_error:
+      any: enrollment_api_error
+
+  # ===========================================================================
+  # 3. Search for the program in enrollment list
+  #    (Content Search by name to get program ID, then match against enrollment)
+  # ===========================================================================
+  - id: search_program_in_enrollments
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/content/v1/search"
+      body:
+        request:
+          query: "{{ ctx.collected.program_name }}"
+          filters:
+            primaryCategory: ["Program"]
+          limit: 5
+    response_mapping:
+      - { from: "$.count",                 to: collected.program_search_count }
+      - { from: "$.content[0].name",       to: collected.program_name_found }
+      - { from: "$.content[0].identifier", to: collected.program_id }
+      - { from: "$.content[0].status",     to: collected.program_status }
+    on_success: branch_program_found
+    on_error:
+      any: program_not_found
+
+  - id: branch_program_found
+    type: branch
+    rules:
+      - { if: "ctx.collected.program_name_found == None", then: program_not_found }
+    default: fetch_enrollment_for_program
+
+  # ===========================================================================
+  # 4. Fetch enrollment details for the matched program
+  # ===========================================================================
+  - id: fetch_enrollment_for_program
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/course/private/v4/user/enrollment/list/{{ ctx.user_id_hash }}"
+      body:
+        request:
+          retiredCoursesEnabled: true
+    response_mapping:
+      - { from: "$.courses",
+          find_where: { field: courseId, equals_ctx: collected.program_id },
+          sub_path: completionPercentage,
+          to: collected.program_completion_pct }
+      - { from: "$.courses",
+          find_where: { field: courseId, equals_ctx: collected.program_id },
+          sub_path: status,
+          to: collected.program_enrollment_status,
+          transform: enrollment_status_to_int }
+    on_success: branch_enrollment_status
+    on_error:
+      any: enrollment_api_error
+
+  - id: branch_enrollment_status
+    type: branch
+    rules:
+      - { if: "ctx.collected.program_enrollment_status == None", then: not_enrolled }
+      - { if: "ctx.collected.program_enrollment_status == 0",    then: not_enrolled }
+      - { if: "ctx.collected.program_enrollment_status == 2",    then: fetch_hierarchy }
+    default: fetch_hierarchy
+
+  # ===========================================================================
+  # 5. Not enrolled path
+  # ===========================================================================
+  - id: not_enrolled
+    type: resolution
+    prompt:
+      text: |
+        We could not find an active enrollment for **{{ ctx.collected.program_name_found or ctx.collected.program_name }}** in your profile.
+    steps:
+      - "Verify the program name and check **My Learning → In Progress** to confirm you are enrolled"
+      - "If you are sure you are enrolled and still see this issue, please raise a ticket"
+    follow_up:
+      text: "What would you like to do?"
+      quick_replies:
+        - { id: retry,  label: "🔍 Try a different program name" }
+        - { id: ticket, label: "🎫 Raise a support ticket" }
+    on_reply:
+      retry:  ask_program_name
+      ticket: collect_user_email
+
+  # ===========================================================================
+  # 6. Enrolled — fetch program hierarchy to check child course completion
+  # ===========================================================================
+  - id: fetch_hierarchy
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/content/v2/read/{{ ctx.collected.program_id }}"
+    response_mapping:
+      - { from: "$.content.children", to: collected.child_course_ids, transform: extract_child_course_ids }
+      - { from: "$.content.name",     to: collected.program_name_confirmed }
+    on_success: branch_on_completion
+    on_error:
+      # If hierarchy read fails, fall through to generic guidance
+      any: guide_generic_completion
+
+  - id: branch_on_completion
+    type: branch
+    rules:
+      - { if: "ctx.collected.issue_type == 'cert' and ctx.collected.program_completion_pct == '100'", then: cert_not_generated }
+      - { if: "ctx.collected.issue_type == 'cert' and ctx.collected.program_completion_pct == 100",   then: cert_not_generated }
+      - { if: "ctx.collected.program_completion_pct != None",                                          then: guide_incomplete }
+    default: guide_generic_completion
+
+  # ===========================================================================
+  # 7a. Progress not 100% — guide to complete pending modules
+  # ===========================================================================
+  - id: guide_incomplete
+    type: resolution
+    prompt:
+      text: |
+        We checked your enrollment for **{{ ctx.collected.program_name_confirmed or ctx.collected.program_name_found }}**:
+
+        📊 Current completion: **{{ ctx.collected.program_completion_pct }}%**
+
+        Your program progress will update to 100% only when **all child courses and modules** within the program are fully completed.
+    steps:
+      - "Go to **Profile → My Learning → In Progress**"
+      - "Select the program **{{ ctx.collected.program_name_found }}** and click **Resume**"
+      - "Expand each module using the **(+)** icon"
+      - "Look for items **without a blue tick** — these are incomplete"
+      - "Complete all pending content until every module shows a blue tick"
+      - "Click **Next** at the top-right corner after each resource to record progress"
+      - "⚠️ For **SCORM content**: do not skip or fast-forward — spend the full required duration"
+    follow_up:
+      text: "Were you able to identify and complete the pending modules?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, progress updated now" }
+        - { id: no,  label: "❌ No, still showing incomplete" }
+    on_reply:
+      yes: satisfied
+      no:  escalate_sync_issue
+
+  # ===========================================================================
+  # 7b. Certificate not generated despite 100% completion — likely sync issue
+  # ===========================================================================
+  - id: cert_not_generated
+    type: resolution
+    prompt:
+      text: |
+        We can see that your completion for **{{ ctx.collected.program_name_confirmed or ctx.collected.program_name_found }}** shows **100%**.
+
+        If the certificate has still not been generated, this indicates a possible **synchronization issue** between the learning platform and the certificate system.
+    steps:
+      - "Wait **24 hours** after reaching 100% — certificate generation can take up to a day"
+      - "Check under **Profile → My Certificates** to see if it was generated but not visible on the course page"
+      - "Ensure all assessments (if any) have been passed — failing an assessment blocks certificate generation"
+    follow_up:
+      text: "Is the certificate still missing after checking these?"
+      quick_replies:
+        - { id: yes, label: "❌ Yes, still missing after 24 hours" }
+        - { id: no,  label: "✅ Found it / just needed to wait" }
+    on_reply:
+      yes: escalate_sync_issue
+      no:  satisfied
+
+  # ===========================================================================
+  # 7c. Generic completion guidance (when hierarchy fetch failed)
+  # ===========================================================================
+  - id: guide_generic_completion
+    type: resolution
+    prompt:
+      text: |
+        For **{{ ctx.collected.program_name_found or ctx.collected.program_name }}**, please follow these steps to identify and complete any pending modules.
+
+        Program completion and certificate generation require **all child courses** to be 100% complete.
+    steps:
+      - "Go to **Profile → My Learning → In Progress**"
+      - "Open the program and click **Resume**"
+      - "Expand each module — items **without a blue tick** are incomplete"
+      - "Complete all pending content items"
+      - "Use the **Next** button (top-right) after each resource to record progress"
+    follow_up:
+      text: "Did this help resolve the issue?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, resolved" }
+        - { id: no,  label: "❌ No, still an issue" }
+    on_reply:
+      yes: satisfied
+      no:  escalate_sync_issue
+
+  # ===========================================================================
+  # Sync issue escalation
+  # ===========================================================================
+  - id: escalate_sync_issue
+    type: message
+    prompt:
+      text: |
+        This appears to be a **synchronization issue** between the completion status and the certificate/progress system. Our L2 team will need to investigate.
+
+        Please share your email and we will raise a ticket.
+    quick_replies:
+      - { id: ticket, label: "🎫 Raise a ticket" }
+    on_reply:
+      ticket: collect_user_email
+
+  # ===========================================================================
+  # Program not found
+  # ===========================================================================
+  - id: program_not_found
+    type: resolution
+    prompt:
+      text: |
+        ❌ We could not find a program named **"{{ ctx.collected.program_name }}"** in the catalogue.
+    steps:
+      - "Verify the exact program name — find it under **My Learning → In Progress** on the platform"
+    follow_up:
+      text: "What would you like to do?"
+      quick_replies:
+        - { id: retry,  label: "🔍 Try a different name" }
+        - { id: ticket, label: "🎫 Raise a ticket" }
+    on_reply:
+      retry:  ask_program_name
+      ticket: collect_user_email
+
+  # ===========================================================================
+  # API errors
+  # ===========================================================================
+  - id: enrollment_api_error
+    type: message
+    prompt:
+      text: "⚠️ We couldn't fetch your enrollment details right now. Please try again or raise a ticket."
+    quick_replies:
+      - { id: retry,  label: "🔄 Try again" }
+      - { id: ticket, label: "🎫 Raise a ticket" }
+    on_reply:
+      retry:  fetch_enrollments
+      ticket: collect_user_email
+
+  # ===========================================================================
+  # Escalation
+  # ===========================================================================
+  - id: collect_user_email
+    type: collect
+    prompt:
+      text: "Please share your **registered email address** to raise a ticket."
+    field:
+      name:        collected.email
+      type:        email
+      placeholder: "your.email@example.com"
+    next: program_progress_escalate
+
+  - id: program_progress_escalate
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user has a program progress or certificate generation issue on iGOT Karmayogi.
+        Generate a Zoho support ticket.
+        Subject: "Program Progress Issue — {{ ctx.collected.program_name_found or ctx.collected.program_name }}"
+        Description: include issue_type (progress/cert), program name, program_id if found,
+        completion percentage (program_completion_pct), whether it's a sync issue or
+        incomplete modules, any child courses fetched, and the user's email.
+      priority_override: P3
+    on_complete: confirm_ticket
+
+  # ── Terminal nodes ────────────────────────────────────────────────────────────
+  - id: satisfied
+    type: end
+    outcome: self_served

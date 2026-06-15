@@ -1,0 +1,30 @@
+fragment_id: yp_lookup
+# Looks up the YP (Young Professional / SPOC) contact for the user's organisation
+# from the in-memory index loaded from data/Allocation_28.10.2025.xlsx.
+#
+# Prerequisites — must be in collected before this fragment runs:
+#   collected.org_channel   : org/department name from profile read (_karmayogi_user)
+#
+# Fields stored on success:
+#   collected.yp_name         : SPOC / YP full name
+#   collected.yp_email        : YP primary email
+#   collected.yp_mobile       : YP mobile number
+#   collected.yp_cc_email     : secondary / mandatory CC email
+#
+# The flow that imports this fragment MUST define:
+#   - yp_found_result    (on_success target — YP record located)
+#   - yp_not_found       (on_error target  — no matching record)
+
+nodes:
+  - id: lookup_yp_contact
+    type: data_lookup
+    service: yp_lookup
+    key: "{{ ctx.collected.org_channel }}"
+    response_mapping:
+      - { from: name,      to: collected.yp_name }
+      - { from: email,     to: collected.yp_email }
+      - { from: mobile,    to: collected.yp_mobile }
+      - { from: cc_email,  to: collected.yp_cc_email }
+    on_success: yp_found_result
+    on_error:
+      any: yp_not_found

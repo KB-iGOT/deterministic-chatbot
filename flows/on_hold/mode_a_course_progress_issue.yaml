@@ -1,0 +1,406 @@
+# =============================================================================
+# MODE A — PURE DETERMINISTIC
+# =============================================================================
+# Flow: Course Progress Issue
+#
+# When to use this mode:
+#   - User reports course/program/event progress is not updating or stuck.
+#   - SOP has finite, well-known branches (SCORM vs Non-SCORM resource types).
+#   - Bot responses are fully scripted; no LLM required.
+#
+# Predictable, auditable, zero LLM cost.
+# =============================================================================
+
+flow_id: COURSE_PROGRESS_ISSUE
+flow_type: deterministic
+version: 1
+
+metadata:
+  category:         course
+  classification:   Incident
+  default_portal:   Learner Portal
+  default_priority: P3
+  default_severity: Sev 3
+  layout:           Ticket Layout Form
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "course progress not updating"
+    - "progress stuck"
+    - "module not marked complete"
+    - "course not completing"
+    - "progress issue"
+    - "course progress problem"
+    - "program progress not updating"
+    - "event progress stuck"
+
+entry_node: pick_course_from_list
+
+nodes:
+
+  # ===========================================================================
+  # 1. Show enrolled courses — user picks from searchable list
+  #    API: POST /api/course/private/v4/user/enrollment/list/{user_id}
+  #    Fetches both In-Progress and Completed (a course may show Completed but
+  #    still have incomplete resources). retiredCoursesEnabled includes archived
+  #    courses. The full course object is cached so completionPercentage and
+  #    langContentStatus are available after selection without a second call.
+  # ===========================================================================
+  - id: pick_course_from_list
+    type: collect
+    prompt:
+      text: "Here are your enrolled courses. Please select the one you are having trouble with:"
+    field:
+      name: collected.course_id
+      type: select
+    dynamic_options:
+      source: api
+      integration: karmayogi
+      request:
+        method: POST
+        url: "/api/course/private/v4/user/enrollment/list/{{ ctx.user_id_hash }}"
+        body:
+          request:
+            retiredCoursesEnabled: true
+            status: ["In-Progress", "Completed"]
+      response_mapping:
+        list_path:       "$.courses"
+        id_field:        courseId
+        label_field:     courseName
+        sub_label_field: completionPercentage
+        # Extra fields stored per-item; merged into collected on selection.
+        # No second API call needed — data already fetched during picker load.
+        extra_fields:
+          - { from: courseName,           to: collected.course_name }
+          - { from: completionPercentage, to: collected.completion_pct }
+          - { from: langContentStatus,    to: collected.incomplete_ids,
+              transform: extract_incomplete_ids }
+      search:     { enabled: true, placeholder: "Type to search your enrolled courses..." }
+      pagination: { enabled: true, page_size: 10 }
+      cache_ttl:  300
+    next: branch_on_completion
+
+  # ===========================================================================
+  # 2. Branch on completion percentage and incomplete resource IDs
+  #    Decision table (from API guide):
+  #      completionPercentage == 100               → already complete
+  #      incomplete_ids empty  AND  pct < 100      → cache/refresh guidance
+  #      incomplete_ids non-empty                  → fetch resource metadata
+  # ===========================================================================
+  - id: branch_on_completion
+    type: branch
+    rules:
+      - { if: "ctx.collected.completion_pct == 100",
+          then: resolution_already_complete }
+      - { if: "len(ctx.collected.incomplete_ids) == 0",
+          then: resolution_cache_refresh }
+    default: api_fetch_resource_metadata
+
+  # ===========================================================================
+  # 3. Fetch name, mimeType and duration for each incomplete resource
+  #    API: POST /api/content/v1/search
+  #    Passes incomplete_ids[] from Step 1 as filters.identifier.
+  #    isSecureSettingsDisabled is required to retrieve content metadata.
+  #    limit:1000 ensures all resources are returned in a single response.
+  #    SCORM detection: mimeType == "application/vnd.ekstep.html-archive"
+  #    Duration conversion: round(float(duration) / 60, 1) minutes
+  # ===========================================================================
+  - id: api_fetch_resource_metadata
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/content/v1/search"
+      body:
+        request:
+          filters:
+            identifier: "{{ ctx.collected.incomplete_ids }}"
+          isSecureSettingsDisabled: true
+          sort_by:
+            createdOn: "desc"
+          fields:
+            - identifier
+            - name
+            - mimeType
+            - endDate
+            - startDate
+            - status
+            - versionKey
+            - createdOn
+            - duration
+          facets: ["status"]
+          limit: 1000
+    response_mapping:
+      # First incomplete resource — name and duration surfaced in resolution msgs
+      # KarmayogiService unwraps {result:{...}} → access content directly (no $.result prefix)
+      - { from: "$.content[0].name",     to: collected.resource_name }
+      - { from: "$.content[0].mimeType", to: collected.resource_mime_type }
+      # Duration: raw seconds → minutes  (round(float(duration)/60, 1))
+      - { from: "$.content[0].duration", to: collected.resource_duration_min,
+          transform: duration_to_minutes }
+      # has_scorm_resources: true if ANY content item has the SCORM MIME type
+      - { from: "$.content[*].mimeType", to: collected.has_scorm_resources,
+          transform: detect_scorm }
+    on_success: branch_on_resource_type
+    on_error:
+      timeout: resolution_generic_error
+      any:     resolution_generic_error
+    timeout_ms: 8000
+
+  # ===========================================================================
+  # 4. Branch on resource type: SCORM vs Non-SCORM
+  #    SCORM MIME type: application/vnd.ekstep.html-archive
+  #    All other types (video/mp4, application/pdf, questionset, etc.) → standard
+  # ===========================================================================
+  - id: branch_on_resource_type
+    type: branch
+    rules:
+      - { if: "ctx.collected.has_scorm_resources == true",
+          then: resolution_scorm_guidance }
+    default: resolution_non_scorm_guidance
+
+  # ===========================================================================
+  # 7a. Resolution — SCORM resource
+  # ===========================================================================
+  - id: resolution_scorm_guidance
+    type: resolution
+    prompt:
+      text: |
+        We can see that you have enrolled in **{{ ctx.collected.course_name }}**.
+
+        The resource titled **"{{ ctx.collected.resource_name }}"** is still *In Progress* or *Not Started*.
+
+        This resource is in **SCORM format**. Please note the following:
+
+        - The course is designed to be completed in **one continuous session**.
+        - Increasing the **playback speed** may prevent your progress from being recorded.
+        - This can cause issues while generating your course certificate.
+
+        The resource duration is **{{ ctx.collected.resource_duration_min }} minutes** — you must spend at least this much time on it.
+
+        At the end of each resource, click the **"Next"** button (top-right corner) to proceed. Only then will your progress reflect as completed.
+    steps:
+      - "Go to your **Profile**."
+      - "Click on **My Learning**."
+      - "Open the **In Progress** section under *Contents*."
+      - "Locate and select **{{ ctx.collected.course_name }}**."
+      - "Click **Resume**."
+      - "Expand each module by clicking the plus (+) icon."
+      - "Look for content items **without a blue tick**."
+      - "Resume and complete the pending content from the top-right corner."
+      - "Ensure **all modules** show a blue tick to reach 100% completion."
+    follow_up:
+      text: "Were you able to complete the resource and update your progress?"
+      quick_replies:
+        - { id: YES,     label: "Yes, progress updated" }
+        - { id: NO,      label: "No, still not updating" }
+        - { id: PENDING, label: "I'll try and come back" }
+    on_reply:
+      YES:     resolution_success
+      NO:      collect_details_for_ticket
+      PENDING: resolution_pending
+
+  # ===========================================================================
+  # 7b. Resolution — Non-SCORM resource
+  # ===========================================================================
+  - id: resolution_non_scorm_guidance
+    type: resolution
+    prompt:
+      text: |
+        We can see that you have enrolled in **{{ ctx.collected.course_name }}**.
+
+        The resource titled **"{{ ctx.collected.resource_name }}"** is still *In Progress* or *Not Started*.
+
+        Please **revisit the course** and complete the mentioned resource again to update your progress.
+    steps:
+      - "Go to your **Profile**."
+      - "Click on **My Learning**."
+      - "Open the **In Progress** section under *Contents*."
+      - "Locate and select **{{ ctx.collected.course_name }}**."
+      - "Click **Resume**."
+      - "Expand each module by clicking the plus (+) icon."
+      - "Look for content items **without a blue tick**."
+      - "Resume and complete the pending content from the top-right corner."
+      - "Ensure **all modules** show a blue tick to reach 100% completion."
+    follow_up:
+      text: "Were you able to complete the resource and update your progress?"
+      quick_replies:
+        - { id: YES,     label: "Yes, progress updated" }
+        - { id: NO,      label: "No, still not updating" }
+        - { id: PENDING, label: "I'll try and come back" }
+    on_reply:
+      YES:     resolution_success
+      NO:      collect_details_for_ticket
+      PENDING: resolution_pending
+
+  # ===========================================================================
+  # 8. Collect contact details before raising a ticket
+  # ===========================================================================
+  - id: collect_details_for_ticket
+    type: collect
+    prompts:
+      - { field: collected.email,       text: "Please share your registered email address so we can raise a support ticket." }
+      - { field: collected.steps_tried, text: "Briefly describe what you have already tried (optional).", optional: true }
+    next: raise_progress_ticket
+
+  # ===========================================================================
+  # 9. Raise Zoho Desk ticket
+  # ===========================================================================
+  - id: raise_progress_ticket
+    type: api_call
+    integration: zoho_desk_api
+    request:
+      method: POST
+      url: "/tickets"
+      body:
+        subject:        "Course Progress Issue - {{ ctx.collected.course_name }} - {{ ctx.collected.email }}"
+        description: |
+          Course name:         {{ ctx.collected.course_name }}
+          Course ID:           {{ ctx.collected.course_id }}
+          Incomplete resource: {{ ctx.collected.resource_name | default('N/A') }}
+          MIME type:           {{ ctx.collected.resource_mime_type | default('N/A') }}
+          SCORM resources:     {{ ctx.collected.has_scorm_resources | default('N/A') }}
+          Completion %:        {{ ctx.collected.completion_pct | default('N/A') }}
+          User email:          {{ ctx.collected.email }}
+          Steps tried:         {{ ctx.collected.steps_tried | default('See conversation') }}
+        email:          "{{ ctx.collected.email }}"
+        priority:       "{{ ctx.flow.metadata.default_priority }}"
+        severity:       "{{ ctx.flow.metadata.default_severity }}"
+        classification: "{{ ctx.flow.metadata.classification }}"
+        departmentId:   "{{ env.ZOHO_DEPARTMENT_ID }}"
+        channel:        "Bot"
+        cf:
+          cf_category:       "course"
+          cf_sub_category:   "course_progress"
+          cf_portal:         "Learner Portal"
+          cf_layout:         "Ticket Layout Form"
+          cf_channel_source: "{{ ctx.channel }}"
+          cf_bot_session_id: "{{ ctx.session_id }}"
+          cf_flow_id:        "COURSE_PROGRESS_ISSUE"
+          cf_llm_involved:   "false"
+    response_mapping:
+      - { from: $.ticketNumber, to: collected.ticket_id }
+    on_success: ticket_confirmation
+    on_error:
+      any: ticket_creation_failed
+    timeout_ms: 10000
+
+  - id: ticket_confirmation
+    type: message
+    prompt:
+      text: |
+        Ticket raised successfully!
+
+        Ticket ID: **#{{ ctx.collected.ticket_id }}**
+        Confirmation sent to: {{ ctx.collected.email }}
+        Expected resolution: **2 business days**
+
+        Our L2 team will investigate and reach out to you via email.
+    next: closing_check
+
+  - id: ticket_creation_failed
+    type: message
+    prompt:
+      text: |
+        I couldn't raise the ticket right now due to a technical issue.
+        Please email **support@igotkarmayogi.gov.in** directly with:
+        - Course name
+        - Your registered email
+        - A screenshot of the incomplete progress
+
+        Sorry for the inconvenience.
+    next: closing_check
+
+  # ===========================================================================
+  # Terminal nodes
+  # ===========================================================================
+  - id: resolution_success
+    type: message
+    prompt:
+      text: |
+        That's great!
+
+        Remember: the course must be **100% complete** for your certificate to be generated.
+    next: closing_check
+
+  - id: resolution_pending
+    type: message
+    prompt:
+      text: |
+        No problem! Please complete the pending resource at your convenience.
+
+        Remember: the course must be **100% complete** for the certificate to be generated.
+        If the issue persists, start a new session and choose **Course progress issue** again.
+    next: closing_check
+
+  - id: end_ticket_raised
+    type: end
+    outcome: ticket_raised
+
+  - id: resolution_already_complete
+    type: message
+    prompt:
+      text: |
+        Our records show that **{{ ctx.collected.course_name }}** is already marked as **100% complete** for your account.
+    next: closing_check
+
+  # ===========================================================================
+  # Terminal node — progress < 100% but no incomplete resource IDs found
+  # Cause: client-side cache not yet refreshed / stale session data.
+  # ===========================================================================
+  - id: resolution_cache_refresh
+    type: message
+    prompt:
+      text: |
+        Our records show that **{{ ctx.collected.course_name }}** is not yet at 100% completion, but we couldn't find any specific incomplete resources at this moment.
+
+        This can happen when your browser or app cache hasn't refreshed yet. Please try the following:
+
+        1. **Log out** of the platform completely.
+        2. Clear your **browser cache** (or force-close the app).
+        3. **Log back in** and navigate to your course.
+        4. Check if your progress percentage has updated.
+
+        If the issue persists after re-login, start a new session and choose **Course progress issue** again.
+    next: closing_check
+
+  - id: resolution_generic_error
+    type: message
+    prompt:
+      text: |
+        I'm having trouble fetching your course details right now.
+
+        Please try again in a few minutes. If the issue persists, contact us at **support@igotkarmayogi.gov.in** with:
+        - Your registered email / mobile number
+        - Course name
+        - A screenshot of the progress issue
+    next: closing_check
+
+  # ===========================================================================
+  # Closing confirmation — asked before every flow termination
+  # ===========================================================================
+  - id: closing_check
+    type: resolution
+    steps: []
+    follow_up:
+      text: "Is there anything else I can help you with?"
+      quick_replies:
+        - { id: NO,  label: "No, I'm good — thank you!" }
+        - { id: YES, label: "Yes, I have another issue" }
+    on_reply:
+      NO:  end_resolved
+      YES: end_new_session
+
+  - id: end_resolved
+    type: end
+    outcome: self_served
+    prompt:
+      text: "Thank you for reaching out. Have a great day!"
+
+  - id: end_new_session
+    type: end
+    outcome: self_served
+    prompt:
+      text: "Please start a new session and I'll be happy to help you with your next query."

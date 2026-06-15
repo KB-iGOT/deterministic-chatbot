@@ -1,0 +1,37 @@
+fragment_id: mdo_admin_lookup
+# Looks up the MDO admin (MDO_ADMIN role) for the user's organisation.
+#
+# Prerequisites — must be in collected before this fragment runs:
+#   collected.root_org_id   : rootOrgId from profile read (use _karmayogi_user first)
+#
+# Fields stored:
+#   collected.mdo_admin_name   : admin first name (or "" if not found)
+#   collected.mdo_admin_email  : admin primary email (or "" if not found)
+#   collected.mdo_admin_count  : number of admins found (0 = use YP fallback)
+#
+# The flow that imports this fragment MUST define:
+#   - mdo_found_result    (on_success target — branch on mdo_admin_count)
+#   - mdo_api_error       (on_error target)
+
+nodes:
+  - id: lookup_mdo_admin
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            rootOrgId: "{{ ctx.collected.root_org_id }}"
+            organisations.roles: ["MDO_ADMIN"]
+            status: 1
+          limit: 1
+    response_mapping:
+      - { from: "$.response.count",                                                    to: collected.mdo_admin_count }
+      - { from: "$.response.content[0].profileDetails.personalDetails.firstname",      to: collected.mdo_admin_name }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail",   to: collected.mdo_admin_email }
+    on_success: mdo_found_result
+    on_error:
+      any: mdo_api_error
+    timeout_ms: 5000

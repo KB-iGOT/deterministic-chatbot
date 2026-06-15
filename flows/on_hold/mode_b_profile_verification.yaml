@@ -1,0 +1,262 @@
+# =============================================================================
+# MODE B — DETERMINISTIC + LLM TICKET TAIL
+# =============================================================================
+# Flow: Profile Verification — Designation / Group (UC-05)
+#
+# Covers:
+#   V1 — Designation not verified / verification pending
+#   V2 — Group not verified / verification pending
+#   V3 — Transfer request pending — check MDO leader contact
+#
+# Mode B pattern:
+#   1. Ask which verification issue
+#   2. Fetch private profile to check for pending transfer request (wfTransferRequest)
+#   3. If pending request → lookup MDO leader for transfer dept → show contact
+#   4. If no pending request → show UI submission steps
+#   5. If unresolved → escalate via transfer_llm (auto_raise)
+#
+# APIs used:
+#   POST /private/user/v1/search  (private profile — includes wfTransferRequest)
+#   POST /private/user/v1/search  (MDO_LEADER lookup for transfer dept, conditional)
+# =============================================================================
+
+flow_id: PROFILE_VERIFICATION
+flow_type: deterministic_with_llm_fallback
+version: 1
+
+metadata:
+  category:         profile
+  menu_label:       "✅ Profile verification"
+  menu_group:       "Profile"
+  menu_order:       6
+  classification:   Service Request
+  default_portal:   Learner Portal
+  default_priority: P3
+  default_severity: Sev 3
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "designation not verified"
+    - "group not verified"
+    - "profile not verified"
+    - "verification pending"
+    - "designation verification"
+    - "group verification"
+    - "transfer request pending"
+    - "designation not showing"
+
+entry_node: ask_verification_type
+
+imports:
+  - _terminal
+  - fragment: _zoho_ticket
+    with:
+      cf_category:     profile
+      cf_sub_category: profile_verification
+      cf_flow_id:      PROFILE_VERIFICATION
+
+nodes:
+
+  # ===========================================================================
+  # 1. Identify verification issue type
+  # ===========================================================================
+  - id: ask_verification_type
+    type: message
+    prompt:
+      text:  "What's the issue you are facing with your profile verification?"
+      voice: "What is the verification issue? Press a number."
+    quick_replies:
+      - { id: V1, label: "Designation not verified", icon: "🏅" }
+      - { id: V2, label: "Group not verified", icon: "👥" }
+      - { id: V3, label: "I submitted a request — want to check", icon: "🔄" }
+    disable_input: true
+    on_reply:
+      save_to: collected.verification_type
+      next:    fetch_private_profile
+
+  # ===========================================================================
+  # 2. Fetch private profile — includes wfTransferRequest
+  # POST /private/user/v1/search
+  # ===========================================================================
+  - id: fetch_private_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/private/user/v1/search"
+      body:
+        request:
+          filters:
+            userId: "{{ ctx.user_id_hash }}"
+          limit: 1
+    response_mapping:
+      - { from: "$.response.content[0].wfTransferRequest.wfId",          to: collected.wf_transfer_id }
+      - { from: "$.response.content[0].wfTransferRequest.departmentName", to: collected.transfer_dept_name }
+      - { from: "$.response.content[0].profileDetails.profileDesignationStatus", to: collected.designation_status }
+      - { from: "$.response.content[0].profileDetails.profileGroupStatus",       to: collected.group_status }
+      - { from: "$.response.content[0].channel",                          to: collected.user_channel }
+      - { from: "$.response.content[0].rootOrgId",                        to: collected.root_org_id }
+    on_success: branch_on_transfer_request
+    on_error:
+      any: fallback_show_submission_steps
+    timeout_ms: 5000
+
+  # ===========================================================================
+  # 3. Route based on whether a transfer request is pending
+  # ===========================================================================
+  - id: branch_on_transfer_request
+    type: branch
+    rules:
+      - { if: "ctx.collected.wf_transfer_id != None and ctx.collected.wf_transfer_id != ''",
+          then: lookup_mdo_leader }
+    default: show_submission_steps
+
+  # ===========================================================================
+  # 4a. Pending transfer request — look up MDO leader for target dept
+  # POST /private/user/v1/search with MDO_LEADER filter
+  # ===========================================================================
+  - id: lookup_mdo_leader
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/private/user/v1/search"
+      body:
+        request:
+          filters:
+            channel: "{{ ctx.collected.transfer_dept_name }}"
+            organisations.roles: ["MDO_LEADER"]
+            status: 1
+          limit: 1
+    response_mapping:
+      - { from: "$.response.count",                                                    to: collected.mdo_leader_count }
+      - { from: "$.response.content[0].profileDetails.personalDetails.firstname",      to: collected.mdo_leader_name }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail",   to: collected.mdo_leader_email }
+    on_success: branch_mdo_leader_found
+    on_error:
+      any: show_yp_fallback_message
+    timeout_ms: 5000
+
+  - id: branch_mdo_leader_found
+    type: branch
+    rules:
+      - { if: "ctx.collected.mdo_leader_count != None and ctx.collected.mdo_leader_count > 0",
+          then: show_mdo_leader_contact }
+    default: show_yp_fallback_message
+
+  - id: show_mdo_leader_contact
+    type: message
+    prompt:
+      text: |
+        Your transfer request to **{{ ctx.collected.transfer_dept_name }}** is currently pending.
+
+        The MDO Leader for that department who will approve your request is:
+
+        👤 **{{ ctx.collected.mdo_leader_name }}**
+        📧 {{ ctx.collected.mdo_leader_email }}
+
+        Please reach out to them directly to follow up on your designation/group verification.
+    next: verification_resolution_check
+
+  - id: show_yp_fallback_message
+    type: message
+    prompt:
+      text: |
+        Your transfer request to **{{ ctx.collected.transfer_dept_name }}** is pending, but we couldn't find an MDO Leader for that department.
+
+        Please contact the **Young Professional (YP)** assigned to your state/department for assistance.
+
+        You can also reach out to **support@igotkarmayogi.gov.in** for further help.
+    next: verification_resolution_check
+
+  # ===========================================================================
+  # 4b. No pending request — show UI submission steps
+  # ===========================================================================
+  - id: show_submission_steps
+    type: resolution
+    prompt:
+      text: "To get your **{{ ctx.collected.verification_type == 'V1' and 'designation' or 'group' }}** verified on iGOT Karmayogi:"
+    steps:
+      - "Go to your **Profile** page."
+      - "Click the **⋮ menu** → **Edit Profile**."
+      - "Navigate to the **Professional Details** section."
+      - "Fill in your **Designation** and **Group** fields accurately."
+      - "Click **Save Changes**."
+      - "Your MDO admin or MDO leader will review and approve the verification — this may take **2–5 business days**."
+      - "You will receive a notification once your profile is verified."
+    follow_up:
+      text: "Were you able to submit the verification request?"
+      quick_replies:
+        - { id: yes,     label: "✅ Yes, submitted" }
+        - { id: no,      label: "❌ No, having trouble submitting" }
+        - { id: waiting, label: "⏳ Already submitted, still waiting" }
+    on_reply:
+      yes:     satisfied
+      no:      verification_escalate
+      waiting: verification_waiting_message
+
+  - id: fallback_show_submission_steps
+    type: message
+    prompt:
+      text: |
+        To get your designation/group verified on iGOT:
+
+        1. Go to **Profile** → click **⋮ menu** → **Edit Profile**
+        2. Fill in **Designation** and **Group** under Professional Details
+        3. Click **Save Changes**
+        4. Your MDO admin will review and approve — this may take **2–5 business days**
+    next: verification_resolution_check
+
+  - id: verification_waiting_message
+    type: message
+    prompt:
+      text: |
+        If you've already submitted the request and it has been **more than 5 business days**, we'll escalate this for you.
+
+        If it's been less than 5 days, please wait as it is within the normal processing time.
+    quick_replies:
+      - { id: wait,     label: "👍 I'll wait" }
+      - { id: escalate, label: "📋 It's been 5+ days, escalate" }
+    disable_input: true
+    on_reply:
+      wait:     satisfied
+      escalate: verification_escalate
+
+  # --------------------------------------------------------------------------
+  # Satisfaction check
+  # --------------------------------------------------------------------------
+  - id: verification_resolution_check
+    type: message
+    prompt:
+      text: "Did this help resolve your profile verification issue?"
+    quick_replies:
+      - { id: yes, label: "✅ Yes, resolved" }
+      - { id: no,  label: "❌ No, need further help" }
+    disable_input: true
+    on_reply:
+      yes: satisfied
+      no:  verification_escalate
+
+  # ===========================================================================
+  # Escalation — auto-generate ticket via LLM
+  # ===========================================================================
+  - id: verification_escalate
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user has a profile verification issue that was not resolved through self-service.
+        Generate a Zoho support ticket.
+        Subject: "Profile Verification Issue — <designation/group/transfer>"
+        Description: include verification_type (V1=designation, V2=group, V3=transfer),
+        wf_transfer_id if present, transfer_dept_name if applicable,
+        designation_status, group_status, user_channel (org/dept name),
+        and a brief summary of the issue.
+      priority_override: P3
+    on_complete: confirm_ticket

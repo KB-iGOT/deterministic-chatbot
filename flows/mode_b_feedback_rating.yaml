@@ -1,0 +1,68 @@
+# =============================================================================
+# MODE B — DETERMINISTIC (NO API, NO TICKET)
+# =============================================================================
+# Flow: Unable to Submit Feedback / Rating 
+#
+# Covers:
+#   1. "Not Eligible to Rate the Course" error
+#   2. Other feedback/rating error messages
+#
+# SOP notes: Provide progress update timeline (4-5 hours) and certificate info.
+# Close the conversation without raising a ticket directly, as user must wait.
+# =============================================================================
+
+flow_id: FEEDBACK_RATING_ISSUE
+flow_type: deterministic
+version: 1
+
+metadata:
+  category:         course
+  menu_label:       "📝 Feedback / Rating issue"
+  menu_group:       "Learning"
+  menu_order:       5
+  classification:   Query
+  default_portal:   Learner Portal
+  default_priority: P4
+  default_severity: Sev 4
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "unable to submit feedback"
+    - "cannot rate course"
+    - "not eligible to rate"
+    - "error submitting feedback"
+    - "course rating issue"
+
+entry_node: show_not_eligible_info
+
+imports:
+  - _terminal
+
+nodes:
+  - id: show_not_eligible_info
+    type: message
+    prompt:
+      text: |
+        The course progress may take some time to update. You will be eligible to rate the course only after the progress is fully updated.
+        
+        We kindly request you to check again after **4–5 hours**.
+        
+        > ℹ️ **Please note that rating the course is not mandatory for certificate generation.**
+        
+        > Once you have completed the course, you may revisit after 4–5 hours, navigate to **My Learning**, select the course, complete the survey/feedback, and download your certificate.
+    next: ask_follow_up
+
+  - id: ask_follow_up
+    type: message
+    prompt:
+      text: "Is there anything else I can help you with?"
+    quick_replies:
+      - { id: ok, label: "✅ Understood, thank you" }
+    on_reply:
+      ok: satisfied
+
+  - id: satisfied
+    type: end
+    outcome: self_served

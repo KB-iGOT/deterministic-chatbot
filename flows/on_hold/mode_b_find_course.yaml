@@ -1,0 +1,525 @@
+# =============================================================================
+# MODE B — DETERMINISTIC + LLM TICKET TAIL
+# =============================================================================
+# Flow: Find a Course / Event / Marketplace Course (UC-4, UC-17, UC-20)
+#
+# Consolidates three previously separate flows:
+#   FIND_COURSE             (basic content search)
+#   FIND_COURSE_MODERATED   (composite search + CBP access settings + MDO lookup)
+#   EXTERNAL_COURSE         (marketplace guidance + event search)
+#
+# Entry question routes the user into one of three paths:
+#   PATH A — Marketplace/external course (Coursera, Harvard, edX, etc.)
+#             Pure guidance — no active enrollment cycle. No API needed.
+#   PATH B — Regular iGOT course or program
+#             Composite Search → CBP Access Settings → MDO lookup if restricted
+#   PATH C — Event on iGOT
+#             Composite Search → status / availability handling
+#
+# APIs used:
+#   GET  /api/user/private/v1/read/{user_id}  (karmayogi — user profile for org context)
+#   POST /api/composite/v4/search             (karmayogi — all-status course/event search)
+#   GET  /api/accessSettings/read/{course_id} (cbp_api — restriction check)
+#   POST /private/user/v1/search              (karmayogi — MDO admin lookup)
+#
+# KNOWN GAPS:
+#   [GAP-1] Semantic ≥90% match (SOP §1.2.2) approximated with keyword search.
+#   [GAP-4] Course hyperlink URL pattern not verified.
+# =============================================================================
+
+flow_id: FIND_COURSE
+flow_type: deterministic_with_llm_fallback
+version: 2
+
+metadata:
+  category:         course
+  menu_label:       "🔍 Can't find a course or event"
+  menu_group:       "Learning"
+  menu_order:       5
+  classification:   Service Request
+  default_priority: P3
+  default_severity: Sev 3
+  default_portal:   Learner Portal
+
+enabled_channels: [web]
+
+imports:
+  - _karmayogi_user
+  - _mdo_admin_lookup
+  - fragment: _zoho_ticket
+    with:
+      cf_category:     "Learning"
+      cf_sub_category: "Course / Event Not Found"
+      cf_flow_id:      "FIND_COURSE"
+
+entry_node: ask_search_type
+
+nodes:
+
+  # ===========================================================================
+  # 1. What are you looking for?
+  # ===========================================================================
+  - id: ask_search_type
+    type: message
+    prompt:
+      text: |
+        What are you looking for?
+    quick_replies:
+      - { id: course,      label: "📘 A course or program on iGOT" }
+      - { id: event,       label: "📅 An event on iGOT" }
+      - { id: marketplace, label: "🌐 Marketplace course (Coursera, Harvard, etc.)" }
+    disable_input: true
+    on_reply:
+      save_to: collected.search_type
+      course:      fetch_user_profile
+      event:       ask_event_name
+      marketplace: marketplace_guidance
+
+  # ===========================================================================
+  # PATH A — Marketplace / external course
+  # ===========================================================================
+  - id: marketplace_guidance
+    type: resolution
+    prompt:
+      text: |
+        **Marketplace / external courses** (Coursera, Harvard, edX, etc.) operate on a separate enrollment cycle managed centrally.
+
+        📢 **There is currently no active enrollment cycle for marketplace/external courses this year.**
+    steps:
+      - "Wait until the next enrollment cycle is announced — you will be notified once the process begins"
+    follow_up:
+      text: "Is there anything else I can help you with?"
+      quick_replies:
+        - { id: course, label: "📘 Search for a regular iGOT course instead" }
+        - { id: done,   label: "✅ No, that's all" }
+    on_reply:
+      course: fetch_user_profile
+      done:   satisfied
+
+  # ===========================================================================
+  # PATH B — Regular iGOT course or program
+  # Fetch user profile first for org context (used in moderated course display)
+  # ===========================================================================
+  # fetch_user_profile — provided by _karmayogi_user fragment
+  # on_success → diagnose_missing_fields (overridden below)
+  # on_error   → escalate_api_error (overridden below)
+
+  - id: diagnose_missing_fields
+    type: message
+    prompt:
+      text: |
+        Please share the **exact course or program name**, or a few keywords from the title.
+    next: ask_course_name
+
+  - id: ask_course_name
+    type: collect
+    prompt:
+      text: ""   # preceded by diagnose_missing_fields message — no repeat needed
+    field:
+      name:        collected.search_term
+      placeholder: "e.g. IED Awareness Course"
+    next: composite_search
+
+  # ===========================================================================
+  # Composite Search — searches all statuses including restricted courses
+  # ===========================================================================
+  - id: composite_search
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/composite/v4/search"
+      body:
+        request:
+          query: "{{ ctx.collected.search_term }}"
+          filters:
+            primaryCategory: ["Course", "Program"]
+            status: ["Live", "Review", "Draft", "Retired"]
+          sort_by:
+            createdOn: "desc"
+          limit: 10
+    response_mapping:
+      - { from: "$.count",                 to: collected.composite_count }
+      - { from: "$.content[0].name",       to: collected.course_name_found }
+      - { from: "$.content[0].status",     to: collected.course_status }
+      - { from: "$.content[0].identifier", to: collected.course_id }
+    on_success: branch_composite_results
+    on_error:
+      any: search_api_error
+
+  - id: branch_composite_results
+    type: branch
+    rules:
+      - { if: "ctx.collected.course_name_found == None",  then: course_not_found }
+      - { if: "ctx.collected.course_status == 'Retired'", then: show_course_retired }
+      - { if: "ctx.collected.course_status != 'Live'",    then: show_course_unavailable }
+    default: fetch_access_settings
+
+  # ===========================================================================
+  # Access Settings check (CBP API)
+  # ===========================================================================
+  - id: fetch_access_settings
+    type: api_call
+    integration: cbp_api
+    request:
+      method: GET
+      url: "/api/accessSettings/read/{{ ctx.collected.course_id }}"
+      headers:
+        wid: "{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.accessSettings", to: collected.access_settings_raw, transform: access_settings_is_restricted }
+    on_success: branch_on_access
+    on_error:
+      # 404 / no settings configured → treat as publicly accessible
+      not_found: show_course_public
+      any:       show_course_public
+
+  - id: branch_on_access
+    type: branch
+    rules:
+      - { if: "ctx.collected.access_settings_raw == True", then: show_moderated_course_info }
+    default: show_course_public
+
+  # ===========================================================================
+  # Course publicly accessible (no restrictions)
+  # ===========================================================================
+  - id: show_course_public
+    type: resolution
+    prompt:
+      text: |
+        ✅ We found the course you are looking for:
+
+        📘 **{{ ctx.collected.course_name_found }}**
+        📋 Status: **Live** — available for all users
+    steps:
+      - "Log in to the iGOT Karmayogi platform"
+      - "Search for \"**{{ ctx.collected.course_name_found }}**\" in the search bar"
+      - "Click on the course and select **Enroll**"
+    follow_up:
+      text: "Were you able to find and enroll in the course?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, found it" }
+        - { id: no,  label: "❌ No, still can't find it" }
+    on_reply:
+      yes: satisfied
+      no:  collect_user_email
+
+  # ===========================================================================
+  # Course is restricted / moderated
+  # ===========================================================================
+  - id: show_moderated_course_info
+    type: resolution
+    prompt:
+      text: |
+        📘 **{{ ctx.collected.course_name_found }}** is a **moderated course** — accessible only to specific authorized users (e.g. based on department, designation, or user group).
+
+        🏢 Your organization: **{{ ctx.collected.org_channel or "Not available" }}**
+    steps:
+      - "Contact your **MDO Admin** to confirm your eligibility and request access"
+      - "MDO Admin: **{{ ctx.collected.mdo_admin_name or 'Not available — use the lookup below' }}**"
+      - "MDO Email: **{{ ctx.collected.mdo_admin_email or 'Contact support for MDO details' }}**"
+    follow_up:
+      text: "What would you like to do?"
+      quick_replies:
+        - { id: lookup_mdo, label: "🔍 Look up my MDO admin" }
+        - { id: ticket,     label: "🎫 Raise a support ticket" }
+        - { id: close,      label: "✅ I'll contact my MDO directly" }
+    on_reply:
+      lookup_mdo: lookup_mdo_admin
+      ticket:     collect_user_email
+      close:      satisfied
+
+  # ===========================================================================
+  # MDO Admin lookup (provided by _mdo_admin_lookup fragment)
+  # lookup_mdo_admin — from fragment; on_success → mdo_found_result
+  # ===========================================================================
+  - id: mdo_found_result
+    type: branch
+    rules:
+      - { if: "ctx.collected.mdo_admin_count == 0 or ctx.collected.mdo_admin_count == None", then: no_mdo_found }
+    default: show_mdo_contact
+
+  - id: show_mdo_contact
+    type: resolution
+    prompt:
+      text: |
+        We found the MDO Admin for your organization:
+
+        👤 **{{ ctx.collected.mdo_admin_name }}**
+        📧 **{{ ctx.collected.mdo_admin_email }}**
+    steps:
+      - "Reach out to **{{ ctx.collected.mdo_admin_name }}** at **{{ ctx.collected.mdo_admin_email }}** to request access to **{{ ctx.collected.course_name_found }}**"
+    follow_up:
+      text: "Is there anything else I can help you with?"
+      quick_replies:
+        - { id: ticket, label: "🎫 Raise a ticket too" }
+        - { id: done,   label: "✅ No, thanks" }
+    on_reply:
+      ticket: collect_user_email
+      done:   satisfied
+
+  - id: no_mdo_found
+    type: resolution
+    prompt:
+      text: |
+        We could not find an MDO Admin for your organization automatically.
+    steps:
+      - "Raise a support ticket and our team will identify the correct contact person for access to **{{ ctx.collected.course_name_found }}**"
+    follow_up:
+      text: "Shall I raise a support ticket?"
+      quick_replies:
+        - { id: yes, label: "🎫 Yes, raise a ticket" }
+        - { id: no,  label: "❌ No, I'll try later" }
+    on_reply:
+      yes: collect_user_email
+      no:  satisfied
+
+  - id: mdo_api_error
+    type: message
+    prompt:
+      text: "⚠️ Could not look up MDO admin details right now. Please raise a ticket."
+    quick_replies:
+      - { id: ticket, label: "🎫 Raise a ticket" }
+    on_reply:
+      ticket: collect_user_email
+
+  # ===========================================================================
+  # Course found but not Live
+  # ===========================================================================
+  - id: show_course_retired
+    type: resolution
+    prompt:
+      text: |
+        📘 **{{ ctx.collected.course_name_found }}** has been **retired** from the platform and is no longer available for enrollment or access.
+    steps:
+      - "Browse the platform catalogue for an alternative course on this topic, or contact your MDO"
+    follow_up:
+      text: "Is there anything else I can help you with?"
+      quick_replies:
+        - { id: yes, label: "🔍 Search for another course" }
+        - { id: no,  label: "✅ That's all" }
+    on_reply:
+      yes: ask_course_name
+      no:  satisfied
+
+  - id: show_course_unavailable
+    type: resolution
+    prompt:
+      text: |
+        📘 **{{ ctx.collected.course_name_found }}** was found but is currently **not available** (Status: {{ ctx.collected.course_status or "Under Modification" }}).
+    steps:
+      - "The course is being updated by the creator and has not been published yet — please check back later"
+    follow_up:
+      text: "Is there anything else I can help you with?"
+      quick_replies:
+        - { id: yes, label: "🔍 Search for another course" }
+        - { id: no,  label: "✅ That's all" }
+    on_reply:
+      yes: ask_course_name
+      no:  satisfied
+
+  - id: course_not_found
+    type: resolution
+    prompt:
+      text: |
+        ❌ We could not find a course named **"{{ ctx.collected.search_term }}"**.
+
+        This may be a moderated course with restricted visibility, or the name may be slightly different.
+    steps:
+      - "Try a **shorter keyword** from the title"
+      - "If this is a restricted/moderated course, it may not appear in search — contact your MDO"
+      - "If the course was recently created, it may not have been published yet"
+    follow_up:
+      text: "What would you like to do?"
+      quick_replies:
+        - { id: retry,  label: "🔍 Try a different name" }
+        - { id: ticket, label: "🎫 Raise a ticket" }
+    on_reply:
+      retry:  ask_course_name
+      ticket: collect_user_email
+
+  # ===========================================================================
+  # PATH C — Event search
+  # ===========================================================================
+  - id: ask_event_name
+    type: collect
+    prompt:
+      text: |
+        Please share the **name of the event** you are looking for.
+    field:
+      name:        collected.event_name
+      placeholder: "e.g. Digital Leadership Summit 2026"
+    next: search_event
+
+  - id: search_event
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/composite/v4/search"
+      body:
+        request:
+          query: "{{ ctx.collected.event_name }}"
+          filters:
+            status: ["Live", "Review", "Draft", "Retired"]
+          sort_by:
+            createdOn: "desc"
+          limit: 5
+    response_mapping:
+      - { from: "$.count",                 to: collected.event_search_count }
+      - { from: "$.content[0].name",       to: collected.event_name_found }
+      - { from: "$.content[0].status",     to: collected.event_status }
+      - { from: "$.content[0].identifier", to: collected.event_id }
+    on_success: branch_event_results
+    on_error:
+      any: event_search_error
+
+  - id: branch_event_results
+    type: branch
+    rules:
+      - { if: "ctx.collected.event_name_found == None",  then: event_not_found }
+      - { if: "ctx.collected.event_status == 'Live'",    then: show_event_live }
+      - { if: "ctx.collected.event_status == 'Retired'", then: show_event_retired }
+    default: show_event_unavailable
+
+  - id: show_event_live
+    type: resolution
+    prompt:
+      text: |
+        ✅ We found an event matching your search:
+
+        📅 **{{ ctx.collected.event_name_found }}**
+        📋 Status: **Live**
+    steps:
+      - "Log in to the iGOT Karmayogi platform"
+      - "Search for \"**{{ ctx.collected.event_name_found }}**\" using the search bar"
+      - "Click on the event and register/join"
+    follow_up:
+      text: "Were you able to find and join the event?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, found it" }
+        - { id: no,  label: "❌ No, still can't find it" }
+    on_reply:
+      yes: satisfied
+      no:  collect_user_email
+
+  - id: show_event_retired
+    type: resolution
+    prompt:
+      text: |
+        The event **{{ ctx.collected.event_name_found }}** has been **retired** from the platform and is no longer available.
+    steps:
+      - "Please check the platform for upcoming events on a similar topic"
+    follow_up:
+      text: "Is there anything else I can help you with?"
+      quick_replies:
+        - { id: yes, label: "🔍 Search for another event" }
+        - { id: no,  label: "✅ That's all" }
+    on_reply:
+      yes: ask_event_name
+      no:  satisfied
+
+  - id: show_event_unavailable
+    type: resolution
+    prompt:
+      text: |
+        The event **{{ ctx.collected.event_name_found }}** was found but is currently **not available** (Status: {{ ctx.collected.event_status or "Under Review" }}).
+    steps:
+      - "It may be upcoming or under modification — please check back later"
+    follow_up:
+      text: "Is there anything else I can help you with?"
+      quick_replies:
+        - { id: yes, label: "🔍 Search for another event" }
+        - { id: no,  label: "✅ That's all" }
+    on_reply:
+      yes: ask_event_name
+      no:  satisfied
+
+  - id: event_not_found
+    type: resolution
+    prompt:
+      text: |
+        ❌ We could not find an event named **"{{ ctx.collected.event_name }}"** on the platform.
+    steps:
+      - "Try a different or shorter keyword"
+      - "If the event is restricted to specific users, please raise a support ticket"
+    follow_up:
+      text: "What would you like to do?"
+      quick_replies:
+        - { id: retry,  label: "🔍 Search again" }
+        - { id: ticket, label: "🎫 Raise a ticket" }
+    on_reply:
+      retry:  ask_event_name
+      ticket: collect_user_email
+
+  # ===========================================================================
+  # API errors
+  # ===========================================================================
+  - id: search_api_error
+    type: message
+    prompt:
+      text: "⚠️ Search is unavailable right now. Please try again or raise a ticket."
+    quick_replies:
+      - { id: retry,  label: "🔄 Try again" }
+      - { id: ticket, label: "🎫 Raise a ticket" }
+    on_reply:
+      retry:  ask_course_name
+      ticket: collect_user_email
+
+  - id: event_search_error
+    type: message
+    prompt:
+      text: "⚠️ We're having trouble searching for events right now. Please try again or raise a ticket."
+    quick_replies:
+      - { id: retry,  label: "🔄 Try again" }
+      - { id: ticket, label: "🎫 Raise a ticket" }
+    on_reply:
+      retry:  ask_event_name
+      ticket: collect_user_email
+
+  - id: escalate_api_error
+    type: message
+    prompt:
+      text: "⚠️ We couldn't fetch your profile right now. Please try again or raise a ticket."
+    quick_replies:
+      - { id: retry,  label: "🔄 Try again" }
+      - { id: ticket, label: "🎫 Raise a ticket" }
+    on_reply:
+      retry:  fetch_user_profile
+      ticket: collect_user_email
+
+  # ===========================================================================
+  # Escalation
+  # ===========================================================================
+  - id: collect_user_email
+    type: collect
+    prompt:
+      text: "Please share your **registered email address** to raise a ticket."
+    field:
+      name:        collected.email
+      type:        email
+      placeholder: "your.email@example.com"
+    next: find_course_escalate
+
+  - id: find_course_escalate
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user could not find or access a course/event on iGOT Karmayogi.
+        Generate a Zoho support ticket.
+        Subject: "Course/Event Not Found — {{ ctx.collected.search_term or ctx.collected.event_name or 'Unknown' }}"
+        Description: include search_type (course/event/marketplace), name searched,
+        result (not found / retired / unavailable / moderated), user org (org_channel),
+        mdo_admin_email if found, whether access_settings indicated restriction, user's email.
+      priority_override: P3
+    on_complete: confirm_ticket
+
+  # ── Terminal nodes ────────────────────────────────────────────────────────────
+  - id: satisfied
+    type: end
+    outcome: self_served

@@ -1,0 +1,70 @@
+fragment_id: enrollment_picker
+# Reusable enrollment list picker node.
+#
+# Renders a searchable, paginated course picker from the Karmayogi enrollment
+# list API and stores per-item fields into collected via extra_fields.
+#
+# Required params:
+#   node_id        — YAML node id  (e.g. pick_course_from_list, c1_pick_course)
+#   prompt_text    — Heading shown to the user above the picker
+#   field_name     — collected key to store the selected courseId
+#                    (e.g. course_id, c1_course_id)
+#   field_prefix   — Prefix for extra_field targets; use "" for no prefix,
+#                    "c1_" to store into collected.c1_course_name etc.
+#   next           — Node id to route to after selection
+#
+# Stored fields (all prefixed by field_prefix):
+#   collected.<prefix>course_name    — human-readable course name
+#   collected.<prefix>completion_pct — completionPercentage (0–100)
+#   collected.<prefix>completed_ids  — list of resource IDs fully completed (status == 2)
+#                                      used by diff_leaf_nodes in content/read cross-check
+#   collected.<prefix>incomplete_ids — fallback: list of resource IDs not yet completed
+#                                      (extracted from langContentStatus via
+#                                       extract_incomplete_ids transform)
+#                                      overwritten by diff_leaf_nodes after content/read
+#
+# Example import:
+#   - fragment: _enrollment_picker
+#     with:
+#       node_id:       pick_course_from_list
+#       prompt_text:   "Here are your enrolled courses. Select the one with the issue:"
+#       field_name:    course_id
+#       field_prefix:  ""
+#       next:          branch_on_completion
+
+nodes:
+  - id: {{ params.node_id }}
+    type: collect
+    prompt:
+      text: "{{ params.prompt_text }}"
+    field:
+      name: collected.{{ params.field_name }}
+      type: select
+    dynamic_options:
+      source: api
+      integration: karmayogi
+      request:
+        method: POST
+        url: "/api/course/private/v4/user/enrollment/list/{{ ctx.user_id_hash }}"
+        body:
+          request:
+            retiredCoursesEnabled: true
+            status: ["In-Progress", "Completed"]
+      response_mapping:
+        list_path:       "$.courses"
+        id_field:        courseId
+        label_field:     courseName
+        sub_label_field: completionPercentage
+        extra_fields:
+          - { from: courseName,           to: collected.{{ params.field_prefix }}course_name }
+          - { from: completionPercentage, to: collected.{{ params.field_prefix }}completion_pct }
+          - { from: langContentStatus,    to: collected.{{ params.field_prefix }}completed_ids,      transform: extract_completed_ids }
+          - { from: langContentStatus,    to: collected.{{ params.field_prefix }}incomplete_ids,     transform: extract_incomplete_ids }
+          - { from: status,              to: collected.{{ params.field_prefix }}enrollment_status,  transform: enrollment_status_to_int }
+          - { from: completedOn,         to: collected.{{ params.field_prefix }}completed_on_iso,   transform: unix_ms_to_iso }
+          - { from: issuedCertificates,  to: collected.{{ params.field_prefix }}issued_certificates }
+          - { from: batchId,             to: collected.{{ params.field_prefix }}batch_id }
+      search:     { enabled: true, placeholder: "Search your enrolled courses..." }
+      pagination: { enabled: true, page_size: 10 }
+      cache_ttl:  300
+    next: {{ params.next }}

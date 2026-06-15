@@ -1,0 +1,290 @@
+# =============================================================================
+# MODE B — DETERMINISTIC + LLM TICKET TAIL
+# =============================================================================
+# Flow: Access Revoked (SOP: Access revoked.docx)
+#
+# Covers the error:
+#   "Your access has been revoked because your organization no longer identifies
+#    you as a user. To regain access, please submit a 'Transfer Request' and
+#    choose the correct organization."
+#
+# Mode B pattern:
+#   1. Fetch private profile → check wfTransferRequest status
+#   2a. If transfer request ALREADY raised:
+#       → confirm target org with user
+#       → guide to wait for MDO approval (or re-raise if wrong org)
+#   2b. If NO transfer request raised:
+#       → guide user through Transfer Request steps
+#       → handle edge cases (button disabled, org not in dropdown)
+#   3. If unresolved → escalate via transfer_llm (auto_raise)
+#
+# APIs used:
+#   POST /private/user/v1/search  (private profile — includes wfTransferRequest)
+#
+# KNOWN GAPS (see flows/README.md §Gaps):
+#   [GAP-5] MDO admin lookup for transfer target org not implemented.
+#           _mdo_admin_lookup fragment uses collected.root_org_id (current user's org),
+#           but for access revoked we need the MDO of the TRANSFER TARGET org.
+#           This requires looking up the target org's rootOrgId by its name — an API
+#           that is not currently available. Manual escalation used as fallback.
+#   [GAP-6] SPOC / YP lookup (when no MDO admin exists for the org) not available.
+#           SOP §3 requires fetching SPOC for Ministry/State/Department;
+#           no API endpoint is currently wired for this.
+# =============================================================================
+
+flow_id: ACCESS_REVOKED
+flow_type: deterministic_with_llm_fallback
+version: 1
+
+metadata:
+  category:         profile
+  menu_label:       "🔒 Access revoked"
+  menu_group:       "Account & Login"
+  menu_order:       2
+  classification:   Incident
+  default_priority: P2
+  default_severity: Sev 2
+  default_portal:   Learner Portal
+
+enabled_channels: [web]
+
+imports:
+  - fragment: _zoho_ticket
+    with:
+      cf_category:     "Account & Login"
+      cf_sub_category: "Access Revoked"
+      cf_flow_id:      "ACCESS_REVOKED"
+
+entry_node: intro_context
+
+nodes:
+
+  # ===========================================================================
+  # 1. Set context — user sees the "access revoked" error
+  # ===========================================================================
+  - id: intro_context
+    type: message
+    prompt:
+      text: |
+        I understand you are seeing this error on the platform:
+
+        > *"Your access has been revoked because your organization no longer identifies you as a user. To regain access, please submit a 'Transfer Request' and choose the correct organization."*
+
+        This typically happens when the MDO of your previous department has marked your profile as **"Not My User"**.
+
+        Let me check your account status to guide you to the right next step.
+    next: fetch_private_profile
+
+  # ===========================================================================
+  # 2. Fetch private profile — check wfTransferRequest field
+  # ===========================================================================
+  - id: fetch_private_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/private/user/v1/search"
+      body:
+        request:
+          filters:
+            userId: "{{ ctx.user_id_hash }}"
+          limit: 1
+    response_mapping:
+      - { from: "$.response.content[0].wfTransferRequest.wfId",          to: collected.wf_transfer_id }
+      - { from: "$.response.content[0].wfTransferRequest.departmentName", to: collected.transfer_dept_name }
+      - { from: "$.response.content[0].channel",                          to: collected.user_channel }
+      - { from: "$.response.content[0].rootOrgId",                        to: collected.root_org_id }
+    on_success: branch_on_transfer_status
+    on_error:
+      any: profile_api_error
+
+  # ===========================================================================
+  # 3. Branch: has pending transfer request vs. none raised
+  # ===========================================================================
+  - id: branch_on_transfer_status
+    type: branch
+    rules:
+      - { if: "ctx.collected.wf_transfer_id != None and ctx.collected.wf_transfer_id != ''",
+          then: show_pending_transfer }
+    default: guide_raise_transfer
+
+  # ===========================================================================
+  # PATH A — Transfer request already raised
+  # ===========================================================================
+  - id: show_pending_transfer
+    type: message
+    prompt:
+      text: |
+        ✅ Good news — we can see that a **Transfer Request has already been raised**.
+
+        📋 Transfer request raised to: **{{ ctx.collected.transfer_dept_name or "your selected organization" }}**
+
+        The request is currently **pending approval** by the MDO Leader of the target organization.
+
+        Is **{{ ctx.collected.transfer_dept_name or "this organization" }}** the correct organization you want to transfer to?
+    quick_replies:
+      - { id: yes_correct, label: "✅ Yes, that's correct" }
+      - { id: no_wrong,    label: "❌ No, that's the wrong org" }
+    disable_input: true
+    on_reply:
+      save_to: collected.transfer_org_confirmed
+      yes_correct: wait_for_mdo_approval
+      no_wrong:    cancel_and_reraise_guide
+
+  - id: wait_for_mdo_approval
+    type: resolution
+    prompt:
+      text: |
+        Your transfer request to **{{ ctx.collected.transfer_dept_name }}** is pending approval.
+    steps:
+      - "The MDO Leader of **{{ ctx.collected.transfer_dept_name }}** will receive the transfer request and needs to approve it"
+      - "Once approved, your access will be restored automatically"
+      - "If approval is taking too long, reach out directly to the MDO Admin of **{{ ctx.collected.transfer_dept_name }}** and ask them to approve your request"
+    follow_up:
+      text: "Has your issue been resolved, or do you need further help?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, resolved" }
+        - { id: no,  label: "❌ No, I need help" }
+    on_reply:
+      yes: satisfied
+      no:  collect_user_email
+
+  - id: cancel_and_reraise_guide
+    type: resolution
+    prompt:
+      text: |
+        Since the transfer request is for the wrong organization, you need to **cancel it and raise a new one**.
+    steps:
+      - "Log in to the iGOT Karmayogi platform (even in limited access mode)"
+      - "Go to your **Profile** → click **View Profile**"
+      - "Look for the pending **Transfer Request** and click **Cancel Transfer Request**"
+      - "Once cancelled, click **Make Transfer Request** again"
+      - "Select the **correct organization**, group, and designation"
+      - "Click **Submit** — the new request will go to the correct MDO for approval"
+    follow_up:
+      text: "Were you able to cancel and re-raise the transfer request?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, re-raised successfully" }
+        - { id: no,  label: "❌ No, need more help" }
+    on_reply:
+      yes: satisfied
+      no:  collect_user_email
+
+  # ===========================================================================
+  # PATH B — No transfer request raised yet
+  # ===========================================================================
+  - id: guide_raise_transfer
+    type: resolution
+    prompt:
+      text: |
+        Your account does not have a pending Transfer Request. You need to **raise one** to regain access.
+    steps:
+      - "Log in to the platform (you may have limited access)"
+      - "Click on your **Profile Icon** (top right corner) → **View Profile**"
+      - "Click **Make Transfer Request**"
+      - "Select your **correct Organization Name** from the dropdown"
+      - "Choose your **Group** and **Designation** (if applicable)"
+      - "Double-check that all details are accurate, then click **Submit**"
+      - "The request goes to the MDO Admin of the selected organization — once approved, your full access is restored"
+    follow_up:
+      text: "Were you able to submit the Transfer Request?"
+      quick_replies:
+        - { id: yes,     label: "✅ Yes, submitted" }
+        - { id: btn_off, label: "⚠️ Button is greyed out / disabled" }
+        - { id: no_org,  label: "🔍 My organization is not in the list" }
+        - { id: no_help, label: "❌ Need more help" }
+    on_reply:
+      yes:     satisfied
+      btn_off: guide_button_disabled
+      no_org:  guide_org_not_found
+      no_help: collect_user_email
+
+  - id: guide_button_disabled
+    type: resolution
+    prompt:
+      text: |
+        The **"Make Transfer Request"** button is disabled when there is already a **pending request** elsewhere in your profile — typically under **Primary Details**.
+    steps:
+      - "Go to your **Profile** → **Primary Details** section"
+      - "Look for any pending request and click **Withdraw Request**"
+      - "Once the pending request is withdrawn, the **Make Transfer Request** button will become active again"
+      - "Raise a fresh Transfer Request with the correct organization details"
+    follow_up:
+      text: "Were you able to withdraw and re-raise the Transfer Request?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, done" }
+        - { id: no,  label: "❌ Still facing issues" }
+    on_reply:
+      yes: satisfied
+      no:  collect_user_email
+
+  - id: guide_org_not_found
+    type: resolution
+    prompt:
+      text: |
+        If your organization does not appear in the dropdown, please share the following details and we will raise a ticket to locate the correct organization.
+    steps:
+      - "**Ministry Name**"
+      - "**State Name** (if State Government)"
+      - "**Department / Organization Name** (exact name)"
+    follow_up:
+      text: "Please share the organization details and we'll raise a ticket for you."
+      quick_replies:
+        - { id: share, label: "📝 Share details & raise ticket" }
+    on_reply:
+      share: collect_user_email
+
+  # ===========================================================================
+  # Profile API error — fallback
+  # ===========================================================================
+  - id: profile_api_error
+    type: message
+    prompt:
+      text: |
+        ⚠️ We couldn't fetch your profile details right now. This may be a temporary issue.
+
+        Would you like to try again, or raise a support ticket directly?
+    quick_replies:
+      - { id: retry,  label: "🔄 Try again" }
+      - { id: ticket, label: "🎫 Raise a ticket" }
+    on_reply:
+      retry:  fetch_private_profile
+      ticket: collect_user_email
+
+  # ===========================================================================
+  # Escalation — collect email then LLM ticket summary
+  # ===========================================================================
+  - id: collect_user_email
+    type: collect
+    prompt:
+      text: |
+        To raise a support ticket, please share your **registered email address**.
+    field:
+      name:        collected.email
+      type:        email
+      placeholder: "your.email@example.com"
+    next: access_revoked_escalate
+
+  - id: access_revoked_escalate
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user's access has been revoked on the iGOT Karmayogi platform.
+        Generate a Zoho support ticket.
+        Subject: "Access Revoked — Transfer Request Assistance"
+        Description: include whether a transfer request was already pending (wf_transfer_id,
+        transfer_dept_name), which path the user followed (pending/no-pending), which sub-issue
+        they hit (button disabled / org not found / MDO not available / other), the user's
+        current channel/org (user_channel), and the user's email.
+      priority_override: P2
+    on_complete: confirm_ticket
+
+  # ── Terminal nodes ────────────────────────────────────────────────────────────
+  - id: satisfied
+    type: end
+    outcome: self_served

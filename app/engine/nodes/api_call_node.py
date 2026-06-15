@@ -1,0 +1,974 @@
+"""`api_call` node — invoke an external API with an EXPLICIT request block.
+
+Design principle: API details (method, URL, params, body, response mapping) live
+in the YAML, not in Python code. This keeps flows readable by non-developers —
+they can see exactly which API the bot calls and what data flows in/out.
+
+Python "integration adapters" (KarmayogiService, ZohoDeskAdapter, etc.) provide
+ONLY:
+  - Base URL (so YAML uses relative paths)
+  - Auth header injection (so YAML never contains secrets)
+  - OAuth refresh logic (e.g. Zoho)
+  - Common retry policy
+  - Optional response unwrapping (e.g. Karmayogi wraps responses in {result: ...})
+
+YAML shape (canonical example):
+
+    - id: fetch_user
+      type: api_call
+      integration: karmayogi              # which adapter executes the request
+      request:
+        method: GET                       # GET | POST | PUT | PATCH | DELETE
+        url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+        params:                           # query string
+          fields: "firstName,lastName,profileDetails"
+        body:                             # JSON body for POST/PUT/PATCH
+          filters:
+            limit: 10
+        headers:                          # extra headers (auth handled by adapter)
+          X-Channel: "{{ ctx.channel }}"
+      response_mapping:                   # JSONPath → context dotted-path
+        - { from: $.result.firstName,         to: collected.first_name }
+        - { from: $.result.profileDetails,    to: collected.profile_details }
+        - { from: $.result.enrollments,       to: collected.enrollments }
+      on_success: branch_on_user
+      on_error:
+        timeout:    escalate_timeout
+        not_found:  user_not_found
+        any:        escalate_generic
+      timeout_ms: 5000
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any, Callable
+
+log = logging.getLogger(__name__)
+
+from app.engine.nodes.base import NodeHandler
+from app.engine.state import ConversationState
+from app.engine.template import render
+
+
+def _build_env_vars() -> dict[str, str]:
+    """Build safe, non-secret env vars exposed to YAML templates as ``{{ env.VAR }}``.
+
+    Only explicit non-sensitive config values are included — secrets (tokens,
+    passwords, keys) are never exposed to templates.
+    """
+    from app.config import settings
+    return {
+        "ZOHO_DEPARTMENT_ID": settings.zoho_department_id,
+    }
+
+
+class ApiCallNode(NodeHandler):
+    node_type = "api_call"
+
+    def _validate(self, cfg: dict[str, Any]) -> None:
+        super()._validate(cfg)
+        if "integration" not in cfg:
+            raise ValueError(
+                f"api_call node {cfg['id']!r} requires 'integration' (e.g. karmayogi, zoho_desk_api)"
+            )
+        if "request" not in cfg or not isinstance(cfg["request"], dict):
+            raise ValueError(
+                f"api_call node {cfg['id']!r} requires a 'request' block "
+                f"with method + url"
+            )
+        req = cfg["request"]
+        if "method" not in req or "url" not in req:
+            raise ValueError(
+                f"api_call node {cfg['id']!r} 'request' must specify 'method' and 'url'"
+            )
+        if req["method"].upper() not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            raise ValueError(
+                f"api_call node {cfg['id']!r} unsupported method {req['method']!r}"
+            )
+        if "on_success" not in cfg:
+            raise ValueError(f"api_call node {cfg['id']!r} requires 'on_success'")
+
+    def build(self, cfg: dict[str, Any]) -> Callable[[ConversationState], dict]:
+        self._validate(cfg)
+
+        integration_name: str = cfg["integration"]
+        request_cfg: dict = cfg["request"]
+        response_mapping: list = cfg.get("response_mapping", [])
+        timeout_ms: int = cfg.get("timeout_ms", 10_000)
+
+        async def run(state: ConversationState) -> dict:
+            node_id = cfg["id"]
+            integration = self.services.get(integration_name)
+            if integration is None:
+                log.error(
+                    "[api_call] node=%s integration=%r not registered in ServiceRegistry — routing to on_error",
+                    node_id, integration_name,
+                )
+                return _record_error(state, cfg, "integration_not_registered")
+
+            ctx = _state_ctx(state)
+            env_vars = _build_env_vars()
+
+            # Render every part of the request via Jinja against ctx + env
+            try:
+                rendered = _render_request(request_cfg, ctx, env_vars)
+            except Exception as e:  # noqa: BLE001
+                log.error(
+                    "[api_call] node=%s request template render failed: %s\n  request_cfg=%s",
+                    node_id, e, request_cfg,
+                )
+                return _record_error(state, cfg, f"request_render_failed:{e}")
+
+            log.info(
+                "[api_call] node=%s  integration=%s  %s %s  timeout=%dms",
+                node_id, integration_name, rendered["method"], rendered["url"], timeout_ms,
+            )
+
+            # Delegate the HTTP call to the integration adapter.
+            # Adapter prepends base URL + injects auth + handles refresh on 401.
+            try:
+                result = await asyncio.wait_for(
+                    integration.execute_request(
+                        method=rendered["method"],
+                        url=rendered["url"],
+                        params=rendered.get("params"),
+                        body=rendered.get("body"),
+                        headers=rendered.get("headers"),
+                    ),
+                    timeout=timeout_ms / 1000.0,
+                )
+            except asyncio.TimeoutError:
+                log.error(
+                    "[api_call] node=%s timed out after %dms (integration=%s %s %s)",
+                    node_id, timeout_ms, integration_name, rendered["method"], rendered["url"],
+                )
+                return _record_error(state, cfg, "timeout")
+            except IntegrationNotFound:
+                log.error(
+                    "[api_call] node=%s got 404 Not Found from %s %s %s",
+                    node_id, integration_name, rendered["method"], rendered["url"],
+                )
+                return _record_error(state, cfg, "not_found")
+            except Exception as e:  # noqa: BLE001
+                log.error(
+                    "[api_call] node=%s raised %s: %s  (integration=%s %s %s)",
+                    node_id, type(e).__name__, e,
+                    integration_name, rendered["method"], rendered["url"],
+                )
+                return _record_error(state, cfg, f"any:{e}")
+
+            log.info("[api_call] node=%s completed successfully", node_id)
+
+            # Apply response_mapping → populate state.collected
+            updates: dict[str, Any] = {}
+            for mapping in response_mapping:
+                src_path = mapping["from"].lstrip("$").lstrip(".")
+                dst_path = mapping["to"].removeprefix("collected.")
+                # Use list-aware getter when path contains a wildcard
+                if "[*]" in src_path or (".*" in src_path):
+                    value = _jsonpath_get_list(result, src_path) if src_path else result
+                else:
+                    value = _jsonpath_get(result, src_path) if src_path else result
+                # find_where: filter a list to the first item where item[field] == ctx value.
+                # Useful when the API returns all records and the desired record must be
+                # located client-side (e.g. Karmayogi enrollment list ignores courseId filter).
+                # Example: find_where: {field: courseId, equals_ctx: collected.c1_course_id}
+                find_where = mapping.get("find_where")
+                if find_where and isinstance(value, list):
+                    fw_field = find_where.get("field")
+                    fw_ctx_path = find_where.get("equals_ctx", "")
+                    # Resolve the target value from ctx (dotted path, e.g. collected.c1_course_id)
+                    target_val = _resolve_ctx_path(ctx, fw_ctx_path)
+                    value = next(
+                        (item for item in value if isinstance(item, dict) and item.get(fw_field) == target_val),
+                        None,
+                    )
+                # sub_path: after find_where (or any list-narrowing step), extract a
+                # sub-field from the matched dict before applying transforms.
+                sub_path = mapping.get("sub_path")
+                if sub_path and isinstance(value, dict):
+                    value = value.get(sub_path)
+                # Apply named transform if specified.
+                # NOTE: transforms run even when value is None — each transform
+                # is responsible for handling None (e.g. unix_ms_to_iso returns
+                # None, extract_incomplete_ids returns [], enrollment_status_to_int
+                # returns 0). This ensures None status values still get normalised
+                # to 0 rather than being stored as None and silently skipping branches.
+                #
+                # transform_ctx_key: optional dotted path (e.g. collected.course_id)
+                # resolved from ctx and passed as the second argument to the transform.
+                # Enables "context-aware" transforms such as filtering a list by a
+                # collected field (e.g. kp_status_by_id needs both kpList and course_id).
+                transform = mapping.get("transform")
+                transform_ctx_key = mapping.get("transform_ctx_key")
+                if transform:
+                    transform_fn = _TRANSFORMS.get(transform)
+                    if transform_fn is not None:
+                        if transform_ctx_key:
+                            ctx_val = _resolve_ctx_path(ctx, transform_ctx_key)
+                            value = transform_fn(value, ctx_val)
+                        else:
+                            value = transform_fn(value)
+                updates[dst_path] = value
+
+            return {
+                "current_node": cfg["id"],
+                "collected": {**state.collected, **updates},
+            }
+
+        return run
+
+    def next_node(self, cfg: dict[str, Any]) -> str | None:
+        # Happy-path next-edge. Error-path edges (timeout / not_found / any) are
+        # routed via conditional edges if the YAML declares on_error.
+        return cfg.get("on_success")
+
+    def register_conditional_edges(self, graph: Any, cfg: dict[str, Any]) -> bool:
+        """If `on_error` is declared, register conditional routing so failures
+        go to the right node."""
+        on_error = cfg.get("on_error")
+        if not isinstance(on_error, dict):
+            return False  # caller falls back to simple on_success edge
+
+        on_success = cfg["on_success"]
+        node_id = cfg["id"]
+
+        def route(state: ConversationState) -> str:
+            err = (state.collected or {}).get("_last_api_error", "")
+            if not err:
+                return on_success
+            # Match against error keys: timeout / not_found / any
+            for key, target in on_error.items():
+                if err.startswith(key + ":") or err == key:
+                    return target
+            return on_error.get("any", on_success)
+
+        targets = {on_success, *on_error.values()}
+        graph.add_conditional_edges(node_id, route, {t: t for t in targets})
+        return True
+
+
+# ----------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------
+
+class IntegrationNotFound(Exception):
+    """Raised by an adapter when the resource doesn't exist (404-like)."""
+
+
+def _resolve_ctx_path(ctx: dict[str, Any], dotted_path: str) -> Any:
+    """Resolve a dotted context path (e.g. 'collected.c1_course_id') from ctx."""
+    parts = [p for p in dotted_path.split(".") if p]
+    cur: Any = ctx
+    for part in parts:
+        if isinstance(cur, dict):
+            cur = cur.get(part)
+        else:
+            return None
+        if cur is None:
+            return None
+    return cur
+
+
+def _state_ctx(state: ConversationState) -> dict[str, Any]:
+    return {
+        "collected": state.collected,
+        "counters": state.counters,
+        "user_id_hash": state.user_id_hash,
+        "channel": state.channel,
+        "session_id": str(state.session_id),
+        "flow_id": state.flow_id,
+        "language": state.language,
+        # ticket_draft is populated by transfer_llm; exposed so _zoho_ticket.yaml
+        # can use {{ ctx.ticket_draft.subject }} / {{ ctx.ticket_draft.description }}
+        "ticket_draft": state.ticket_draft.model_dump() if state.ticket_draft else {},
+    }
+
+
+def _render_request(
+    request_cfg: dict[str, Any],
+    ctx: dict[str, Any],
+    env_vars: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Render Jinja templates inside the request block (url, params, body, headers).
+
+    ``env_vars`` is exposed as the top-level ``env`` variable so YAML templates
+    can use ``{{ env.ZOHO_DEPARTMENT_ID }}`` etc.
+    """
+    extra = {"env": env_vars or {}}
+    out: dict[str, Any] = {
+        "method": request_cfg["method"].upper(),
+        "url": render(request_cfg["url"], ctx, extra_vars=extra),
+    }
+    if "params" in request_cfg and request_cfg["params"]:
+        out["params"] = {k: render(str(v), ctx, extra_vars=extra) for k, v in request_cfg["params"].items()}
+    if "body" in request_cfg and request_cfg["body"]:
+        out["body"] = _render_value(request_cfg["body"], ctx, extra_vars=extra)
+    if "headers" in request_cfg and request_cfg["headers"]:
+        out["headers"] = {k: render(str(v), ctx, extra_vars=extra) for k, v in request_cfg["headers"].items()}
+    return out
+
+
+def _render_value(value: Any, ctx: dict[str, Any], extra_vars: dict[str, Any] | None = None) -> Any:
+    """Recursively render Jinja templates in nested dicts/lists/strings.
+
+    Uses `render_native` for string values so that collected fields containing
+    lists or dicts (e.g. `incomplete_ids`) are passed as proper JSON types in
+    request bodies rather than being coerced to their string representation.
+    """
+    if isinstance(value, str):
+        from app.engine.template import render_native
+        return render_native(value, ctx, extra_vars=extra_vars)
+    if isinstance(value, dict):
+        return {k: _render_value(v, ctx, extra_vars=extra_vars) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_render_value(v, ctx, extra_vars=extra_vars) for v in value]
+    return value
+
+
+def _record_error(state: ConversationState, cfg: dict[str, Any], error: str) -> dict[str, Any]:
+    log.warning("[api_call] node=%s recording error → %r (will route via on_error)", cfg["id"], error)
+    return {
+        "current_node": cfg["id"],
+        "collected": {**state.collected, "_last_api_error": error},
+    }
+
+
+def _extract_incomplete_ids(lang_content_status: Any) -> list[str]:
+    """Extract resource IDs where completion status != 2 from langContentStatus.
+
+    langContentStatus shape: {"en": {"resource_id": 0|1|2, ...}, ...}
+    Values: 0 = not started, 1 = in progress, 2 = completed.
+    Returns deduplicated list of IDs that are not yet completed.
+    """
+    if not isinstance(lang_content_status, dict):
+        return []
+    ids: set[str] = set()
+    for resources in lang_content_status.values():
+        if isinstance(resources, dict):
+            for resource_id, status in resources.items():
+                if status != 2:
+                    ids.add(resource_id)
+    return list(ids)
+
+
+def _extract_completed_ids(lang_content_status: Any) -> list[str]:
+    """Extract resource IDs where completion status == 2 from langContentStatus.
+
+    langContentStatus shape: {"en": {"resource_id": 0|1|2, ...}, ...}
+    Values: 0 = not started, 1 = in progress, 2 = completed.
+    Returns deduplicated list of IDs that are fully completed.
+    """
+    if not isinstance(lang_content_status, dict):
+        return []
+    ids: set[str] = set()
+    for resources in lang_content_status.values():
+        if isinstance(resources, dict):
+            for resource_id, status in resources.items():
+                if status == 2:
+                    ids.add(resource_id)
+    return list(ids)
+
+
+def _diff_leaf_nodes(leaf_nodes: Any, completed_ids: Any) -> list[str]:
+    """Return leaf node IDs that are not yet completed.
+
+    leaf_nodes   — list of all resource IDs in the course (from content/read API).
+    completed_ids — list of IDs the user has fully completed (status == 2 in
+                    langContentStatus, stored via extract_completed_ids transform).
+
+    Any leaf node absent from completed_ids is considered incomplete (not started
+    or in progress). This cross-check catches resources the user has never opened
+    and therefore do not appear in langContentStatus at all.
+    """
+    if not isinstance(leaf_nodes, list):
+        return []
+    done: set[str] = set(completed_ids) if isinstance(completed_ids, list) else set()
+    return [rid for rid in leaf_nodes if rid not in done]
+
+
+def _extract_all_names(names: Any) -> str:
+    """Convert a list of resource names into a newline-separated bullet string.
+
+    Used to surface all incomplete resource names in a single template variable
+    instead of only content[0].name.
+
+    Example output:
+        - Introduction to Python
+        - Module 2: Data Types
+        - Final Assessment
+    """
+    if not isinstance(names, list):
+        return str(names) if names else ""
+    clean = [str(n) for n in names if n]
+    return "\n".join(f"- {n}" for n in clean)
+
+
+_SCORM_MIME = "application/vnd.ekstep.html-archive"
+
+
+def _extract_scorm_resource_name(content_list: Any) -> str:
+    """Return the name of the first SCORM resource in the content list.
+
+    content_list is the full $.content[*] array (list of dicts).
+    Returns empty string if no SCORM resource is found.
+    """
+    if not isinstance(content_list, list):
+        return ""
+    for item in content_list:
+        if isinstance(item, dict) and item.get("mimeType") == _SCORM_MIME:
+            return item.get("name") or ""
+    return ""
+
+
+def _extract_scorm_duration_minutes(content_list: Any) -> float:
+    """Return the duration (in minutes) of the first SCORM resource in the content list.
+
+    content_list is the full $.content[*] array (list of dicts).
+    Returns 0.0 if no SCORM resource is found.
+    """
+    if not isinstance(content_list, list):
+        return 0.0
+    for item in content_list:
+        if isinstance(item, dict) and item.get("mimeType") == _SCORM_MIME:
+            return _duration_to_minutes(item.get("duration"))
+    return 0.0
+
+
+def _detect_assessment_only(content_list: Any) -> bool:
+    """Return True if every item in the content list has primaryCategory == 'Course Assessment'.
+
+    Used to route to the assessment guidance path only when ALL pending resources
+    are assessments (i.e. all learning resources are already completed).
+    content_list is the full $.content[*] array (list of dicts).
+    """
+    if not isinstance(content_list, list) or not content_list:
+        return False
+    return all(
+        isinstance(item, dict) and item.get("primaryCategory") == "Course Assessment"
+        for item in content_list
+    )
+
+
+def _duration_to_minutes(duration: Any) -> float:
+    """Convert raw duration seconds (str or number) to rounded minutes."""
+    try:
+        return round(float(duration) / 60, 1)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _detect_scorm(mimetypes: Any) -> bool:
+    """Return True if any mimeType in the list is the SCORM HTML-archive type."""
+    scorm_mime = "application/vnd.ekstep.html-archive"
+    if isinstance(mimetypes, list):
+        return any(m == scorm_mime for m in mimetypes if m)
+    return mimetypes == scorm_mime
+
+
+def _unix_ms_to_iso(timestamp: Any) -> str | None:
+    """Convert a Unix milliseconds timestamp (int or float) to an ISO 8601 UTC string.
+
+    Karmayogi APIs return completedOn / enrolledDate as Unix ms integers.
+    The expression evaluator's hours_since() helper expects ISO strings.
+    Returns None if the value is None or cannot be converted.
+    """
+    if timestamp is None:
+        return None
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromtimestamp(int(timestamp) / 1000.0, tz=timezone.utc)
+        return dt.isoformat()
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+_ENROLLMENT_STATUS_MAP: dict[str, int] = {
+    # String values returned by Karmayogi enrollment list API
+    "notEnrolled":  0,
+    "not enrolled": 0,
+    "not started":  0,
+    "NotEnrolled":  0,
+    "In-Progress":  1,
+    "in-progress":  1,
+    "inprogress":   1,
+    "Completed":    2,
+    "completed":    2,
+}
+
+
+def _enrollment_status_to_int(status: Any) -> int:
+    """Normalise Karmayogi enrollment status to 0/1/2 integer.
+
+    The enrollment list API may return the status field as a string
+    ("In-Progress", "Completed") or as a numeric code (0, 1, 2).
+    This transform maps both representations to a consistent integer so
+    that branch rules can use simple == comparisons.
+      0 = not started / not enrolled
+      1 = in progress
+      2 = completed
+    """
+    if status is None:
+        log.warning("[enrollment_status_to_int] status is None — defaulting to 0")
+        return 0
+    if isinstance(status, int):
+        return status
+    if isinstance(status, float):
+        return int(status)
+    if isinstance(status, str):
+        if status in _ENROLLMENT_STATUS_MAP:
+            return _ENROLLMENT_STATUS_MAP[status]
+        normalised = status.lower().replace("-", "").replace(" ", "")
+        for key, val in _ENROLLMENT_STATUS_MAP.items():
+            if key.lower().replace("-", "").replace(" ", "") == normalised:
+                return val
+        log.warning("[enrollment_status_to_int] unrecognised status %r — defaulting to 0", status)
+    else:
+        log.warning("[enrollment_status_to_int] unexpected type %s for value %r — defaulting to 0", type(status).__name__, status)
+    return 0  # Default: treat unknown as not started
+
+
+def _extract_child_course_ids(children: Any) -> list[str]:
+    """Extract identifiers of direct child courses/modules from a content hierarchy.
+
+    Used with GET /api/content/v2/read/{course_id} response_mapping on
+    ``$.content.children`` to get the list of child course/resource IDs for
+    program progress checks.
+
+    Returns a deduplicated list of identifier strings (empty list on failure).
+    """
+    if not isinstance(children, list):
+        return []
+    return [
+        item["identifier"]
+        for item in children
+        if isinstance(item, dict) and item.get("identifier")
+    ]
+
+
+def _week_label_from_start(start_date_str: Any, week_index: int) -> str:
+    """Compute a human-readable date range string for a specific week of the Insights API period.
+
+    The Insights API returns a 4-week window with `startDate` (oldest Monday) and
+    `endDate` (newest Sunday).  Weeks are indexed oldest-first:
+      week_index 0 → w4 (oldest week, starts at startDate)
+      week_index 1 → w3
+      week_index 2 → w2
+      week_index 3 → w1 (most recent week)
+
+    Returns a string like "11 May – 17 May 2026" or "28 May – 03 Jun 2026".
+    Falls back to a plain label when the date cannot be parsed.
+    """
+    from datetime import date, timedelta
+
+    if not start_date_str or not isinstance(start_date_str, str):
+        return f"Week {4 - week_index}"
+    try:
+        start = date.fromisoformat(start_date_str)
+        week_start = start + timedelta(days=week_index * 7)
+        week_end   = week_start + timedelta(days=6)
+        # Format without leading zero on day (%-d is Linux/macOS specific)
+        fmt_s = week_start.strftime("%-d %b")
+        fmt_e = week_end.strftime("%-d %b %Y")
+        return f"{fmt_s} – {fmt_e}"
+    except (ValueError, TypeError):
+        return f"Week {4 - week_index}"
+
+
+def _week_label_w1(v: Any) -> str:
+    """Most recent week (index 3 from startDate)."""
+    return _week_label_from_start(v, 3)
+
+
+def _week_label_w2(v: Any) -> str:
+    """Second most recent week (index 2 from startDate)."""
+    return _week_label_from_start(v, 2)
+
+
+def _week_label_w3(v: Any) -> str:
+    """Third week (index 1 from startDate)."""
+    return _week_label_from_start(v, 1)
+
+
+def _week_label_w4(v: Any) -> str:
+    """Oldest week (index 0 from startDate)."""
+    return _week_label_from_start(v, 0)
+
+
+# ---------------------------------------------------------------------------
+# Karma Points transforms
+# ---------------------------------------------------------------------------
+
+def _parse_addinfo(addinfo: Any) -> dict:
+    """Parse the `addinfo` JSON string returned by the karma points API.
+
+    Returns an empty dict on any parse failure.
+    """
+    import json as _json
+    if not addinfo:
+        return {}
+    if isinstance(addinfo, dict):
+        return addinfo
+    if isinstance(addinfo, str):
+        try:
+            return _json.loads(addinfo)
+        except Exception:
+            return {}
+    return {}
+
+
+def _kp_status_by_id(kp_list: Any, course_id: Any) -> dict | None:
+    """Scan a karma points list (``kpList``) for completion and rating entries
+    matching *course_id* (``context_id`` field).
+
+    Returns a dict:
+        completion_credited  bool
+        rating_credited      bool
+        acbp                 bool | None   (None when completion not in list)
+        has_assessment       bool | None
+        completion_points    int  | None
+        rating_points        int  | None
+        course_name          str  | None   (from addinfo COURSENAME)
+
+    Returns None when kp_list is not a valid list or course_id is missing.
+    """
+    if not isinstance(kp_list, list) or not course_id:
+        return None
+
+    cid = str(course_id).strip()
+    completion: dict | None = None
+    rating: dict | None = None
+
+    for entry in kp_list:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("context_id") != cid:
+            continue
+        op = entry.get("operation_type", "")
+        if op == "COURSE_COMPLETION" and completion is None:
+            completion = entry
+        elif op == "RATING" and rating is None:
+            rating = entry
+
+    addinfo = _parse_addinfo(completion.get("addinfo") if completion else None)
+
+    return {
+        "completion_credited": completion is not None,
+        "rating_credited":     rating is not None,
+        "acbp":                addinfo.get("ACBP")       if completion else None,
+        "has_assessment":      addinfo.get("ASSESSMENT") if completion else None,
+        "completion_points":   completion.get("points")  if completion else None,
+        "rating_points":       rating.get("points")      if rating     else None,
+        "course_name":         addinfo.get("COURSENAME") if completion else (
+            _parse_addinfo(rating.get("addinfo") if rating else None).get("COURSENAME")
+        ),
+    }
+
+
+def _kp_monthly_rank(kp_list: Any, course_id: Any) -> int:
+    """Return the 1-based rank of *course_id* among all COURSE_COMPLETION entries
+    in the same calendar month (UTC).
+
+    Rank 1 = first completion that month; rank 5+ means only the first four
+    completions were eligible for karma points.
+
+    Returns 0 when the course completion entry is not found.
+    """
+    from datetime import datetime, timezone
+
+    if not isinstance(kp_list, list) or not course_id:
+        return 0
+
+    cid = str(course_id).strip()
+    target_entry: dict | None = None
+
+    for entry in kp_list:
+        if isinstance(entry, dict) and entry.get("context_id") == cid and entry.get("operation_type") == "COURSE_COMPLETION":
+            target_entry = entry
+            break
+
+    if target_entry is None:
+        return 0
+
+    target_ts = target_entry.get("credit_date")
+    if not target_ts:
+        return 1
+
+    try:
+        target_dt = datetime.fromtimestamp(int(target_ts) / 1000.0, tz=timezone.utc)
+    except Exception:
+        return 1
+
+    target_month = (target_dt.year, target_dt.month)
+    rank = 1
+
+    for entry in kp_list:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("operation_type") != "COURSE_COMPLETION":
+            continue
+        if entry.get("context_id") == cid:
+            continue  # skip the target itself
+        ts = entry.get("credit_date")
+        if not ts:
+            continue
+        try:
+            dt = datetime.fromtimestamp(int(ts) / 1000.0, tz=timezone.utc)
+        except Exception:
+            continue
+        if (dt.year, dt.month) == target_month and ts <= target_ts:
+            rank += 1
+
+    return rank
+
+
+def _kp_event_credited(kp_list: Any, event_id: Any) -> bool:
+    """Return True if the user has a karma credit for the given event_id.
+
+    Matches by context_id regardless of context_type (Event / Blended Program
+    etc.) and any operation_type that represents event participation credit.
+    """
+    if not isinstance(kp_list, list) or not event_id:
+        return False
+
+    eid = str(event_id).strip()
+    for entry in kp_list:
+        if isinstance(entry, dict) and entry.get("context_id") == eid:
+            return True
+    return False
+
+
+def _build_user_eligibility_ctx(response: Any) -> dict:
+    """Build a flat eligibility context dict from the user profile response object.
+
+    Input: the full $.response object from GET /api/user/private/v1/read/{user_id}
+           (after the karmayogi adapter unwraps the top-level 'result' envelope).
+
+    Output dict keys match the criteriaKey names used in accessControl.userGroups:
+
+      criteriaKey      source field
+      -----------      ------------
+      group          → profileDetails.professionalDetails[].group          (list)
+      designation    → profileDetails.professionalDetails[].designation    (list)
+      rootOrgId      → rootOrgId                                           (scalar)
+      user / userid  → identifier (also userId)                            (scalar)
+      department     → profileDetails.employmentDetails.departmentName     (scalar)
+      cadre          → profileDetails.cadreDetails.cadreName               (scalar)
+      service        → profileDetails.cadreDetails.civilServiceName        (scalar)
+      batch          → profileDetails.cadreDetails.cadreBatch              (scalar, str)
+    """
+    if not isinstance(response, dict):
+        return {}
+
+    profile_details: dict = response.get("profileDetails") or {}
+    professional_list: list = profile_details.get("professionalDetails") or []
+    employment: dict = profile_details.get("employmentDetails") or {}
+    cadre: dict = profile_details.get("cadreDetails") or {}
+
+    # Collect multi-valued fields from professionalDetails entries
+    groups = [
+        p["group"] for p in professional_list
+        if isinstance(p, dict) and p.get("group")
+    ]
+    designations = [
+        p["designation"] for p in professional_list
+        if isinstance(p, dict) and p.get("designation")
+    ]
+
+    batch_raw = cadre.get("cadreBatch")
+    batch_str = str(batch_raw) if batch_raw is not None else None
+
+    user_id = (
+        response.get("identifier")
+        or response.get("userId")
+        or response.get("id")
+    )
+
+    return {
+        "group":       groups,
+        "designation": designations,
+        "rootOrgId":   response.get("rootOrgId"),
+        "user":        user_id,
+        # 'userid' is an alias — stored separately so direct key lookup works
+        "userid":      user_id,
+        "department":  employment.get("departmentName"),
+        "cadre":       cadre.get("cadreName"),
+        "service":     cadre.get("civilServiceName"),
+        "batch":       batch_str,
+    }
+
+
+def _check_user_eligibility(user_groups: Any, user_eligibility_ctx: Any) -> bool:
+    """Return True if the user is eligible for the course / event based on access control.
+
+    Called with:
+      user_groups         – result.accessControl.userGroups  (list | None)
+      user_eligibility_ctx – collected.user_eligibility_ctx  (dict built by
+                             _build_user_eligibility_ctx from the User Read API response)
+
+    Logic
+    -----
+    - userGroups is None / empty list  →  no restrictions  →  eligible (True)
+    - OR  across userGroups : user must fully satisfy ALL criteria of at least one group
+    - AND within a group    : every criteriaKey entry must have a matching value
+
+    Supported criteriaKey values:
+      group       → list  (any entry matches)
+      designation → list  (any entry matches)
+      rootOrgId   → scalar
+      user/userid → scalar (user's identifier UUID)
+      department  → scalar
+      cadre       → scalar
+      service     → scalar
+      batch       → scalar (year as string, e.g. "1985")
+    """
+    if not user_groups or not isinstance(user_groups, list):
+        # No access control configured → publicly accessible
+        return True
+
+    ctx: dict = user_eligibility_ctx if isinstance(user_eligibility_ctx, dict) else {}
+
+    for group in user_groups:
+        if not isinstance(group, dict):
+            continue
+        criteria_list: list = group.get("userGroupCriteriaList") or []
+
+        if not criteria_list:
+            # Group with no criteria → everyone satisfies it → eligible
+            return True
+
+        # AND: every criterion in this group must be satisfied
+        group_matched = True
+        for criterion in criteria_list:
+            key: str = (criterion.get("criteriaKey") or "").strip()
+            required_values: list = criterion.get("criteriaValue") or []
+            if not required_values:
+                continue  # no required values → criterion trivially satisfied
+
+            user_value = ctx.get(key)
+
+            if isinstance(user_value, list):
+                # Multi-valued field (group, designation) — any match is enough
+                criterion_matched = any(v in required_values for v in user_value)
+            else:
+                # Scalar field (rootOrgId, user, department, cadre, service, batch)
+                criterion_matched = user_value in required_values
+
+            if not criterion_matched:
+                group_matched = False
+                break
+
+        if group_matched:
+            return True  # OR: matched this group → eligible
+
+    return False  # No group matched → not eligible
+
+
+# Registry of named transforms usable in YAML response_mapping `transform:` field.
+_TRANSFORMS: dict[str, Any] = {
+    "extract_incomplete_ids":      _extract_incomplete_ids,
+    "extract_completed_ids":           _extract_completed_ids,
+    "diff_leaf_nodes":                 _diff_leaf_nodes,
+    "extract_all_names":               _extract_all_names,
+    "extract_scorm_resource_name":     _extract_scorm_resource_name,
+    "extract_scorm_duration_minutes":  _extract_scorm_duration_minutes,
+    "detect_assessment_only":          _detect_assessment_only,
+    "duration_to_minutes":            _duration_to_minutes,
+    "detect_scorm":                _detect_scorm,
+    "unix_ms_to_iso":              _unix_ms_to_iso,
+    "enrollment_status_to_int":    _enrollment_status_to_int,
+    "extract_child_course_ids":    _extract_child_course_ids,
+    # Weekly Clap — Insights API week date-range labels
+    "week_label_w1": _week_label_w1,
+    "week_label_w2": _week_label_w2,
+    "week_label_w3": _week_label_w3,
+    "week_label_w4": _week_label_w4,
+    # Karma Points — context-aware transforms (require transform_ctx_key in YAML)
+    "kp_status_by_id":   _kp_status_by_id,   # (kp_list, course_id) → dict
+    "kp_monthly_rank":   _kp_monthly_rank,   # (kp_list, course_id) → int
+    "kp_event_credited": _kp_event_credited, # (kp_list, event_id)  → bool
+    # Access control — two-step: build ctx from user profile, then check eligibility
+    # Step 1: applied in _karmayogi_user.yaml on $.response  → collected.user_eligibility_ctx
+    "build_user_eligibility_ctx": _build_user_eligibility_ctx,  # (response) → dict
+    # Step 2: applied in access settings nodes (requires transform_ctx_key: collected.user_eligibility_ctx)
+    "check_user_eligibility": _check_user_eligibility,  # (userGroups, user_eligibility_ctx) → bool
+}
+
+
+def _jsonpath_get(data: Any, path: str) -> Any:
+    """JSONPath subset — supports dotted paths, [N] bracket indices, and [*] wildcard.
+
+    Examples:
+      courses.0.courseName        → data["courses"][0]["courseName"]
+      courses[0].courseName       → same (bracket notation converted)
+      content[*].mimeType         → [item["mimeType"] for item in data["content"]]
+    """
+    import re
+
+    if not path:
+        return data
+
+    # Normalise bracket notation: "courses[0].name" → "courses.0.name"
+    #                              "content[*].mimeType" → "content.*.mimeType"
+    path = re.sub(r"\[(\d+)\]", r".\1", path)
+    path = re.sub(r"\[\*\]", ".*", path)
+
+    cur = data
+    for part in path.split("."):
+        if part == "":
+            continue
+        # Wildcard: collect the field from every item in a list
+        if part == "*":
+            if isinstance(cur, list):
+                next_part_remaining = None  # consumed inline below
+                return cur  # caller will handle list; return as-is for chaining
+            return None
+        if isinstance(cur, dict):
+            cur = cur.get(part)
+        elif isinstance(cur, list):
+            # Numeric index
+            try:
+                cur = cur[int(part)]
+            except (ValueError, IndexError):
+                return None
+        else:
+            return None
+        if cur is None:
+            return None
+    return cur
+
+
+def _jsonpath_get_list(data: Any, path: str) -> list[Any]:
+    """Like _jsonpath_get but handles a trailing wildcard to return a flat list.
+
+    e.g. "content.*.mimeType" → [item["mimeType"] for item in data["content"]]
+    """
+    import re
+
+    path = re.sub(r"\[(\d+)\]", r".\1", path)
+    path = re.sub(r"\[\*\]", ".*", path)
+
+    parts = [p for p in path.split(".") if p]
+    cur: Any = data
+    for i, part in enumerate(parts):
+        if part == "*":
+            if not isinstance(cur, list):
+                return []
+            remaining = ".".join(parts[i + 1:])
+            if remaining:
+                return [_jsonpath_get(item, remaining) for item in cur if item is not None]
+            return cur
+        if isinstance(cur, dict):
+            cur = cur.get(part)
+        elif isinstance(cur, list):
+            try:
+                cur = cur[int(part)]
+            except (ValueError, IndexError):
+                return []
+        else:
+            return []
+        if cur is None:
+            return []
+    return [cur] if cur is not None else []

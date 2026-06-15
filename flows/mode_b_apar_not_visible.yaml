@@ -1,0 +1,1127 @@
+# =============================================================================
+# MODE B — DETERMINISTIC WITH LLM FALLBACK
+# =============================================================================
+# Flow: Training Plan / APAR Courses Not Visible (UC-XX)
+#
+# Covers:
+#   - Fetch user email + rootOrgId via User Search API
+#   - Fetch CBP training plan via CBP Plan API
+#   - If plan exists: show APAR / Non-APAR summary table + navigation steps
+#   - Allow user to request full course list (APAR or Non-APAR)
+#   - If no plan found: escalate
+#
+# Integration: karmayogi  (Authorization: Bearer KARMAYOGI_API_KEY)
+#
+# APIs used:
+#   POST /api/private/user/v1/search                                    — fetch user profile (id, rootOrgId, channel, profileStatus)
+#   GET  /api/supportportal/cbplan/v2/admin/user/list/{userId}          — fetch CBP training plan (header: x-authenticated-user-orgid: igot)
+#   GET  /api/user/private/v1/read/{userId}                             — fetch user org/designation/group/profile details
+#   POST /api/course/private/v4/user/enrollment/list/{userId}           — fetch enrollment list (EC1: check course completion)
+#   GET  /api/cbplan/v2/read/{planId}                                    — fetch CBP plan eligibility criteria for EC2 (contextData.accessControl)
+#   POST /api/private/user/v1/search  [filters: MDO_ADMIN, rootOrgId]   — MDO admin lookup (EC1, EC3, main no-plan path)
+#   data_lookup: yp_lookup  [key: org_channel]                          — YP/AM contact lookup from allocation sheet
+# =============================================================================
+
+flow_id: APAR_NOT_VISIBLE
+flow_type: deterministic_with_llm_fallback
+version: 1
+
+metadata:
+  category:         course
+  menu_label:       "📋 Training plan / APAR not visible"
+  menu_group:       "Learning"
+  menu_order:       6
+  classification:   Query
+  default_portal:   Learner Portal
+  default_priority: P3
+  default_severity: Sev 3
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "training plan not visible"
+    - "APAR courses not visible"
+    - "APAR not showing"
+    - "training plan not showing"
+    - "cannot see APAR courses"
+    - "training plan missing"
+    - "APAR tab empty"
+
+entry_node: fetch_user_profile
+
+imports:
+  - _terminal
+  - _mdo_admin_lookup
+  - _yp_lookup
+  - fragment: _zoho_ticket
+    with:
+      cf_category:     course
+      cf_sub_category: apar_not_visible
+      cf_flow_id:      APAR_NOT_VISIBLE
+
+nodes:
+
+  # ===========================================================================
+  # Step 1 — Fetch user ID via User Search API
+  # ===========================================================================
+  - id: fetch_user_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            userId: "{{ ctx.user_id_hash }}"
+          limit: 1
+    response_mapping:
+      - { from: "$.response.content[0].id",                                              to: collected.fetched_user_id }
+      - { from: "$.response.content[0].maskedEmail",                                     to: collected.user_email }
+      - { from: "$.response.content[0].rootOrgId",                                       to: collected.root_org_id }
+      - { from: "$.response.content[0].channel",                                         to: collected.org_channel }
+      - { from: "$.response.content[0].profileStatus",                                   to: collected.profile_status }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail",     to: collected.user_primary_email }
+    on_success: fetch_cbp_plan
+    on_error:
+      any: escalate_api_error
+
+  # ===========================================================================
+  # Step 2 — Fetch CBP Plan (GET /api/supportportal/cbplan/v2/admin/user/list/{userId})
+  # Headers: Authorization from KARMAYOGI_API_KEY, x-authenticated-user-orgid: igot (static)
+  # ===========================================================================
+  - id: fetch_cbp_plan
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/supportportal/cbplan/v2/admin/user/list/{{ ctx.collected.fetched_user_id }}"
+      headers:
+        x-authenticated-user-orgid: igot
+    response_mapping:
+      # result is a dict {count, content} → karmayogi unwraps it; paths start at $
+      # Note: engine's _jsonpath_get does NOT support filter expressions [?(@.xxx==yyy)]
+      # → map the full content list and use Jinja2 selectattr to filter in templates
+      - { from: "$.content", to: collected.all_courses }
+      - { from: "$.count",   to: collected.cbp_total_count }
+    on_success: branch_on_cbp_plan
+    on_error:
+      not_found: validate_user_org
+      any:       validate_user_org
+
+  # ===========================================================================
+  # Step 3 — Branch: plan data exists (at least one course in either list)
+  # count==0 / empty content → no plan; any courses present → plan exists
+  # ===========================================================================
+  - id: branch_on_cbp_plan
+    type: branch
+    rules:
+      # iGOT / Prarambh users cannot have APAR plans — redirect regardless of CBP count
+      - if: "(ctx.collected.org_channel or '').lower() in ('igot',) or (ctx.collected.org_name or '').lower() in ('igot',)"
+        then: show_wrong_org_message
+      - { if: "ctx.collected.cbp_total_count != None and ctx.collected.cbp_total_count > 0",
+          then: show_plan_summary }
+    default: validate_user_org   # count==0 or missing → no plan assigned
+
+  # ===========================================================================
+  # Step 4 — Show plan summary + navigation steps  (SOP Step 2.2)
+  # ===========================================================================
+  - id: show_plan_summary
+    type: message
+    prompt:
+      text: |
+        {%- set apar_list = ctx.collected.all_courses | selectattr('isApar', 'equalto', true) | list -%}
+        {%- set non_apar_list = ctx.collected.all_courses | selectattr('isApar', 'equalto', false) | list -%}
+        {%- set apar_ns = namespace(count=0) -%}
+        {%- set non_apar_ns = namespace(count=0) -%}
+        {%- for plan in apar_list -%}{%- for item in (plan.contentList or []) -%}{%- if item.contentType == 'Course' -%}{%- set apar_ns.count = apar_ns.count + 1 -%}{%- endif -%}{%- endfor -%}{%- endfor -%}
+        {%- for plan in non_apar_list -%}{%- for item in (plan.contentList or []) -%}{%- if item.contentType == 'Course' -%}{%- set non_apar_ns.count = non_apar_ns.count + 1 -%}{%- endif -%}{%- endfor -%}{%- endfor %}
+        Upon checking, we found that the training plan has been assigned to your profile.
+
+        | Course Type | Course Count | Last Date |
+        |---|---|---|
+        | **APAR** | {{ apar_ns.count }} Courses | {{ (apar_list | first).endDate | date('%d/%m/%Y') if apar_list else '—' }} |
+        | **Non-APAR** | {{ non_apar_ns.count }} Courses | {{ (non_apar_list | first).endDate | date('%d/%m/%Y') if non_apar_list else '—' }} |
+
+        To view the training plan courses, please follow the steps below:
+
+        1. Navigate to the **Homepage** and locate the **My iGOT** section.
+        2. Under **My iGOT**, click on the **APAR** tab. Here, you will be able to view all APAR courses, which are marked with a green APAR tag.
+        3. Click on the **Upcoming** tab to view all upcoming courses, including both APAR and non-APAR courses.
+        4. Click on the **All** tab to view all assigned courses, including both APAR and non-APAR courses.
+        5. To view completed courses, click on the **Completed** tab and review the courses that have been completed.
+
+        Tap a button below to view the full list of assigned courses:
+    quick_replies:
+      - { id: apar,     label: "🟢 View APAR Courses" }
+      - { id: non_apar, label: "📘 View Non-APAR Courses" }
+      - { id: ok,       label: "✅ Understood, thank you" }
+    disable_input: true
+    on_reply:
+      apar:     show_apar_courses
+      non_apar: show_non_apar_courses
+      ok:       satisfied
+
+  # ===========================================================================
+  # Step 5 — Confirm course type  (SOP Step 2.3.1)
+  # ===========================================================================
+  - id: ask_course_type
+    type: message
+    prompt:
+      text: |
+        Kindly confirm whether you would like to view the list of:
+
+        - APAR training plan courses, or
+        - Non-APAR training plan courses.
+    quick_replies:
+      - { id: apar,     label: "🟢 APAR courses" }
+      - { id: non_apar, label: "📘 Non-APAR courses" }
+    disable_input: true
+    on_reply:
+      apar:     show_apar_courses
+      non_apar: show_non_apar_courses
+
+  # ===========================================================================
+  # Step 6a — APAR course list  (SOP Step 2.3.2)
+  # TODO: update course.courseName / course.lastDate to actual API field names
+  # ===========================================================================
+  - id: show_apar_courses
+    type: message
+    prompt:
+      text: |
+        {%- set apar_plans = ctx.collected.all_courses | selectattr('isApar', 'equalto', true) | list %}
+        {%- set ns = namespace(count=0) %}
+        🟢 **APAR Training Plan Courses**
+
+        | # | Course Name |
+        |---|---|
+        {% for plan in apar_plans %}
+        {% for item in (plan.contentList or []) %}
+        {% if item.contentType == 'Course' %}
+        {% set ns.count = ns.count + 1 %}| {{ ns.count }} | {{ item.name }} |
+        {% endif %}
+        {% endfor %}
+        {% endfor %}
+        {% if ns.count == 0 %}
+        No APAR courses were found in your training plan.
+        {% endif %}
+    next: satisfied
+
+  # ===========================================================================
+  # Step 6b — Non-APAR course list  (SOP Step 2.3.2)
+  # TODO: update course.courseName / course.lastDate to actual API field names
+  # ===========================================================================
+  - id: show_non_apar_courses
+    type: message
+    prompt:
+      text: |
+        {%- set non_apar_plans = ctx.collected.all_courses | selectattr('isApar', 'equalto', false) | list %}
+        {%- set ns = namespace(count=0) %}
+        📘 **Non-APAR Training Plan Courses**
+
+        | # | Course Name |
+        |---|---|
+        {% for plan in non_apar_plans %}
+        {% for item in (plan.contentList or []) %}
+        {% if item.contentType == 'Course' %}
+        {% set ns.count = ns.count + 1 %}| {{ ns.count }} | {{ item.name }} |
+        {% endif %}
+        {% endfor %}
+        {% endfor %}
+        {% if ns.count == 0 %}
+        No Non-APAR courses were found in your training plan.
+        {% endif %}
+    next: satisfied
+
+  # ===========================================================================
+  # No plan found — Step 3.1: Call User Read API to check org mapping
+  # ===========================================================================
+  - id: validate_user_org
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.collected.fetched_user_id }}"
+    response_mapping:
+      - { from: "$.response.channel",                                        to: collected.org_channel }
+      - { from: "$.response.organisations[0].orgName",                       to: collected.org_name }
+      - { from: "$.response.profileDetails.verifiedKarmayogi",               to: collected.profile_verified }
+      - { from: "$.response.profileDetails.professionalDetails[0].designation", to: collected.user_designation }
+      - { from: "$.response.profileDetails.professionalDetails[0].group",       to: collected.user_group }
+      # TODO: verify exact paths for All India Service fields against live API response
+      - { from: "$.response.profileDetails.cadreDetails",                    to: collected.cadre_details }
+      - { from: "$.response.profileDetails.serviceDetails",                  to: collected.service_details }
+      - { from: "$.response.profileDetails.batch",                           to: collected.batch_details }
+      - { from: "$.response.profileDetails.centralDeputation",               to: collected.central_deputation }
+    on_success: branch_on_org_mapping
+    on_error:
+      any: offer_ticket_no_plan
+    timeout_ms: 5000
+
+  # ===========================================================================
+  # Step 3.2 — Branch on org mapping, then profile status
+  # Priority: (1) wrong org → transfer request
+  #           (2) verified  → show profile details for confirmation
+  #           (3) default   → not verified → SOP Section 7 flow
+  # ===========================================================================
+  # Step 3.2 — Branch on org mapping, then profile status
+  # Priority: (1) wrong org → transfer request
+  #           (2) verified  → show profile details for confirmation
+  #           (3) default   → not verified → SOP Section 7 flow
+  # ===========================================================================
+  - id: branch_on_org_mapping
+    type: branch
+    rules:
+      - if: >
+          (ctx.collected.org_channel or '').lower() in ('igot',)
+          or (ctx.collected.org_name or '').lower() in ('igot',)
+          or 'prarambh' in (ctx.collected.org_name or '').lower()
+        then: show_wrong_org_message
+      - if: >
+          (ctx.collected.profile_status or '').upper() == 'VERIFIED'
+          or str(ctx.collected.profile_verified).lower() == 'true'
+        then: show_profile_details
+    default: show_not_verified
+
+  # ===========================================================================
+  # Step 3.3 — Inform user they are on iGOT / Karmayogi Prarambh Trainee
+  # ===========================================================================
+  - id: show_wrong_org_message
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that your profile is currently mapped to **{{ ctx.collected.org_name or "iGOT / Karmayogi Prarambh Trainee" }}**.
+
+        APAR courses and training plans are assigned only after a user is mapped to their respective department/organization. As your profile is currently not mapped to the correct department/organization, no APAR courses or training plans can be assigned at this stage.
+
+        Kindly raise a **Transfer Request** to move your profile to the correct department/organization. Once the transfer request is approved and your profile is mapped to the appropriate organization, the concerned authority will be able to assign the relevant training plans and courses.
+
+        We will assist you with the Transfer Request process.
+    next: guide_transfer_request_apar
+
+  # ===========================================================================
+  # Step 3.4 — Guide the user through raising a Transfer Request
+  # ===========================================================================
+  - id: guide_transfer_request_apar
+    type: resolution
+    prompt:
+      text: |
+        📋 **Raise a Transfer Request**
+
+        Follow the steps below to raise a Transfer Request and get mapped to your correct organization:
+    steps:
+      - "**Step 1:** Log in to iGOT Karmayogi."
+      - "**Step 2:** Click on the **Profile Icon** (Top Right Corner)."
+      - "**Step 3:** Click on **View Profile**."
+      - "**Step 4:** Select **Make Transfer Request**."
+      - "**Step 5:** Select the **Correct Organization Name** from the dropdown."
+      - "**Step 6:** Choose your **Group** and **Designation** (if applicable)."
+      - "**Step 7:** Ensure all details are accurate and click **Submit**."
+      - "**Step 8:** Your request will be sent to the concerned MDO Admin for approval."
+      - "**Step 9:** Once approved, please recheck the APAR / Training Plan section on your profile."
+    follow_up:
+      text: "Were you able to submit the Transfer Request?"
+      quick_replies:
+        - { id: done,  label: "✅ Yes, submitted" }
+        - { id: issue, label: "⚠️  Facing an issue" }
+    on_reply:
+      done:  satisfied
+      issue: raise_ticket
+
+  # ===========================================================================
+  # SOP Section 7 — Profile NOT verified: show fetched details + notice
+  # ===========================================================================
+  - id: show_not_verified
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that your profile is currently **not verified** on iGOT Karmayogi.
+
+        APAR training plans are assigned only after your profile is verified.
+
+        Let me check a few more details to assist you further.
+    next: ask_all_india_services_unverified
+
+  # SOP Step 7.1 — Ask All India Services eligibility (not-verified path)
+  - id: ask_all_india_services_unverified
+    type: message
+    prompt:
+      text: |
+        Kindly confirm whether you belong to any of the All India Services, such as:
+
+        - IAS
+        - IPS
+        - IFS
+    quick_replies:
+      - { id: yes, label: "�️  Yes, All India Services" }
+      - { id: no,  label: "🏢 No, I don't" }
+    disable_input: true
+    on_reply:
+      yes: check_all_india_service_details   # SOP Step 7.2 — same service check as verified path
+      no:  guide_profile_verification         # SOP Step 7.3 — guide profile verification
+
+  # SOP Step 7.3.1 — Not AIS + not verified: guide profile verification steps
+  - id: guide_profile_verification
+    type: resolution
+    prompt:
+      text: |
+        As your profile is currently not verified, we request you to complete the profile verification process.
+
+        Please follow the steps below:
+    steps:
+      - "Log in to **iGOT Karmayogi**."
+      - "Click on **View Profile** from the top-right menu."
+      - "Navigate to **Primary Details** and click the ✏️ **Edit (pen) icon**."
+      - "Update the correct **Group**, **Designation**, and **Ministry / Department**."
+      - "Click **Send for Approval** to submit the changes."
+      - "The request will be sent to your **MDO Admin** for approval."
+      - "Your profile will be verified once the MDO Admin approves the request."
+    next: guide_profile_verification_closure
+
+  # SOP Step 7.3.2 — Closure message (no user input)
+  - id: guide_profile_verification_closure
+    type: message
+    prompt:
+      text: |
+        Once the profile is successfully verified, the training plans / APAR courses may reflect in your account.
+
+        Kindly recheck the APAR section after the profile verification is completed.
+    disable_input: true
+    next: satisfied
+
+  # ===========================================================================
+  # SOP Step 4.1 — Profile is verified: share org/designation/group, ask to confirm
+  # ===========================================================================
+  - id: show_profile_details
+    type: message
+    prompt:
+      text: |
+        As checked, your profile is currently verified with the following details:
+
+        - **Organization:** {{ ctx.collected.org_name or ctx.collected.org_channel or "\u2014" }}
+        - **Designation:** {{ ctx.collected.user_designation or "\u2014" }}
+        - **Group:** {{ ctx.collected.user_group or "\u2014" }}
+
+        Kindly confirm whether the above details are correct and whether you currently belong to the same department/organization.
+    quick_replies:
+      - { id: yes, label: "✅ Yes, details are correct" }
+      - { id: no,  label: "❌ No, details are incorrect" }
+    disable_input: true
+    on_reply:
+      yes: ask_all_india_services
+      no:  ask_incorrect_details
+
+  # ===========================================================================
+  # Part 6 — Details are incorrect: ask which field is wrong
+  # ===========================================================================
+  - id: ask_incorrect_details
+    type: message
+    prompt:
+      text: |
+        Kindly confirm which of the following profile details are incorrect:
+    quick_replies:
+      - { id: org,   label: "🏢 Organization / Department" }
+      - { id: desig, label: "📋 Designation" }
+      - { id: group, label: "👥 Group or other details" }
+    disable_input: true
+    on_reply:
+      org:   guide_org_update_transfer
+      desig: guide_designation_update
+      group: guide_profile_update
+
+  # SOP Step 6.2a — Organization incorrect → Transfer Request guide
+  - id: guide_org_update_transfer
+    type: resolution
+    prompt:
+      text: |
+        🏢 **Update Organization — Raise a Transfer Request**
+
+        To correct your organization mapping, please raise a Transfer Request:
+    steps:
+      - "**Step 1:** Log in to iGOT Karmayogi."
+      - "**Step 2:** Click on the **Profile Icon** (Top Right Corner)."
+      - "**Step 3:** Click on **View Profile**."
+      - "**Step 4:** Select **Make Transfer Request**."
+      - "**Step 5:** Select the **Correct Organization Name** from the dropdown."
+      - "**Step 6:** Choose your **Group** and **Designation** (if applicable)."
+      - "**Step 7:** Ensure all details are accurate and click **Submit**."
+      - "**Step 8:** Once approved, kindly recheck the APAR / Training Plan section on your profile."
+    next: satisfied
+
+  # SOP Step 6.2b — Designation incorrect → Designation Update guide
+  - id: guide_designation_update
+    type: resolution
+    prompt:
+      text: |
+        📋 **Update Designation**
+
+        Follow the steps below to update your designation on iGOT Karmayogi:
+    steps:
+      - "Log in to **iGOT Karmayogi**."
+      - "Click on **View Profile** from the top-right menu."
+      - "Navigate to **Primary Details** and click the ✏️ **Edit (pen) icon**."
+      - "Update the correct **Designation**."
+      - "Click **Send for Approval** to submit the changes."
+      - "The request will be sent to your **MDO Admin** for approval."
+      - "Once approved, kindly recheck the APAR / Training Plan section on your profile."
+    next: satisfied
+
+  # SOP Step 6.2c — Group / other details incorrect → Profile Update guide
+  - id: guide_profile_update
+    type: resolution
+    prompt:
+      text: |
+        👥 **Update Group / Other Profile Details**
+
+        Follow the steps below to update your Group or other profile details:
+    steps:
+      - "Log in to **iGOT Karmayogi**."
+      - "Click on **View Profile** from the top-right menu."
+      - "Navigate to **Primary Details** and click the ✏️ **Edit (pen) icon**."
+      - "Update the correct **Group** and any other required details."
+      - "Click **Send for Approval** to submit the changes."
+      - "The request will be sent to your **MDO Admin** for approval."
+      - "Once approved, kindly recheck the APAR / Training Plan section on your profile."
+    next: satisfied
+
+  # ===========================================================================
+  # Part 5 — Check All India Services eligibility
+  # ===========================================================================
+  - id: ask_all_india_services
+    type: message
+    prompt:
+      text: |
+        Kindly confirm whether you belong to any of the All India Services, such as:
+
+        - IAS
+        - IPS
+        - IFS
+    quick_replies:
+      - { id: yes, label: "🏛️  Yes, All India Services" }
+      - { id: no,  label: "🏢 No, I don’t" }
+    disable_input: true
+    on_reply:
+      yes: check_all_india_service_details
+      no:  lookup_mdo_admin
+
+  # ===========================================================================
+  # Part 5.2 — All India Services: validate cadre/service/batch/deputation
+  # ===========================================================================
+  - id: check_all_india_service_details
+    type: branch
+    rules:
+      - if: >
+          ctx.collected.cadre_details == None
+          or ctx.collected.service_details == None
+          or ctx.collected.batch_details == None
+          or ctx.collected.central_deputation == None
+        then: show_service_details_missing
+    default: lookup_mdo_admin   # all details present but still no plan → contact MDO
+
+  # Step 5.2.2 + 5.2.3 — Missing service details
+  - id: show_service_details_missing
+    type: message
+    prompt:
+      text: |
+        We found that some mandatory service-related details are either missing or incomplete in your profile, such as:
+
+        - Cadre Details
+        - Service Details
+        - Batch Information
+        - Central Deputation Details
+
+        Kindly update the required details in your profile . Once the profile is updated successfully, the APAR plans will reflect in your account within approximately **2 hours**.
+
+        Kindly update the required details and recheck the APAR section after some time.
+
+        Please feel free to reach out if you require any further assistance.
+
+        Thank you,
+        **Karmayogi Bharat Support Team**
+    next: satisfied
+
+  # ===========================================================================
+  # Part 5.1 — Not All India Services: MDO lookup (from _mdo_admin_lookup fragment)
+  # Required target node: mdo_found_result
+  # ===========================================================================
+  - id: mdo_found_result
+    type: branch
+    rules:
+      - { if: "ctx.collected.mdo_admin_count != None and ctx.collected.mdo_admin_count > 0",
+          then: show_mdo_contact }
+    default: lookup_yp_contact
+
+  # Required target node: mdo_api_error
+  - id: mdo_api_error
+    type: message
+    prompt:
+      text: "MDO Admin details could not be retrieved. Let me check for the YP/AM contact for your organization."
+    next: lookup_yp_contact
+
+  # Step 5.1.3 — Share MDO contact
+  - id: show_mdo_contact
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that no CBP/APAR training plan is currently assigned to your profile.
+
+        The concerned authority is responsible for assigning training plans and courses to users.
+
+        Kindly connect with the **MDO Admin** for further assistance:
+
+        - **Name:** {{ ctx.collected.mdo_admin_name }}
+        - **Email ID:** {{ ctx.collected.mdo_admin_email}}
+    next: satisfied
+
+  # ===========================================================================
+  # Part 5.1.2 — MDO not found: YP/AM lookup (from _yp_lookup fragment)
+  # Required target node: yp_found_result
+  # ===========================================================================
+  - id: yp_found_result
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that no CBP/APAR training plan is currently assigned to your profile.
+
+        The concerned authority is responsible for assigning training plans and courses to users.
+
+        Kindly connect with the **YP/AM** contact below for further assistance:
+
+        - **Name:** {{ ctx.collected.yp_name}}
+        - **Email ID:** {{ ctx.collected.yp_email}}
+        {%- if ctx.collected.yp_mobile %}
+        - **Mobile:** {{ ctx.collected.yp_mobile }}
+        {%- endif %}
+    next: satisfied
+
+  # Required target node: yp_not_found
+  - id: yp_not_found
+    type: message
+    prompt:
+      text: |
+        Upon checking, we were unable to retrieve the MDO Admin or YP/AM contact details for your organization at this time.
+
+        Kindly reach out to your concerned authority or contact **helpdesk@igotkarmayogi.gov.in** for further assistance.
+    next: satisfied
+
+  # ===========================================================================
+  # Reached only when validate_user_org API itself errors out
+  # ===========================================================================
+  - id: offer_ticket_no_plan
+    type: message
+    prompt:
+      text: |
+        Upon checking, we could not find an active training plan assigned to your profile.
+
+        This could mean:
+        - A training plan has not yet been assigned by your MDO, or
+        - There may be a sync delay — please check again after some time.
+
+        If the issue persists, please contact the **iGOT Helpdesk** at **helpdesk@igotkarmayogi.gov.in** for further assistance.
+    next: satisfied
+
+  - id: raise_ticket
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user reports that their APAR training plan / courses are not visible on the iGOT platform.
+        Generate a support ticket.
+        Subject: "Training Plan / APAR Courses Not Visible"
+        Description: The CBP plan API returned no data for this user. Include user email ({{ ctx.collected.user_email }}) and rootOrgId ({{ ctx.collected.root_org_id }}).
+      priority_override: P3
+    on_complete: ticket_confirmed
+
+  - id: ticket_confirmed
+    type: message
+    prompt:
+      text: |
+        ✅ A support ticket has been raised and the details have been shared with the concerned team for further investigation.
+    next: satisfied
+
+  # ===========================================================================
+  # API error escalation
+  # ===========================================================================
+  - id: escalate_api_error
+    type: message
+    prompt:
+      text: |
+        I'm sorry, I encountered a technical issue while fetching your profile details.
+
+        Please try again later or contact **support@igotkarmayogi.gov.in** for assistance.
+    next: satisfied
+
+  # ============================================================================
+  # EDGE CASE 2 — Additional / Unexpected Courses Visible
+  # Triggered from show_plan_summary → "❓ Why are some courses assigned?"
+  # Steps: fetch user profile → fetch access settings → explain assignment table
+  #        → optional course list (APAR or Non-APAR)
+  # ============================================================================
+
+  # EC2 Step 1 — Fetch user org/designation/group for eligibility comparison
+  - id: ec2_fetch_user_details
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.collected.fetched_user_id }}"
+    response_mapping:
+      - { from: "$.response.organisations[0].orgName",                               to: collected.ec2_org_name }
+      - { from: "$.response.profileDetails.professionalDetails[0].designation",      to: collected.ec2_user_designation }
+      - { from: "$.response.profileDetails.professionalDetails[0].group",            to: collected.ec2_user_group }
+    on_success: ec2_fetch_apar_plan_details
+    on_error:
+      any: ec2_explain_assignment
+    timeout_ms: 5000
+
+  # EC2 Step 2a — Fetch eligibility criteria from the first APAR plan
+  - id: ec2_fetch_apar_plan_details
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/cbplan/v2/read/{{ (ctx.collected.all_courses | selectattr('isApar', 'equalto', true) | list or [{'id': 'none'}])[0]['id'] }}"
+    response_mapping:
+      - { from: "$.result.content.contextData.accessControl.userGroups[0].userGroupCriteriaList[0].criteriaKey",   to: collected.ec2_apar_criteria_key }
+      - { from: "$.result.content.contextData.accessControl.userGroups[0].userGroupCriteriaList[0].criteriaValue", to: collected.ec2_apar_criteria_values }
+    on_success: ec2_fetch_non_apar_plan_details
+    on_error:
+      any: ec2_fetch_non_apar_plan_details   # no APAR plan or API error → still check Non-APAR
+    timeout_ms: 5000
+
+  # EC2 Step 2b — Fetch eligibility criteria from the first Non-APAR plan
+  - id: ec2_fetch_non_apar_plan_details
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/cbplan/v2/read/{{ (ctx.collected.all_courses | selectattr('isApar', 'equalto', false) | list or [{'id': 'none'}])[0]['id'] }}"
+    response_mapping:
+      - { from: "$.result.content.contextData.accessControl.userGroups[0].userGroupCriteriaList[0].criteriaKey",   to: collected.ec2_non_apar_criteria_key }
+      - { from: "$.result.content.contextData.accessControl.userGroups[0].userGroupCriteriaList[0].criteriaValue", to: collected.ec2_non_apar_criteria_values }
+    on_success: ec2_explain_assignment
+    on_error:
+      any: ec2_explain_assignment   # no Non-APAR plan or API error → show generic reason
+    timeout_ms: 5000
+
+  # EC2 Step 3 — Share plan details with eligibility-based reason
+  - id: ec2_explain_assignment
+    type: message
+    prompt:
+      text: |
+        {%- set apar_list = ctx.collected.all_courses | selectattr('isApar', 'equalto', true) | list -%}
+        {%- set non_apar_list = ctx.collected.all_courses | selectattr('isApar', 'equalto', false) | list -%}
+        {%- set apar_ns = namespace(count=0) -%}
+        {%- set non_apar_ns = namespace(count=0) -%}
+        {%- for plan in apar_list -%}{%- for item in (plan.contentList or []) -%}{%- if item.contentType == 'Course' -%}{%- set apar_ns.count = apar_ns.count + 1 -%}{%- endif -%}{%- endfor -%}{%- endfor -%}
+        {%- for plan in non_apar_list -%}{%- for item in (plan.contentList or []) -%}{%- if item.contentType == 'Course' -%}{%- set non_apar_ns.count = non_apar_ns.count + 1 -%}{%- endif -%}{%- endfor -%}{%- endfor -%}
+        {%- set apar_key = ctx.collected.ec2_apar_criteria_key -%}
+        {%- set non_apar_key = ctx.collected.ec2_non_apar_criteria_key -%}
+        {%- set apar_reason_ns = namespace(text='Assigned based on APAR eligibility criteria') -%}
+        {%- set non_apar_reason_ns = namespace(text='Mandatory departmental training courses') -%}
+        {%- if apar_key == 'group' -%}
+          {%- set apar_reason_ns.text = 'Your Group is **' + (ctx.collected.ec2_user_group or '—') + '**, which is included in the APAR eligibility criteria' -%}
+        {%- elif apar_key == 'designation' -%}
+          {%- set apar_reason_ns.text = 'Your Designation is **' + (ctx.collected.ec2_user_designation or '—') + '**, which is included in the APAR eligibility criteria' -%}
+        {%- elif apar_key == 'rootOrgId' or apar_key == 'org' -%}
+          {%- set apar_reason_ns.text = 'Your Organisation is **' + (ctx.collected.ec2_org_name or '—') + '**, which is included in the APAR eligibility criteria' -%}
+        {%- elif apar_key -%}
+          {%- set apar_reason_ns.text = 'Assigned based on your ' + apar_key + ' matching the APAR eligibility criteria' -%}
+        {%- endif -%}
+        {%- if non_apar_key == 'group' -%}
+          {%- set non_apar_reason_ns.text = 'Your Group is **' + (ctx.collected.ec2_user_group or '—') + '**, which is included in the eligibility criteria for this training plan' -%}
+        {%- elif non_apar_key == 'designation' -%}
+          {%- set non_apar_reason_ns.text = 'Your Designation is **' + (ctx.collected.ec2_user_designation or '—') + '**, which is included in the eligibility criteria for this training plan' -%}
+        {%- elif non_apar_key == 'rootOrgId' or non_apar_key == 'org' -%}
+          {%- set non_apar_reason_ns.text = 'Your Organisation is **' + (ctx.collected.ec2_org_name or '—') + '**, which is included in the eligibility criteria for this training plan' -%}
+        {%- elif non_apar_key -%}
+          {%- set non_apar_reason_ns.text = 'Assigned based on your ' + non_apar_key + ' matching the eligibility criteria' -%}
+        {%- endif %}
+        Upon validation, we found that the below training plans/courses are assigned based on the eligibility criteria configured in the CBP plan and your current profile details.
+
+        Kindly refer to the details below for the reason behind the assignment of the respective plans/courses.
+
+        | Course Type | Course Count | Reason for Assignment |
+        |---|---|---|
+        | APAR | {{ apar_ns.count }} Courses | {{ apar_reason_ns.text }} |
+        | Non-APAR | {{ non_apar_ns.count }} Courses | {{ non_apar_reason_ns.text }} |
+
+        Kindly select the course type below to view the full list:
+    quick_replies:
+      - { id: apar,     label: "🟢 APAR courses" }
+      - { id: non_apar, label: "📘 Non-APAR courses" }
+      - { id: no,       label: "✅ No, that's helpful" }
+    disable_input: true
+    on_reply:
+      apar:     show_apar_courses
+      non_apar: show_non_apar_courses
+      no:       satisfied
+
+  # ============================================================================
+  # EDGE CASE 3 — Wrong CBP Plan / Wrong Courses Assigned
+  # Triggered from show_plan_summary → "Wrong courses are assigned"
+  # Steps: fetch user details → check verified → confirm profile → MDO/YP contact
+  # ============================================================================
+
+  # EC3 Step 1 — Fetch org/designation/group (not mapped in plan-exists path)
+  - id: ec3_fetch_user_details
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.collected.fetched_user_id }}"
+    response_mapping:
+      - { from: "$.response.channel",                               to: collected.org_channel }
+      - { from: "$.response.organisations[0].orgName",              to: collected.org_name }
+      - { from: "$.response.profileDetails.verifiedKarmayogi",      to: collected.profile_verified }
+      - { from: "$.response.profileDetails.professionalDetails[0].designation", to: collected.user_designation }
+      - { from: "$.response.profileDetails.professionalDetails[0].group",        to: collected.user_group }
+      # Eligibility comparison attributes (SOP EC3 Step 2)
+      - { from: "$.response.profileDetails.cadreDetails",           to: collected.cadre_details }
+      - { from: "$.response.profileDetails.serviceDetails",         to: collected.service_details }
+      - { from: "$.response.profileDetails.centralDeputation",      to: collected.central_deputation }
+    on_success: ec3_check_profile_verified
+    on_error:
+      any: ec3_api_error
+    timeout_ms: 5000
+
+  # EC3 Step 1 — Branch: is profile verified?
+  - id: ec3_check_profile_verified
+    type: branch
+    rules:
+      - if: >
+          (ctx.collected.profile_status or '').upper() == 'VERIFIED'
+          or str(ctx.collected.profile_verified).lower() == 'true'
+        then: ec3_show_profile_details
+    default: show_not_verified    # not verified → guide through verification (main flow)
+
+  # EC3 Step 2 — Confirm profile details with user
+  - id: ec3_show_profile_details
+    type: message
+    prompt:
+      text: |
+        Kindly confirm whether the below profile details are correct:
+
+        Organization: {{ ctx.collected.org_name or ctx.collected.org_channel or "\u2014" }}
+
+        Designation: {{ ctx.collected.user_designation or "\u2014" }}
+
+        Group: {{ ctx.collected.user_group or "\u2014" }}
+    quick_replies:
+      - { id: yes, label: "\u2705 Yes, details are correct" }
+      - { id: no,  label: "\u274c No, details are incorrect" }
+    disable_input: true
+    on_reply:
+      yes: ec3_lookup_mdo
+      no:  ask_incorrect_details    # reuse from main flow
+
+  # EC3 — Fetch MDO Admin (inline — separate exit nodes from main flow MDO lookup)
+  - id: ec3_lookup_mdo
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            rootOrgId: "{{ ctx.collected.root_org_id }}"
+            organisations.roles: ["MDO_ADMIN"]
+            status: 1
+          limit: 1
+    response_mapping:
+      - { from: "$.response.count",                                                    to: collected.ec3_mdo_count }
+      - { from: "$.response.content[0].profileDetails.personalDetails.firstname",      to: collected.ec3_mdo_name }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail",   to: collected.ec3_mdo_email }
+    on_success: ec3_mdo_found_result
+    on_error:
+      any: ec3_lookup_yp
+    timeout_ms: 5000
+
+  # EC3 — Branch on MDO count
+  - id: ec3_mdo_found_result
+    type: branch
+    rules:
+      - { if: "ctx.collected.ec3_mdo_count != None and ctx.collected.ec3_mdo_count > 0",
+          then: ec3_show_contact_mdo }
+    default: ec3_lookup_yp
+
+  # EC3 — YP/AM lookup (inline)
+  - id: ec3_lookup_yp
+    type: data_lookup
+    service: yp_lookup
+    key: "{{ ctx.collected.org_channel }}"
+    response_mapping:
+      - { from: name,      to: collected.ec3_yp_name }
+      - { from: email,     to: collected.ec3_yp_email }
+      - { from: mobile,    to: collected.ec3_yp_mobile }
+    on_success: ec3_show_contact_yp
+    on_error:
+      any: ec3_no_contact
+
+  # EC3 — Show MDO contact (SOP message)
+  - id: ec3_show_contact_mdo
+    type: message
+    prompt:
+      text: |
+        As the training plans/courses are managed and assigned by the concerned authority, we request you to kindly connect with the contact details below for further assistance:
+
+        Name: {{ ctx.collected.ec3_mdo_name }}
+
+        Email ID: {{ ctx.collected.ec3_mdo_email }}
+    disable_input: true
+    next: satisfied
+
+  # EC3 — Show YP/AM contact (SOP message)
+  - id: ec3_show_contact_yp
+    type: message
+    prompt:
+      text: |
+        As the training plans/courses are managed and assigned by the concerned authority, we request you to kindly connect with the contact details below for further assistance:
+
+        Name: {{ ctx.collected.ec3_yp_name }}
+
+        Email ID: {{ ctx.collected.ec3_yp_email }}
+        {%- if ctx.collected.ec3_yp_mobile %}
+
+        Mobile: {{ ctx.collected.ec3_yp_mobile }}
+        {%- endif %}
+    disable_input: true
+    next: satisfied
+
+  # EC3 — No contact found fallback
+  - id: ec3_no_contact
+    type: message
+    prompt:
+      text: |
+        We were unable to retrieve the contact details for your organization at this time.
+
+        Kindly connect with the iGOT Helpdesk at helpdesk@igotkarmayogi.gov.in for further assistance.
+    disable_input: true
+    next: satisfied
+
+  # EC3 — API error fallback
+  - id: ec3_api_error
+    type: message
+    prompt:
+      text: |
+        We encountered a technical issue while fetching your profile details.
+
+        Please try again later or contact support@igotkarmayogi.gov.in for assistance.
+    next: satisfied
+
+  # ============================================================================
+  # EDGE CASE 1 — Particular Course Not Visible in CBP Plan
+  # Triggered from show_plan_summary → "A specific course is not visible"
+  # Steps: ask name → check in plan → enrollment check → MDO/YP if not in plan
+  # ============================================================================
+
+  # EC1 Step 1 — Collect the course name from user
+  - id: ec1_ask_course_name
+    type: collect
+    prompt:
+      text: |
+        Kindly share the name of the course that is not visible in your training plan.
+    field:
+      name: collected.ec1_course_name
+      type: text
+    next: ec1_check_in_plan
+
+  # EC1 Step 2 — Check if the course exists in the already-fetched CBP plan
+  - id: ec1_check_in_plan
+    type: branch
+    rules:
+      - if: >
+          len([
+            1
+            for plan in (ctx.collected.all_courses or [])
+            for item in (plan.get('contentList') or [])
+            if item.get('contentType') == 'Course'
+            and (
+              (ctx.collected.ec1_course_name or '').strip().lower() in (item.get('name') or '').lower()
+              or (item.get('name') or '').lower() in (ctx.collected.ec1_course_name or '').strip().lower()
+            )
+          ]) > 0
+        then: ec1_fetch_enrollment
+    default: ec1_not_in_plan_lookup_mdo   # course not found in plan
+
+  # EC1 Step 3.1 — Course found in plan: fetch enrollment to check completion
+  - id: ec1_fetch_enrollment
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/course/private/v4/user/enrollment/list/{{ ctx.collected.fetched_user_id }}"
+      body:
+        request:
+          retiredCoursesEnabled: true
+    response_mapping:
+      - { from: "$.courses", to: collected.ec1_enrollment_list }
+    on_success: ec1_branch_completion
+    on_error:
+      not_found: ec1_course_not_completed
+      any:       ec1_course_not_completed
+    timeout_ms: 5000
+
+  # EC1 Step 3.1 — Branch: completed or not
+  - id: ec1_branch_completion
+    type: branch
+    rules:
+      - if: >
+          len([
+            1
+            for item in (ctx.collected.ec1_enrollment_list or [])
+            if (
+              (ctx.collected.ec1_course_name or '').strip().lower() in (item.get('courseName') or '').lower()
+              or (item.get('courseName') or '').lower() in (ctx.collected.ec1_course_name or '').strip().lower()
+            )
+            and (item.get('status') == 2 or item.get('completionPercentage') == 100)
+          ]) > 0
+        then: ec1_completed_check_apar
+    default: ec1_course_not_completed      # SOP 3.3 — in plan but not completed
+
+  # EC1 Step 3.2 — Completed: check APAR flag before showing SOP 3.2 message
+  - id: ec1_completed_check_apar
+    type: branch
+    rules:
+      - if: >
+          len([
+            1
+            for plan in (ctx.collected.all_courses or [])
+            for item in (plan.get('contentList') or [])
+            if plan.get('isApar') == True
+            and item.get('contentType') == 'Course'
+            and (
+              (ctx.collected.ec1_course_name or '').strip().lower() in (item.get('name') or '').lower()
+              or (item.get('name') or '').lower() in (ctx.collected.ec1_course_name or '').strip().lower()
+            )
+          ]) > 0
+        then: ec1_course_completed          # SOP 3.2 — completed + APAR
+    default: ec1_course_not_completed       # completed but non-APAR → SOP 3.3 message
+
+  # EC1 Step 3.2 — Course completed AND is APAR (SOP 3.2)
+  - id: ec1_course_completed
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that the mentioned course is already part of your training plan and has been successfully completed.
+
+        To view the completed course, please follow the steps below:
+
+        Navigate to the Homepage.
+
+        Locate the My iGOT section.
+
+        Click on the Completed tab to view all completed courses.
+
+        Search for the mentioned course in the list of completed courses.
+
+        You should be able to find and access the completed course there.
+    disable_input: true
+    next: satisfied
+
+  # EC1 Step 3.3 — Course exists in plan but not completed (SOP 3.3)
+  - id: ec1_course_not_completed
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that the course '{{ ctx.collected.ec1_course_name }}' is already available in your assigned training plan.
+
+        Kindly navigate to the My iGOT section and check under your enrolled/assigned courses.
+    disable_input: true
+    next: satisfied
+
+  # EC1 Step 5 — Course not in plan: look up MDO Admin (inline, separate from main flow)
+  - id: ec1_not_in_plan_lookup_mdo
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            rootOrgId: "{{ ctx.collected.root_org_id }}"
+            organisations.roles: ["MDO_ADMIN"]
+            status: 1
+          limit: 1
+    response_mapping:
+      - { from: "$.response.count",                                                    to: collected.ec1_mdo_count }
+      - { from: "$.response.content[0].profileDetails.personalDetails.firstname",      to: collected.ec1_mdo_name }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail",   to: collected.ec1_mdo_email }
+    on_success: ec1_mdo_found_result
+    on_error:
+      any: ec1_lookup_yp
+    timeout_ms: 5000
+
+  - id: ec1_mdo_found_result
+    type: branch
+    rules:
+      - { if: "ctx.collected.ec1_mdo_count != None and ctx.collected.ec1_mdo_count > 0",
+          then: ec1_show_not_in_plan_mdo }
+    default: ec1_lookup_yp
+
+  # EC1 Step 5.3 — MDO not found: YP/AM lookup
+  - id: ec1_lookup_yp
+    type: data_lookup
+    service: yp_lookup
+    key: "{{ ctx.collected.org_channel }}"
+    response_mapping:
+      - { from: name,     to: collected.ec1_yp_name }
+      - { from: email,    to: collected.ec1_yp_email }
+      - { from: mobile,   to: collected.ec1_yp_mobile }
+    on_success: ec1_show_not_in_plan_yp
+    on_error:
+      any: ec1_show_not_in_plan_no_contact
+
+  # EC1 Step 5.4 — Show MDO contact (course not in plan)
+  - id: ec1_show_not_in_plan_mdo
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that the requested course is currently not available in your assigned training / CBP plan.
+
+        Training plans and course assignments are managed by the concerned authority.
+
+        We request you to kindly connect with the contact details below for further assistance regarding course allocation / addition:
+
+        - **Name:** {{ ctx.collected.ec1_mdo_name }}
+        - **Email ID:** {{ ctx.collected.ec1_mdo_email }}
+    disable_input: true
+    next: satisfied
+
+  # EC1 Step 5.4 — Show YP/AM contact (MDO not found)
+  - id: ec1_show_not_in_plan_yp
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that the requested course is currently not available in your assigned training / CBP plan.
+
+        Training plans and course assignments are managed by the concerned authority.
+
+        We request you to kindly connect with the contact details below for further assistance regarding course allocation / addition:
+
+        - **Name:** {{ ctx.collected.ec1_yp_name }}
+        - **Email ID:** {{ ctx.collected.ec1_yp_email }}
+        {%- if ctx.collected.ec1_yp_mobile %}
+        - **Mobile:** {{ ctx.collected.ec1_yp_mobile }}
+        {%- endif %}
+    disable_input: true
+    next: satisfied
+
+  # EC1 Fallback — neither MDO nor YP found
+  - id: ec1_show_not_in_plan_no_contact
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that the requested course is currently not available in your assigned training / CBP plan.
+
+        We were unable to retrieve the contact details for your organisation at this time. Kindly reach out to your concerned authority for further assistance regarding course allocation.
+    disable_input: true
+    next: satisfied
+

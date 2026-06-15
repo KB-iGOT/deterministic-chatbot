@@ -1,0 +1,541 @@
+# =============================================================================
+# MODE B — DETERMINISTIC + LLM TICKET TAIL
+# =============================================================================
+# Flow: Certificate Download Issue (UC-02 + UC-03)
+#
+# Covers:
+#   C1 — Certificate not generated / not received
+#   C3 — Incorrect name on certificate
+#
+# Mode B pattern:
+#   1. Deterministic SOP walks user through self-service resolution
+#   2. If issue persists → transfer_llm (auto_raise:true) generates ticket
+#      summary from collected context → Zoho ticket created automatically
+#   3. Session ends with outcome: ticket_raised
+#
+# APIs used:
+#   POST /api/course/private/v4/user/enrollment/list/{user_id}
+#   POST /api/content/v1/search
+#   GET  /api/user/private/v1/read/{user_id}
+#   PATCH /api/user/private/v1/update
+# =============================================================================
+
+flow_id: CERTIFICATE_DOWNLOAD
+flow_type: deterministic_with_llm_fallback
+version: 2
+
+metadata:
+  category:         course
+  menu_label:       "🎓 Certificate issue"
+  menu_group:       "Learning"
+  menu_order:       1
+  classification:   Query
+  default_portal:   Learner Portal
+  default_priority: P4
+  default_severity: Sev 4
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "certificate not generated"
+    - "certificate not received"
+    - "certificate not visible"
+    - "can't download certificate"
+    - "cert missing on dashboard"
+    - "where is my certificate"
+    - "certificate not issued"
+    - "incorrect name on certificate"
+    - "wrong name on certificate"
+
+entry_node: ask_certificate_issue
+
+imports:
+  - _terminal
+  - fragment: _zoho_ticket
+    with:
+      cf_category:     course
+      cf_sub_category: certificate_issue
+      cf_flow_id:      CERTIFICATE_DOWNLOAD
+  - fragment: _enrollment_picker
+    with:
+      node_id:       c1_pick_course
+      prompt_text:   "Please select the course for which you have not received the certificate."
+      field_name:    c1_course_id
+      field_prefix:  "c1_"
+      next:          c1_branch_enrollment
+
+nodes:
+
+  # ===========================================================================
+  # 1. Identify which certificate issue the user is facing
+  # ===========================================================================
+  - id: ask_certificate_issue
+    type: message
+    prompt:
+      text:  "What's the issue with your certificate?"
+      voice: "Tell me what's wrong with your certificate. Press 1 or 2."
+    quick_replies:
+      - { id: C1, label: "Certificate not generated / not received", icon: "🎓" }
+      - { id: C3, label: "Incorrect name on certificate", icon: "✏️" }
+    disable_input: true
+    on_reply:
+      save_to: collected.sub_scenario
+      next:    branch_on_issue
+
+  - id: branch_on_issue
+    type: branch
+    rules:
+      - { if: "ctx.collected.sub_scenario == 'C1'", then: c1_pick_course }
+      - { if: "ctx.collected.sub_scenario == 'C3'", then: c3_pick_course }
+    default: resolution_generic
+
+  # ===========================================================================
+  # C1: Certificate Not Generated / Not Received (UC-03)
+  # ===========================================================================
+
+  # c1_pick_course — injected from _shared/_enrollment_picker.yaml
+
+  # c1_check_enrollment removed — all fields now captured by c1_pick_course extra_fields
+
+  # Route based on enrollment status (0=not started, 1=in-progress, 2=completed)
+  - id: c1_branch_enrollment
+    type: branch
+    rules:
+      - { if: "ctx.collected.c1_course_name == None or ctx.collected.c1_course_name == ''",
+          then: c1_no_enrollment_found }
+      - { if: "ctx.collected.c1_enrollment_status == 2",
+          then: c1_branch_certificate_issued }
+      - { if: "ctx.collected.c1_enrollment_status == 1",
+          then: c1_fetch_incomplete_resources }
+    default: c1_not_started
+
+  - id: c1_no_enrollment_found
+    type: message
+    prompt:
+      text: "I couldn't find an enrolment for the selected course. Please pick the correct course from the list."
+    next: c1_pick_course
+
+  - id: c1_not_started
+    type: message
+    prompt:
+      text: |
+        Your course **{{ ctx.collected.c1_course_name }}** is showing as 'not started' with 0% completion. A certificate is only generated upon 100% completion.
+
+        **Steps to complete the course:**
+
+        1. Go to **Profile** → **My Learning** → **In Progress**
+        2. Locate and select the course
+        3. Click **Resume**
+        4. Expand each module (click the **+** icon)
+        5. Complete all items without a blue tick mark
+        6. Once all modules show a blue tick, the certificate generates within 24 hours
+    next: c1_resolution_check
+
+  # Course completed — check timing
+  - id: c1_branch_certificate_issued
+    type: branch
+    rules:
+      # Guard: if completedOn was null, treat as > 24h (same UX — cert should be available)
+      - { if: "ctx.collected.c1_completed_on_iso == None or hours_since(ctx.collected.c1_completed_on_iso) > 24",
+          then: c1_certificate_available }
+    default: c1_wait_24h
+
+  - id: c1_certificate_available
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that the course **{{ ctx.collected.c1_course_name }}** has been successfully completed and more than 24 hours have passed since completion.
+
+        We request you to download the certificate again by following the steps below:
+
+        1. Log in to the **iGOT Karmayogi Portal**.
+        2. Go to **Profile**.
+        3. Click on **My Learning**.
+        4. Search and select **{{ ctx.collected.c1_course_name }}**.
+        5. Open the course details page.
+        6. Navigate to the **About** section.
+        7. Click on **Download Certificate**.
+    next: c1_resolution_check
+
+  - id: c1_wait_24h
+    type: message
+    prompt:
+      text: "Certificate generation may take up to **24 hours** after successful course completion. We request you to wait until 24 hours have elapsed from the completion time and then try downloading the certificate again."
+    next: satisfied
+
+  # --------------------------------------------------------------------------
+  # Step 2 — Incomplete Resource Lookup (course in-progress)
+  # --------------------------------------------------------------------------
+  - id: c1_fetch_incomplete_resources
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/content/v1/search"
+      body:
+        request:
+          filters:
+            identifier: "{{ ctx.collected.c1_incomplete_ids }}"
+          isSecureSettingsDisabled: true
+          sort_by:
+            createdOn: "desc"
+          fields: ["identifier", "name", "mimeType", "status", "duration"]
+          facets: ["status"]
+          limit: 1000
+    response_mapping:
+      - { from: "$.content[0].name",     to: collected.c1_incomplete_resource_name }
+      - { from: "$.content[*].name",     to: collected.c1_incomplete_resource_names }
+      - { from: "$.content[*].mimeType", to: collected.c1_has_scorm, transform: detect_scorm }
+    on_success: c1_branch_scorm
+    on_error:
+      any: c1_in_progress
+    timeout_ms: 8000
+
+  - id: c1_branch_scorm
+    type: branch
+    rules:
+      - { if: "ctx.collected.c1_has_scorm == true", then: c1_in_progress_scorm }
+    default: c1_in_progress
+
+  - id: c1_in_progress_scorm
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that the course **{{ ctx.collected.c1_course_name }}** is still in progress and has not yet been completed.
+
+        The resource **"{{ ctx.collected.c1_incomplete_resource_name }}"** is pending completion. This resource is in **SCORM format** — it must be completed within the platform in one continuous session.
+
+        **Steps to identify and complete pending resources:**
+
+        1. Go to **Profile**.
+        2. Click on **My Learning**.
+        3. Open the **In Progress** section under *Contents*.
+        4. Locate and select **{{ ctx.collected.c1_course_name }}**.
+        5. Click **Resume**.
+        6. Expand each module by clicking the **plus (+) icon**.
+        7. Check for content items that do not have a blue tick mark.
+        8. Open resources **without a blue tick** — complete them fully without closing the tab.
+        9. SCORM reports completion only when you reach the end or pass the threshold.
+        10. Ensure all modules and content items display a blue tick mark.
+        11. Continue until the course completion reaches **100%**.
+
+        ⚠️ SCORM resources require a stable internet connection and cannot be completed offline.
+
+        Please complete all pending resources and recheck certificate availability after successful course completion.
+    next: c1_resolution_check
+
+  - id: c1_in_progress
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that the course **{{ ctx.collected.c1_course_name }}** is still in progress and has not yet been completed.
+
+        The following resource is pending completion: **"{{ ctx.collected.c1_incomplete_resource_name }}"**
+
+        **Steps to identify and complete pending resources:**
+
+        1. Go to **Profile**.
+        2. Click on **My Learning**.
+        3. Open the **In Progress** section under *Contents*.
+        4. Locate and select **{{ ctx.collected.c1_course_name }}**.
+        5. Click **Resume**.
+        6. Expand each module by clicking the **plus (+) icon**.
+        7. Check for content items that do not have a blue tick mark.
+        8. Ensure all modules and content items display a blue tick mark.
+        9. Resume and complete the pending videos, assessments, or content items.
+        10. Continue until the course completion reaches **100%**.
+
+        Please complete all pending resources and recheck certificate availability after successful course completion.
+    next: c1_resolution_check
+
+  # --------------------------------------------------------------------------
+  # Satisfaction check — if unresolved, auto-raise ticket
+  # --------------------------------------------------------------------------
+  - id: c1_resolution_check
+    type: message
+    prompt:
+      text: "Did the above steps help resolve your certificate issue?"
+    quick_replies:
+      - { id: yes, label: "✅ Yes, resolved" }
+      - { id: no,  label: "❌ No, still facing issue" }
+    disable_input: true
+    on_reply:
+      yes: satisfied
+      no:  c1_auto_ticket
+
+  - id: c1_auto_ticket
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user could not resolve a certificate issue through self-service steps.
+        Generate a concise Zoho support ticket summary.
+        Subject: "Certificate Not Generated — <course_name>"
+        Description: include sub-scenario (C1=not generated, C3=incorrect name),
+        course name, enrollment status, completion percentage, completedOn date if known,
+        and a brief summary of what the user tried.
+      priority_override: P4
+    on_complete: confirm_ticket
+
+  # ===========================================================================
+  # C3: Incorrect Name on Certificate (UC-02)
+  # ===========================================================================
+
+  - id: c3_pick_course
+    type: collect
+    prompt:
+      text:  "Which course has the incorrect name on the certificate?"
+      voice: "Which course are you referring to?"
+    field:
+      name: collected.c3_course_id
+      type: select
+    dynamic_options:
+      source: api
+      integration: karmayogi
+      request:
+        method: POST
+        url: "/api/course/private/v4/user/enrollment/list/{{ ctx.user_id_hash }}"
+        body:
+          request:
+            retiredCoursesEnabled: true
+            status: ["In-Progress", "Completed"]
+      response_mapping:
+        list_path:       "$.courses"
+        id_field:        courseId
+        label_field:     courseName
+        sub_label_field: completionPercentage
+        extra_fields:
+          - { from: courseName,           to: collected.c3_course_name }
+          - { from: completionPercentage, to: collected.c3_completion_pct }
+          - { from: issuedCertificates,   to: collected.c3_issued_certificates }
+      search:     { enabled: true, placeholder: "Search your enrolled courses..." }
+      pagination: { enabled: true, page_size: 10 }
+      cache_ttl:  300
+    next: c3_fetch_user_profile
+
+  # Step 1a — Profile Read: fetch current name
+  - id: c3_fetch_user_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.response.firstName",                                 to: collected.c3_first_name }
+      - { from: "$.response.lastName",                                  to: collected.c3_last_name }
+      - { from: "$.response.profileDetails.personalDetails.firstname",  to: collected.c3_pd_firstname }
+      - { from: "$.response.profileDetails.personalDetails.surname",    to: collected.c3_pd_surname }
+    on_success: c3_branch_course_status
+    on_error:
+      any: resolution_generic
+    timeout_ms: 5000
+
+  # c3_check_enrollment removed — all fields already captured by c3_pick_course extra_fields
+
+  - id: c3_branch_course_status
+    type: branch
+    rules:
+      - { if: "ctx.collected.c3_course_name == None or ctx.collected.c3_course_name == ''",
+          then: c3_course_not_found }
+      - { if: "ctx.collected.c3_completion_pct != 100",
+          then: c3_enrollment_not_completed }
+    default: c3_inform_current_name
+
+  - id: c3_course_not_found
+    type: message
+    prompt:
+      text: "I couldn't find that course in your enrolment. Please pick again."
+    next: c3_pick_course
+
+  - id: c3_enrollment_not_completed
+    type: message
+    prompt:
+      text: "Your course **{{ ctx.collected.c3_course_name }}** shows {{ ctx.collected.c3_completion_pct }}% completion. Certificates are issued only after 100% completion. Please complete the course first."
+    next: satisfied
+
+  # Show current name and ask if user wants to change it
+  - id: c3_inform_current_name
+    type: message
+    prompt:
+      text: |
+        Your certificate for **{{ ctx.collected.c3_course_name }}** was generated with the name:
+
+        **{{ ctx.collected.c3_first_name or ctx.collected.c3_pd_firstname }} {{ ctx.collected.c3_last_name or ctx.collected.c3_pd_surname }}**
+
+        Would you like to update this name?
+    quick_replies:
+      - { id: yes, label: "✅ Yes, update the name" }
+      - { id: no,  label: "❌ No, this is correct" }
+    disable_input: true
+    on_reply:
+      save_to: collected.c3_confirm_change
+      next: c3_branch_confirm_change
+
+  - id: c3_branch_confirm_change
+    type: branch
+    rules:
+      - { if: "ctx.collected.c3_confirm_change == 'yes'", then: c3_collect_new_firstname }
+    default: c3_no_change_end
+
+  # Collect new first name then last name
+  - id: c3_collect_new_firstname
+    type: collect
+    prompt:
+      text: "Please enter your correct **First Name** (as per government ID):"
+    field:
+      name: collected.c3_new_first_name
+      type: text
+    next: c3_collect_new_lastname
+
+  - id: c3_collect_new_lastname
+    type: collect
+    prompt:
+      text: "Please enter your correct **Last Name** (as per government ID):"
+    field:
+      name: collected.c3_new_last_name
+      type: text
+    next: c3_confirm_name_change
+
+  - id: c3_confirm_name_change
+    type: message
+    prompt:
+      text: |
+        Change certificate name from:
+        **{{ ctx.collected.c3_first_name or ctx.collected.c3_pd_firstname }} {{ ctx.collected.c3_last_name or ctx.collected.c3_pd_surname }}**
+
+        to:
+        **{{ ctx.collected.c3_new_first_name }} {{ ctx.collected.c3_new_last_name }}**
+
+        Shall we proceed?
+    quick_replies:
+      - { id: yes, label: "✅ Yes, confirm change" }
+      - { id: no,  label: "❌ Re-enter name" }
+    disable_input: true
+    on_reply:
+      save_to: collected.c3_name_confirmed
+      next: c3_branch_name_confirmed
+
+  - id: c3_branch_name_confirmed
+    type: branch
+    rules:
+      - { if: "ctx.collected.c3_name_confirmed == 'yes'", then: c3_update_profile }
+    default: c3_collect_new_firstname
+
+  # Step 2 — Update name via Karmayogi profile update API
+  - id: c3_update_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: PATCH
+      url: "/api/user/private/v1/update"
+      body:
+        request:
+          userId:    "{{ ctx.user_id_hash }}"
+          firstName: "{{ ctx.collected.c3_new_first_name }}"
+          lastName:  "{{ ctx.collected.c3_new_last_name }}"
+          profileDetails:
+            personalDetails:
+              firstname: "{{ ctx.collected.c3_new_first_name }}"
+              surname:   "{{ ctx.collected.c3_new_last_name }}"
+    response_mapping: []
+    on_success: c3_name_updated_confirmation
+    on_error:
+      any: c3_update_failed
+    timeout_ms: 8000
+
+  - id: c3_name_updated_confirmation
+    type: message
+    prompt:
+      text: |
+        ✅ Your name has been updated to **{{ ctx.collected.c3_new_first_name }} {{ ctx.collected.c3_new_last_name }}**.
+
+        **To re-download the certificate with the corrected name:**
+
+        1. Go to **Profile** → **My Learning** → **Courses / Events**
+        2. Navigate to the **Completed** tab
+        3. Find and open **{{ ctx.collected.c3_course_name }}**
+        4. Click **View Certificate** → **Download**
+        5. Choose the required format
+    next: c3_resolution_check
+
+  - id: c3_update_failed
+    type: message
+    prompt:
+      text: "⚠️ We couldn't update your name due to a technical issue. I'll raise a support ticket so our team can assist you."
+    next: c3_auto_ticket
+
+  - id: c3_resolution_check
+    type: message
+    prompt:
+      text: "Was the name correction successful and is your certificate now available?"
+    quick_replies:
+      - { id: yes, label: "✅ Yes, resolved" }
+      - { id: no,  label: "❌ No, still facing issue" }
+    disable_input: true
+    on_reply:
+      yes: satisfied
+      no:  c3_auto_ticket
+
+  - id: c3_auto_ticket
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user has a name correction issue on their course certificate.
+        Generate a Zoho support ticket.
+        Subject: "Incorrect Name on Certificate — <course_name>"
+        Description: include course name, current name on certificate (c3_first_name + c3_last_name),
+        requested new name (c3_new_first_name + c3_new_last_name), whether API update was attempted.
+      priority_override: P4
+    on_complete: confirm_ticket
+
+  - id: c3_no_change_end
+    type: end
+    outcome: self_served
+    prompt:
+      text: "No problem! Your certificate name remains unchanged. Have a great day! 🙏"
+
+  # ===========================================================================
+  # Generic resolution (catch-all for unexpected paths)
+  # ===========================================================================
+  - id: resolution_generic
+    type: resolution
+    prompt:
+      text: "Let me give you some general guidance for certificate issues:"
+    steps:
+      - "Log out of iGOT and log back in."
+      - "Try using a different browser or clearing your browser cache."
+      - "Wait **24 hours** after course completion — certificate generation can take time."
+      - "Check the **Completed** tab under **My Learning** → **Courses / Events**."
+    follow_up:
+      text: "Did any of these steps help?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, resolved" }
+        - { id: no,  label: "❌ Still not working" }
+    on_reply:
+      yes: satisfied
+      no:  generic_auto_ticket
+
+  - id: generic_auto_ticket
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+    llm_directives:
+      objective: |
+        User has a certificate issue that could not be resolved through self-service.
+        Generate a concise Zoho support ticket.
+        Subject: "Certificate Issue — iGOT Support Needed"
+        Description: summarise the issue type (sub_scenario if available), course details, and what was tried.
+      priority_override: P4
+    on_complete: confirm_ticket

@@ -1,0 +1,500 @@
+# =============================================================================
+# MODE A — PURE DETERMINISTIC
+# =============================================================================
+# Flow: Login Issue
+#
+# When to use this mode:
+#   - SOP has finite, well-known branches
+#   - Bot responses can be scripted
+#   - No AI value at any point (template ticket on escalation is sufficient)
+#
+# Covers the most common login problems on iGOT Karmayogi:
+#   - Forgot password / OTP not received
+#   - Account locked / disabled
+#   - SSO / single sign-on failure
+#   - Email-ID not recognised
+# =============================================================================
+
+flow_id: LOGIN_ISSUE
+flow_type: deterministic
+version: 1
+
+metadata:
+  category:         account
+  classification:   Service Request
+  default_portal:   Learner Portal
+  default_priority: P3
+  default_severity: Sev 3
+  layout:           Ticket Layout Form
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "can't login"
+    - "unable to log in"
+    - "login not working"
+    - "forgot password"
+    - "otp not received"
+    - "account locked"
+    - "sso not working"
+    - "email not recognised"
+    - "password reset"
+
+entry_node: ask_login_issue
+
+nodes:
+
+  # ===========================================================================
+  # 1. Identify which login issue the user is facing
+  # ===========================================================================
+  - id: ask_login_issue
+    type: message
+    prompt:
+      text:  "What's the issue you're facing while logging in?"
+      voice: "Tell me what's wrong when you try to log in. You can say it or press the option number."
+    quick_replies:
+      - { id: L1, label: "Forgot password / can't reset it", icon: "🔑" }
+      - { id: L2, label: "OTP not received on mobile/email", icon: "📩" }
+      - { id: L3, label: "Account locked or disabled", icon: "🔒" }
+      - { id: L4, label: "SSO / department portal not working", icon: "🏛️" }
+      - { id: L5, label: "Email ID not recognised", icon: "❓" }
+    disable_input: true
+    on_reply:
+      save_to: collected.sub_scenario
+      next:    branch_on_login_issue
+
+  - id: branch_on_login_issue
+    type: branch
+    rules:
+      - { if: "ctx.collected.sub_scenario == 'L1'", then: resolution_forgot_password }
+      - { if: "ctx.collected.sub_scenario == 'L2'", then: ask_otp_channel }
+      - { if: "ctx.collected.sub_scenario == 'L3'", then: collect_email_for_unlock }
+      - { if: "ctx.collected.sub_scenario == 'L4'", then: resolution_sso }
+      - { if: "ctx.collected.sub_scenario == 'L5'", then: collect_email_for_lookup }
+    default: resolution_generic
+
+  # ===========================================================================
+  # 2a. Forgot password — self-service resolution
+  # ===========================================================================
+  - id: resolution_forgot_password
+    type: resolution
+    prompt:
+      text: "Let's reset your password step by step:"
+      voice: "To reset your password, go to the login page, click Forgot Password, enter your email, and follow the link sent to you."
+    steps:
+      - "Go to the iGOT login page and click **Forgot Password**."
+      - "Enter your registered email address."
+      - "Check your inbox (and spam folder) for the reset link."
+      - "Click the link and set a new password within 30 minutes."
+    follow_up:
+      text: "Did this resolve your issue?"
+      voice: "Did the steps help? Say yes or no."
+      quick_replies:
+        - { id: YES, label: "✅ Yes, resolved" }
+        - { id: NO,  label: "❌ No, still facing issue" }
+    on_reply:
+      YES: end_resolved
+      NO:  collect_email_for_password_ticket
+
+  # ===========================================================================
+  # 2b. OTP not received — ask channel
+  # ===========================================================================
+  - id: ask_otp_channel
+    type: message
+    prompt:
+      text:  "Where should the OTP be arriving?"
+      voice: "Where is your OTP supposed to come? Press 1 for mobile, 2 for email."
+    quick_replies:
+      - { id: OTP_MOBILE, label: "Mobile (SMS)", icon: "📱" }
+      - { id: OTP_EMAIL,  label: "Email", icon: "📧" }
+    disable_input: true
+    on_reply:
+      save_to: collected.otp_channel
+      next:    resolution_otp
+
+  - id: resolution_otp
+    type: resolution
+    prompt:
+      text: "Here are a few things to try for the OTP issue:"
+      voice: "Check if your registered mobile or email is correct, check spam, and retry after a few minutes."
+    steps:
+      - "**Mobile OTP**: Confirm the number on your iGOT profile matches your SIM. Disable DND. Wait 2–3 minutes and retry."
+      - "**Email OTP**: Check your spam/junk folder. Add noreply@igotkarmayogi.gov.in to safe senders and retry."
+      - "If retrying doesn't help, request a new OTP after 5 minutes."
+    follow_up:
+      text: "Did this resolve your issue?"
+      voice: "Did the OTP arrive? Say yes or no."
+      quick_replies:
+        - { id: YES, label: "✅ Yes, resolved" }
+        - { id: NO,  label: "❌ No, still facing issue" }
+    on_reply:
+      YES: end_resolved
+      NO:  collect_email_for_otp_ticket
+
+  # ===========================================================================
+  # 2c. Account locked — collect email and raise ticket
+  # ===========================================================================
+  - id: collect_email_for_unlock
+    type: collect
+    prompt:
+      text:  "Please share the email address linked to your iGOT account so we can look into it."
+      voice: "Please say your registered email address."
+    field:
+      name: collected.user_email
+      type: email
+      validation:
+        pattern:  "^[\\w.+-]+@[\\w-]+\\.[a-z]{2,}$"
+        error_msg: "That doesn't look like a valid email. Please try again."
+    next: raise_ticket_account_locked
+
+  - id: raise_ticket_account_locked
+    type: api_call
+    integration: zoho_desk_api
+    request:
+      method: POST
+      url: "/tickets"
+      body:
+        subject:        "Account Locked — Login Issue"
+        description:    "User {{ ctx.collected.user_email }} reports their account is locked or disabled. Please investigate and unlock."
+        email:          "{{ ctx.collected.user_email }}"
+        phone:          ""
+        priority:       "P3"
+        severity:       "Sev 3"
+        classification: "Service Request"
+        departmentId:   "{{ env.ZOHO_DEPARTMENT_ID }}"
+        channel:        "Bot"
+        cf:
+          cf_category:       "account"
+          cf_sub_category:   "account_locked"
+          cf_portal:         "Learner Portal"
+          cf_layout:         "Ticket Layout Form"
+          cf_channel_source: "{{ ctx.channel }}"
+          cf_bot_session_id: "{{ ctx.session_id }}"
+          cf_flow_id:        "LOGIN_ISSUE"
+          cf_llm_involved:   "false"
+    response_mapping:
+      - { from: $.ticketNumber, to: collected.ticket_id }
+    on_success: ticket_confirmation
+    on_error:
+      any: ticket_failed
+    timeout_ms: 10000
+
+  # ===========================================================================
+  # 2d. SSO not working — resolution
+  # ===========================================================================
+  - id: resolution_sso
+    type: resolution
+    prompt:
+      text: "Let's troubleshoot your SSO / department portal login:"
+      voice: "Use your official email, clear your browser cache, and try again. If that doesn't work we can raise a ticket."
+    steps:
+      - "Ensure you are using your official government email ID (not a personal email)."
+      - "Clear browser cache and cookies, then retry."
+      - "Try a different browser — Chrome or Edge are recommended."
+      - "If your department recently migrated, contact your nodal officer — your account may need re-linking."
+    follow_up:
+      text: "Did this resolve your issue?"
+      voice: "Did the SSO login work? Say yes or no."
+      quick_replies:
+        - { id: YES, label: "✅ Yes, resolved" }
+        - { id: NO,  label: "❌ No, still facing issue" }
+    on_reply:
+      YES: end_resolved
+      NO:  collect_email_for_sso_ticket
+
+  # ===========================================================================
+  # 2e. Email not recognised
+  # ===========================================================================
+  - id: collect_email_for_lookup
+    type: collect
+    prompt:
+      text:  "Please enter the email address you are trying to log in with."
+      voice: "Please say the email address you are trying to log in with."
+    field:
+      name: collected.user_email
+      type: email
+      validation:
+        pattern:  "^[\\w.+-]+@[\\w-]+\\.[a-z]{2,}$"
+        error_msg: "That doesn't look like a valid email. Please try again."
+    next: resolution_email_not_found
+
+  - id: resolution_email_not_found
+    type: resolution
+    prompt:
+      text: "The email **{{ ctx.collected.user_email }}** may not be registered on iGOT Karmayogi."
+      voice: "Your email may not be registered. Your nodal officer might need to create your account. We'll raise a ticket for you."
+    steps:
+      - "You may have used a different email ID when registering — try alternate email addresses."
+      - "Your department nodal officer may need to provision your account if you are a new employee."
+      - "If you are a recent joiner, account creation can take up to 48 hours after onboarding."
+    follow_up:
+      text: "Would you like us to raise a support ticket?"
+      quick_replies:
+        - { id: YES, label: "✅ Yes, raise a ticket" }
+        - { id: NO,  label: "❌ No, I'll check later" }
+    on_reply:
+      YES: raise_ticket_email_not_found
+      NO:  end_resolved
+
+  - id: raise_ticket_email_not_found
+    type: api_call
+    integration: zoho_desk_api
+    request:
+      method: POST
+      url: "/tickets"
+      body:
+        subject:        "Email ID Not Recognised — Login Issue"
+        description:    "User reports email {{ ctx.collected.user_email }} is not recognised on the portal. Please verify registration status."
+        email:          "{{ ctx.collected.user_email }}"
+        phone:          ""
+        priority:       "P3"
+        severity:       "Sev 3"
+        classification: "Service Request"
+        departmentId:   "{{ env.ZOHO_DEPARTMENT_ID }}"
+        channel:        "Bot"
+        cf:
+          cf_category:       "account"
+          cf_sub_category:   "email_not_recognised"
+          cf_portal:         "Learner Portal"
+          cf_layout:         "Ticket Layout Form"
+          cf_channel_source: "{{ ctx.channel }}"
+          cf_bot_session_id: "{{ ctx.session_id }}"
+          cf_flow_id:        "LOGIN_ISSUE"
+          cf_llm_involved:   "false"
+    response_mapping:
+      - { from: $.ticketNumber, to: collected.ticket_id }
+    on_success: ticket_confirmation
+    on_error:
+      any: ticket_failed
+    timeout_ms: 10000
+
+  # ===========================================================================
+  # Ticket collection helpers
+  # ===========================================================================
+  - id: collect_email_for_password_ticket
+    type: collect
+    prompt:
+      text:  "Please share your registered email so we can raise a support ticket."
+      voice: "Please say your registered email address."
+    field:
+      name: collected.user_email
+      type: email
+      validation:
+        pattern:  "^[\\w.+-]+@[\\w-]+\\.[a-z]{2,}$"
+        error_msg: "That doesn't look like a valid email. Please try again."
+    next: raise_ticket_password
+
+  - id: raise_ticket_password
+    type: api_call
+    integration: zoho_desk_api
+    request:
+      method: POST
+      url: "/tickets"
+      body:
+        subject:        "Password Reset Issue — Login Issue"
+        description:    "User {{ ctx.collected.user_email }} is unable to reset their password through the self-service flow."
+        email:          "{{ ctx.collected.user_email }}"
+        phone:          ""
+        priority:       "P3"
+        severity:       "Sev 3"
+        classification: "Service Request"
+        departmentId:   "{{ env.ZOHO_DEPARTMENT_ID }}"
+        channel:        "Bot"
+        cf:
+          cf_category:       "account"
+          cf_sub_category:   "password_reset"
+          cf_portal:         "Learner Portal"
+          cf_layout:         "Ticket Layout Form"
+          cf_channel_source: "{{ ctx.channel }}"
+          cf_bot_session_id: "{{ ctx.session_id }}"
+          cf_flow_id:        "LOGIN_ISSUE"
+          cf_llm_involved:   "false"
+    response_mapping:
+      - { from: $.ticketNumber, to: collected.ticket_id }
+    on_success: ticket_confirmation
+    on_error:
+      any: ticket_failed
+    timeout_ms: 10000
+
+  - id: collect_email_for_otp_ticket
+    type: collect
+    prompt:
+      text:  "Please share your registered email so we can raise a support ticket."
+      voice: "Please say your registered email address."
+    field:
+      name: collected.user_email
+      type: email
+      validation:
+        pattern:  "^[\\w.+-]+@[\\w-]+\\.[a-z]{2,}$"
+        error_msg: "That doesn't look like a valid email. Please try again."
+    next: raise_ticket_otp
+
+  - id: raise_ticket_otp
+    type: api_call
+    integration: zoho_desk_api
+    request:
+      method: POST
+      url: "/tickets"
+      body:
+        subject:        "OTP Not Received — Login Issue"
+        description:    "User {{ ctx.collected.user_email }} is not receiving OTP on {{ ctx.collected.otp_channel }}. Please investigate."
+        email:          "{{ ctx.collected.user_email }}"
+        phone:          ""
+        priority:       "P3"
+        severity:       "Sev 3"
+        classification: "Service Request"
+        departmentId:   "{{ env.ZOHO_DEPARTMENT_ID }}"
+        channel:        "Bot"
+        cf:
+          cf_category:       "account"
+          cf_sub_category:   "otp_not_received"
+          cf_portal:         "Learner Portal"
+          cf_layout:         "Ticket Layout Form"
+          cf_channel_source: "{{ ctx.channel }}"
+          cf_bot_session_id: "{{ ctx.session_id }}"
+          cf_flow_id:        "LOGIN_ISSUE"
+          cf_llm_involved:   "false"
+    response_mapping:
+      - { from: $.ticketNumber, to: collected.ticket_id }
+    on_success: ticket_confirmation
+    on_error:
+      any: ticket_failed
+    timeout_ms: 10000
+
+  - id: collect_email_for_sso_ticket
+    type: collect
+    prompt:
+      text:  "Please share your official email address so we can raise a support ticket."
+      voice: "Please say your official email address."
+    field:
+      name: collected.user_email
+      type: email
+      validation:
+        pattern:  "^[\\w.+-]+@[\\w-]+\\.[a-z]{2,}$"
+        error_msg: "That doesn't look like a valid email. Please try again."
+    next: raise_ticket_sso
+
+  - id: raise_ticket_sso
+    type: api_call
+    integration: zoho_desk_api
+    request:
+      method: POST
+      url: "/tickets"
+      body:
+        subject:        "SSO Login Failure — Login Issue"
+        description:    "User {{ ctx.collected.user_email }} is unable to log in via SSO / department portal."
+        email:          "{{ ctx.collected.user_email }}"
+        phone:          ""
+        priority:       "P3"
+        severity:       "Sev 3"
+        classification: "Service Request"
+        departmentId:   "{{ env.ZOHO_DEPARTMENT_ID }}"
+        channel:        "Bot"
+        cf:
+          cf_category:       "account"
+          cf_sub_category:   "sso_failure"
+          cf_portal:         "Learner Portal"
+          cf_layout:         "Ticket Layout Form"
+          cf_channel_source: "{{ ctx.channel }}"
+          cf_bot_session_id: "{{ ctx.session_id }}"
+          cf_flow_id:        "LOGIN_ISSUE"
+          cf_llm_involved:   "false"
+    response_mapping:
+      - { from: $.ticketNumber, to: collected.ticket_id }
+    on_success: ticket_confirmation
+    on_error:
+      any: ticket_failed
+    timeout_ms: 10000
+
+  # ===========================================================================
+  # Generic fallback
+  # ===========================================================================
+  - id: resolution_generic
+    type: resolution
+    prompt:
+      text:  "We're sorry to hear you're having trouble logging in."
+      voice: "We'll connect you with our support team to help you log in."
+    steps:
+      - "Our support team will investigate and get back to you within 2 business days."
+    follow_up:
+      text: "Would you like us to raise a support ticket?"
+      quick_replies:
+        - { id: YES, label: "✅ Yes, raise a ticket" }
+        - { id: NO,  label: "❌ No thanks" }
+    on_reply:
+      YES: collect_email_for_generic_ticket
+      NO:  end_resolved
+
+  - id: collect_email_for_generic_ticket
+    type: collect
+    prompt:
+      text:  "Please share your registered email so we can raise a support ticket."
+      voice: "Please say your registered email address."
+    field:
+      name: collected.user_email
+      type: email
+      validation:
+        pattern:  "^[\\w.+-]+@[\\w-]+\\.[a-z]{2,}$"
+        error_msg: "That doesn't look like a valid email. Please try again."
+    next: raise_ticket_generic
+
+  - id: raise_ticket_generic
+    type: api_call
+    integration: zoho_desk_api
+    request:
+      method: POST
+      url: "/tickets"
+      body:
+        subject:        "Login Issue — General"
+        description:    "User {{ ctx.collected.user_email }} reported a login problem that could not be categorised by the bot."
+        email:          "{{ ctx.collected.user_email }}"
+        phone:          ""
+        priority:       "P3"
+        severity:       "Sev 3"
+        classification: "Service Request"
+        departmentId:   "{{ env.ZOHO_DEPARTMENT_ID }}"
+        channel:        "Bot"
+        cf:
+          cf_category:       "account"
+          cf_sub_category:   "login_general"
+          cf_portal:         "Learner Portal"
+          cf_layout:         "Ticket Layout Form"
+          cf_channel_source: "{{ ctx.channel }}"
+          cf_bot_session_id: "{{ ctx.session_id }}"
+          cf_flow_id:        "LOGIN_ISSUE"
+          cf_llm_involved:   "false"
+    response_mapping:
+      - { from: $.ticketNumber, to: collected.ticket_id }
+    on_success: ticket_confirmation
+    on_error:
+      any: ticket_failed
+    timeout_ms: 10000
+
+  # ===========================================================================
+  # Shared ticket confirmation / failure nodes
+  # ===========================================================================
+  - id: ticket_confirmation
+    type: message
+    prompt:
+      text: "✅ Ticket **#{{ ctx.collected.ticket_id }}** raised. Our team will reach you within **2 business days**. 📧"
+    next: end_ticket_raised
+
+  - id: ticket_failed
+    type: message
+    prompt:
+      text: "I couldn't raise the ticket automatically. Please email **support@igotkarmayogi.gov.in** directly."
+    next: end_ticket_raised
+
+  # ===========================================================================
+  # End nodes
+  # ===========================================================================
+  - id: end_resolved
+    type: end
+    outcome: self_served
+    prompt:
+      text: "Great! Glad we could help. If you face any other issues, feel free to reach out. 😊"
+
+  - id: end_ticket_raised
+    type: end
+    outcome: ticket_raised

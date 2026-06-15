@@ -1,0 +1,211 @@
+# =============================================================================
+# MODE B — DETERMINISTIC WITH LLM FALLBACK
+# =============================================================================
+# Flow: Auto Logout / Application Crash Issue (UC-XX)
+#
+# Covers:
+#   Android — clear cache & data → check resolved
+#              → if resolved: close
+#              → if persists: collect device details
+#                  → Android ≤ 7: unsupported version message → close
+#                  → Android > 7: raise support ticket
+#   iOS     — collect device details
+#              → iOS < 15.6: unsupported version message → close
+#              → iOS ≥ 15.6: raise support ticket
+#
+# =============================================================================
+
+flow_id: AUTO_LOGOUT_CRASH
+flow_type: deterministic_with_llm_fallback
+version: 1
+
+metadata:
+  category:         platform
+  menu_label:       "📱 Auto logout / App crash"
+  menu_group:       "Account & Login"
+  menu_order:       3
+  classification:   Incident
+  default_portal:   Learner Portal
+  default_priority: P3
+  default_severity: Sev 3
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "auto logout"
+    - "application crash"
+    - "app crashing"
+    - "app freezing"
+    - "app closing unexpectedly"
+    - "automatically logged out"
+    - "mobile app crash"
+    - "app keeps closing"
+    - "app not responding"
+
+entry_node: ask_device_type
+
+imports:
+  - _terminal
+  - fragment: _zoho_ticket
+    with:
+      cf_category:     platform
+      cf_sub_category: auto_logout_crash
+      cf_flow_id:      AUTO_LOGOUT_CRASH
+
+nodes:
+
+  # ===========================================================================
+  # 1. Identify Device Type
+  # ===========================================================================
+  - id: ask_device_type
+    type: message
+    prompt:
+      text: |
+        Could you please confirm whether you are using an Android device or an iPhone (iOS)?
+    quick_replies:
+      - { id: android, label: "🤖 Android" }
+      - { id: ios,     label: "🍎 iPhone (iOS)" }
+    disable_input: true
+    on_reply:
+      android: android_clear_cache
+      ios:     ios_collect_details
+
+  # ===========================================================================
+  # 2. Android Path
+  # ===========================================================================
+  - id: android_clear_cache
+    type: resolution
+    prompt:
+      text: |
+        Kindly follow the below steps and check if the issue is resolved:
+    steps:
+      - "Long press the application icon."
+      - "Click on **App Info**."
+      - "Select **Storage & Cache**."
+      - "Click on **Clear Cache**."
+      - "Click on **Clear Data / Clear Storage**."
+      - "Relaunch the application and try again."
+    follow_up:
+      text: "Has the issue been resolved after following the above steps?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, issue is resolved" }
+        - { id: no,  label: "❌ No, issue still persists" }
+    on_reply:
+      yes: satisfied
+      no:  android_collect_details
+
+  - id: android_collect_details
+    type: collect
+    prompt:
+      text: |
+        Kindly share the following details:
+    prompts:
+      - { field: collected.device_name,     text: "📱 Device Name:",     optional: false }
+      - { field: collected.device_model,    text: "📋 Device Model:",    optional: false }
+      - { field: collected.android_version, text: "🤖 Android Version (e.g. 9, 11, 13):", optional: false }
+    next: branch_android_version
+
+  - id: branch_android_version
+    type: branch
+    rules:
+      - { if: "float(ctx.collected.android_version) < 8", then: android_unsupported_version }
+    default: android_raise_ticket
+
+  - id: android_unsupported_version
+    type: resolution
+    prompt:
+      text: |
+        Upon checking, your device does not meet the minimum Android version required to support the application.
+
+        Please update your device to **Android 8 or above** and try again.
+    steps:
+      - "Go to your device **Settings**."
+      - "Navigate to **Software Update** or **System Update**."
+      - "Install the latest available Android update."
+      - "Relaunch the iGOT Karmayogi app after updating."
+    next: satisfied
+
+  - id: android_raise_ticket
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user is experiencing an auto logout / application crash issue on their Android device.
+        Generate a support ticket.
+        Subject: "Auto Logout / App Crash – Android"
+        Description: Include device details — Device Name: {{ ctx.collected.device_name }}, Device Model: {{ ctx.collected.device_model }}, Android Version: {{ ctx.collected.android_version }}. Note that the issue persisted after clearing the app cache and data.
+      priority_override: P3
+    on_complete: android_ticket_confirmed
+
+  - id: android_ticket_confirmed
+    type: message
+    prompt:
+      text: |
+        We understand that the issue persists even after clearing the application cache and data.
+
+        ✅ A support ticket has been raised and the details have been shared with the concerned team for further investigation.
+    next: satisfied
+
+  # ===========================================================================
+  # 3. iOS Path
+  # ===========================================================================
+  - id: ios_collect_details
+    type: collect
+    prompt:
+      text: |
+        Kindly share the following details:
+    prompts:
+      - { field: collected.device_name,  text: "📱 Device Name:",                          optional: false }
+      - { field: collected.device_model, text: "📋 Device Model:",                         optional: false }
+      - { field: collected.ios_version,  text: "🍎 iOS Version (e.g. 15.6, 16.0, 17.2):", optional: false }
+    next: branch_ios_version
+
+  - id: branch_ios_version
+    type: branch
+    rules:
+      - { if: "float(ctx.collected.ios_version) < 15.6", then: ios_unsupported_version }
+    default: ios_raise_ticket
+
+  - id: ios_unsupported_version
+    type: resolution
+    prompt:
+      text: |
+        Upon checking, your device does not meet the minimum iOS version required to support the application.
+
+        The application supports **iOS 15.6 and above**. Kindly update your device and try again.
+    steps:
+      - "Go to your iPhone **Settings**."
+      - "Tap **General** → **Software Update**."
+      - "Install the latest available iOS update."
+      - "Relaunch the iGOT Karmayogi app after updating."
+    next: satisfied
+
+  - id: ios_raise_ticket
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user is experiencing an auto logout / application crash issue on their iOS device.
+        Generate a support ticket.
+        Subject: "Auto Logout / App Crash – iOS"
+        Description: Include device details — Device Name: {{ ctx.collected.device_name }}, Device Model: {{ ctx.collected.device_model }}, iOS Version: {{ ctx.collected.ios_version }}.
+      priority_override: P3
+    on_complete: ios_ticket_confirmed
+
+  - id: ios_ticket_confirmed
+    type: message
+    prompt:
+      text: |
+        We understand that you are facing issues with the application.
+
+        ✅ A support ticket has been raised and the details have been shared with the concerned team for further investigation.
+    next: satisfied

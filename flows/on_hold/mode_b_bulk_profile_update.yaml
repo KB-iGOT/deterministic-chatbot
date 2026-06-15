@@ -1,0 +1,219 @@
+# =============================================================================
+# MODE B — DETERMINISTIC + LLM TICKET TAIL
+# =============================================================================
+# Flow: Bulk Profile Update (UC-14)
+#
+# Audience: MDO admins who manage bulk user profile updates via the MDO Portal.
+#
+# Covers:
+#   B1 — How to do a bulk profile update                     → step-by-step guide
+#   B2 — Upload error: User not found                        → fix guidance
+#   B3 — Upload error: File not processed                    → fix guidance
+#   B4 — Upload error: Invalid name                          → fix guidance
+#   B5 — Upload error: Invalid date format                   → fix guidance
+#   B6 — Upload success but profile details not updated      → escalate → ticket
+#
+# No API calls required for guidance paths.
+# Escalation only for the unresolvable B6 error case.
+# =============================================================================
+
+flow_id: BULK_PROFILE_UPDATE
+flow_type: deterministic_with_llm_fallback
+version: 1
+
+metadata:
+  category:         account
+  menu_label:       "📋 Bulk profile update"
+  menu_group:       "Profile"
+  menu_order:       9
+  classification:   Service Request
+  default_portal:   MDO Portal
+  default_priority: P3
+  default_severity: Sev 3
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "bulk profile update"
+    - "bulk update users"
+    - "MDO bulk update"
+    - "profile update in bulk"
+    - "bulk upload error"
+
+entry_node: ask_bulk_issue_type
+
+imports:
+  - _terminal
+  - fragment: _zoho_ticket
+    with:
+      cf_category:     account
+      cf_sub_category: bulk_profile_update
+      cf_flow_id:      BULK_PROFILE_UPDATE
+
+nodes:
+
+  # ===========================================================================
+  # 1. Identify what the user needs
+  # ===========================================================================
+  - id: ask_bulk_issue_type
+    type: message
+    prompt:
+      text: "What do you need help with for **Bulk Profile Update**?"
+    quick_replies:
+      - { id: HOW_TO, label: "📋 How to do bulk profile update" }
+      - { id: ERROR,  label: "⚠️ Getting an error while uploading" }
+    disable_input: true
+    on_reply:
+      save_to: collected.bulk_issue
+      HOW_TO: show_bulk_steps
+      ERROR:  ask_error_type
+
+  # ===========================================================================
+  # B1 — How-to: step-by-step guide
+  # ===========================================================================
+  - id: show_bulk_steps
+    type: message
+    prompt:
+      text: |
+        Here are the steps to do a **Bulk Profile Update** via the MDO Portal:
+
+        1. **Login** to the MDO Portal using your credentials
+        2. Navigate to **Approvals** section
+        3. Click on **Bulk Profile Update**
+        4. **Download the Sample File** (template provided on the page)
+        5. **Edit** the required user profile details in the downloaded file
+        6. **Save** the edited file on your local device
+        7. **Upload** the saved file back to the portal
+
+        > ⚠️ Ensure all mandatory fields (email ID, mobile number) are filled correctly with no blank spaces before uploading.
+    next: ask_bulk_howto_resolved
+  - id: ask_bulk_howto_resolved
+    type: message
+    prompt:
+      text: "Were you able to complete the bulk profile update successfully?"
+    quick_replies:
+      - { id: yes, label: "✅ Yes, done successfully" }
+      - { id: no,  label: "❌ Getting an error" }
+    disable_input: true
+    on_reply:
+      yes: satisfied
+      no:  ask_error_type
+
+  # ===========================================================================
+  # B2–B6 — Error-specific guidance
+  # ===========================================================================
+  - id: ask_error_type
+    type: message
+    prompt:
+      text: "Which error message are you seeing?"
+    quick_replies:
+      - { id: USER_NOT_FOUND,      label: "\"User not found\"" }
+      - { id: FILE_NOT_PROCESSED,  label: "\"File not processed\"" }
+      - { id: INVALID_NAME,        label: "\"Invalid name\"" }
+      - { id: OTHER,               label: "Different error / upload success but no update" }
+    disable_input: true
+    on_reply:
+      save_to: collected.bulk_error
+      USER_NOT_FOUND:      fix_user_not_found
+      FILE_NOT_PROCESSED:  fix_file_not_processed
+      INVALID_NAME:        fix_invalid_name
+      OTHER:               ask_other_error
+
+  # B2 — User not found
+  - id: fix_user_not_found
+    type: message
+    prompt:
+      text: |
+        **Error: "User not found"**
+
+        **Cause:** The email ID or mobile number entered for the user is incorrect or not registered.
+
+        **Fix:** Ensure you are entering a **valid email ID and mobile number** for each user in the file, then upload again.
+    next: ask_error_fixed
+
+  # B3 — File not processed
+  - id: fix_file_not_processed
+    type: message
+    prompt:
+      text: |
+        **Error: "File not processed"**
+
+        **Cause:** Blank spaces in mandatory fields (email ID or mobile number).
+
+        **Fix:** Open the file, remove any blank spaces from all mandatory fields, save it, and upload again.
+    next: ask_error_fixed
+
+  # B4 — Invalid name
+  - id: fix_invalid_name
+    type: message
+    prompt:
+      text: |
+        **Error: "Invalid name"**
+
+        **Cause:** Extra spaces in the name fields, or incorrect date format.
+
+        **Fix:**
+        - Ensure there are **no leading/trailing spaces** in name fields
+        
+        Save the corrected file and upload again.
+    next: ask_error_fixed
+
+  # B5 / B6 — Other errors
+  - id: ask_other_error
+    type: message
+    prompt:
+      text: "Please select which best describes your situation:"
+    quick_replies:
+      - { id: INVALID_DATE,         label: "\"Invalid date format\"" }
+      - { id: UPLOAD_OK_NOT_UPDATED, label: "Upload succeeded but profiles not updated" }
+      - { id: SOMETHING_ELSE,       label: "Something else" }
+    disable_input: true
+    on_reply:
+      INVALID_DATE:          fix_invalid_date
+      UPLOAD_OK_NOT_UPDATED: bulk_escalate
+      SOMETHING_ELSE:        bulk_escalate
+
+  - id: fix_invalid_date
+    type: message
+    prompt:
+      text: |
+        **Error: "Invalid date format"**
+
+        **Fix:** All date fields in the file must follow **DD/MM/YYYY** format.
+
+        Correct the dates, save the file, and upload again.
+    next: ask_error_fixed
+
+  - id: ask_error_fixed
+    type: message
+    prompt:
+      text: "Were you able to resolve the error after making those changes?"
+    quick_replies:
+      - { id: yes, label: "✅ Yes, resolved" }
+      - { id: no,  label: "❌ Still getting the error" }
+    disable_input: true
+    on_reply:
+      yes: satisfied
+      no:  bulk_escalate
+
+  # ===========================================================================
+  # Escalation — unresolvable upload error
+  # ===========================================================================
+  - id: bulk_escalate
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The MDO admin was unable to complete a Bulk Profile Update and the error could not be resolved
+        through self-service guidance. Generate a Zoho support ticket.
+        Subject: "Bulk Profile Update Error — <bulk_error>"
+        Description: include the error type (bulk_error), the file upload outcome
+        (e.g. upload succeeded but profiles not updated, or specific error message),
+        and request that the support team investigate with the error file.
+      priority_override: P3
+    on_complete: confirm_ticket

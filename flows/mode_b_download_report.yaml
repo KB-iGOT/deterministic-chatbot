@@ -1,0 +1,293 @@
+# =============================================================================
+# MODE B — DETERMINISTIC (GUIDANCE ONLY, NO API CALLS)
+# =============================================================================
+# Flow: Unable to Download Report (UC-12)
+#
+# Covers:
+#   R1 — "Your Organisation Does Not Have an MDO Leader"
+#          → fetch org → confirm org → check MDO → guide to YP/AM
+#   R2 — "Your Access to the Report Has Expired"
+#          → fetch org → confirm org → check MDO
+#          → if MDO exists: share details / provide extension steps
+#          → if no MDO: share YP/AM details
+#   R3 — Reports are not updated
+#          → reports refresh daily, available by 10:30 AM
+#   R4 — Other error
+#          → generic guidance
+#
+# No API calls required. All guidance is static per error scenario.
+# =============================================================================
+
+flow_id: DOWNLOAD_REPORT_ISSUE
+flow_type: deterministic
+version: 1
+
+metadata:
+  category:         platform
+  menu_label:       "📑 Unable to download report"
+  menu_group:       "Reports & Data"
+  menu_order:       10
+  classification:   Service Request
+  default_portal:   MDO Portal
+  default_priority: P3
+  default_severity: Sev 3
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "unable to download report"
+    - "report not downloading"
+    - "report access expired"
+    - "organisation does not have MDO leader"
+    - "report not updated"
+    - "cannot access reports"
+
+entry_node: ask_report_error
+
+imports:
+  - _terminal
+  - fragment: _karmayogi_user
+  - fragment: _mdo_admin_lookup
+
+nodes:
+
+  # ===========================================================================
+  # 1. Initial Validation - Identify the Issue
+  # ===========================================================================
+  - id: ask_report_error
+    type: message
+    prompt:
+      text: "Kindly share the exact error message displayed while accessing the reports."
+    quick_replies:
+      - { id: NO_MDO_LEADER,      label: "\"Organisation does not have an MDO Leader\"" }
+      - { id: ACCESS_EXPIRED,     label: "\"Your access to the report has expired\"" }
+      - { id: NOT_UPDATED,        label: "Reports are not updated / stale data" }
+      - { id: OTHER,              label: "Different error" }
+    disable_input: true
+    on_reply:
+      save_to: collected.report_error
+      NO_MDO_LEADER:  fetch_user_profile  # Routes to _karmayogi_user fragment
+      ACCESS_EXPIRED: fetch_user_profile  # Routes to _karmayogi_user fragment
+      NOT_UPDATED:    r3_refresh_info
+      OTHER:          r4_other_error
+
+  # ===========================================================================
+  # 2. Fetch User Organization Details & Confirm
+  # Required target for _karmayogi_user on_success
+  # ===========================================================================
+  - id: diagnose_missing_fields
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that your profile is mapped to the following organization:
+
+        **Organization:** {{ ctx.collected.org_channel | default('Not found') }}
+
+        Kindly confirm whether you belong to the above organization.
+    quick_replies:
+      - { id: YES, label: "✅ Yes, I belong to this organization" }
+      - { id: NO,  label: "❌ No, different organization" }
+    disable_input: true
+    on_reply:
+      save_to: collected.org_confirmed
+      YES: lookup_mdo_admin # Routes to _mdo_admin_lookup fragment
+      NO:  ask_correct_org_type
+
+  # API Failure fallback for user profile
+  - id: escalate_api_error
+    type: message
+    prompt:
+      text: "We encountered a technical issue while fetching your profile details. Please try again later or contact support."
+    next: satisfied
+
+  # ===========================================================================
+  # 3. User Confirms They Belong to a Different Organization
+  # ===========================================================================
+  - id: ask_correct_org_type
+    type: message
+    prompt:
+      text: "Do you belong to a Central Government organization or a State Government organization?"
+    quick_replies:
+      - { id: CENTRAL, label: "🏛️ Central Government" }
+      - { id: STATE,   label: "🗺️ State Government" }
+    disable_input: true
+    on_reply:
+      save_to: collected.org_type
+      next: capture_correct_org_details
+
+  - id: capture_correct_org_details
+    type: collect
+    prompt:
+      text: "Kindly share your correct Ministry, Department, or State details so that we can identify the appropriate point of contact."
+    field:
+      name: collected.correct_org_details
+      type: text
+    next: fetch_yp_am_different_org
+
+  - id: fetch_yp_am_different_org
+    type: message
+    prompt:
+      text: |
+        *[API Placeholder]* Fetching YP/AM details for: {{ ctx.collected.correct_org_details }}...
+        
+        Upon checking, we found that your profile is mapped to a different organization.
+        Please contact the below point of contact for further assistance:
+
+        **Name:** <YP/AM Name>
+        **Email ID:** <YP/AM Email>
+
+        The concerned team will assist you with organization mapping and report access.
+    next: satisfied
+
+  # ===========================================================================
+  # 4 & 5 & 6 & 8 & 9. MDO Leader Lookup Result Handling
+  # Required target for _mdo_admin_lookup on_success
+  # ===========================================================================
+  - id: mdo_found_result
+    type: branch
+    rules:
+      - { if: "ctx.collected.mdo_admin_count > 0", then: branch_mdo_exists_scenario }
+    default: branch_no_mdo_scenario
+
+  # API Failure fallback for MDO lookup
+  - id: mdo_api_error
+    type: message
+    prompt:
+      text: |
+        We encountered an issue checking the MDO Leader status for your organization.
+        Please contact the below YP/AM for further assistance:
+        **Name:** <YP/AM Name>
+        **Email ID:** <YP/AM Email>
+    next: satisfied
+
+  # ---------------------------------------------------------------------------
+  # MDO Leader EXISTS
+  # ---------------------------------------------------------------------------
+  - id: branch_mdo_exists_scenario
+    type: branch
+    rules:
+      - { if: "ctx.collected.report_error == 'NO_MDO_LEADER'", then: fetch_yp_am_mdo_exists }
+      - { if: "ctx.collected.report_error == 'ACCESS_EXPIRED'", then: r2_mdo_exists_ask_role }
+    default: satisfied
+
+  - id: fetch_yp_am_mdo_exists
+    type: message
+    prompt:
+      text: |
+        *[API Placeholder]* Fetching YP/AM details for your organization ({{ ctx.collected.org_channel | default('your organization') }})...
+    next: r1_mdo_exists_info
+
+  - id: r1_mdo_exists_info
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that an MDO Leader **is** mapped to your organization.
+
+        Please contact the below MDO Leader for report access support:
+        **MDO Leader Name:** {{ ctx.collected.mdo_admin_name }}
+        **Email ID:** {{ ctx.collected.mdo_admin_email }}
+
+        If you are unable to reach the MDO Leader, you may also contact your YP/AM:
+        *[API Placeholder]* **YP/AM Name:** <YP/AM Name>
+        *[API Placeholder]* **Email ID:** <YP/AM Email>
+    next: satisfied
+
+  - id: r2_mdo_exists_ask_role
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that your report access validity has expired.
+        
+        Are you the **MDO Leader** of your organization, or a regular user?
+    quick_replies:
+      - { id: MDO_LEADER, label: "👤 I am the MDO Leader" }
+      - { id: REGULAR,    label: "🙋 I am a regular user" }
+    disable_input: true
+    on_reply:
+      save_to: collected.user_role
+      MDO_LEADER: r2_mdo_self_extend_steps
+      REGULAR:    r2_mdo_exists_info
+
+  - id: r2_mdo_exists_info
+    type: message
+    prompt:
+      text: |
+        Please contact the below MDO Leader to extend your report access:
+
+        **MDO Leader Name:** {{ ctx.collected.mdo_admin_name }}
+        **Email ID:** {{ ctx.collected.mdo_admin_email }}
+    next: satisfied
+
+  - id: r2_mdo_self_extend_steps
+    type: message
+    prompt:
+      text: |
+        To extend report access for a user, please follow the below steps:
+
+        1. Log in to the MDO Portal.
+        2. Navigate to **Reports**.
+        3. Select **Access Control to MDO Admins**.
+        4. Search for the user.
+        5. Enter the required access validity date.
+        6. Click on **Give Access**.
+    next: satisfied
+
+  # ---------------------------------------------------------------------------
+  # MDO Leader DOES NOT EXIST
+  # ---------------------------------------------------------------------------
+  - id: branch_no_mdo_scenario
+    type: branch
+    rules:
+      - { if: "ctx.collected.report_error == 'NO_MDO_LEADER'", then: fetch_yp_am_no_mdo }
+      - { if: "ctx.collected.report_error == 'ACCESS_EXPIRED'", then: fetch_yp_am_no_mdo }
+    default: satisfied
+
+  - id: fetch_yp_am_no_mdo
+    type: message
+    prompt:
+      text: |
+        *[API Placeholder]* Fetching YP/AM details for your organization ({{ ctx.collected.org_channel | default('your organization') }})...
+    next: no_mdo_yp_am_info
+
+  - id: no_mdo_yp_am_info
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that no MDO Leader is currently mapped to your organization.
+
+        Please contact the below YP/AM for further assistance:
+        *[API Placeholder]* **Name:** <YP/AM Name>
+        *[API Placeholder]* **Email ID:** <YP/AM Email>
+
+        The YP/AM will coordinate the nomination of an MDO Leader for your organization. Once the MDO Leader role is assigned, report access can be managed.
+    next: satisfied
+
+  # ===========================================================================
+  # R3 — Reports not updated
+  # ===========================================================================
+  - id: r3_refresh_info
+    type: message
+    prompt:
+      text: |
+        Reports on iGOT Karmayogi are **refreshed once every 24 hours** and are expected to be updated by **10:30 AM daily**.
+
+        Please check the report again after **10:30 AM today** (or tomorrow if it is already past 10:30 AM).
+
+        If the data is still not updated after the next refresh, please raise a query again.
+    next: satisfied
+
+  # ===========================================================================
+  # R4 — Other error
+  # ===========================================================================
+  - id: r4_other_error
+    type: message
+    prompt:
+      text: |
+        For further assistance, please write to **support@igotkarmayogi.gov.in** with:
+        - Your name and organisation name
+        - The exact error message you are seeing
+        - The report you are trying to access
+
+        Our support team will investigate and get back to you.
+    next: satisfied

@@ -1,0 +1,96 @@
+# =============================================================================
+# SHARED SUB-FLOW — Satisfaction Check
+# =============================================================================
+# Reusable nodes referenced from intent YAMLs via `include:`.
+# Goal: consistent end-of-flow check across all 25 intents.
+#
+# Usage in intent YAML:
+#   include:
+#     - _shared/satisfaction_check.yaml
+#   ...
+#   - id: my_resolution_step
+#     ...
+#     follow_up:
+#       text: "Did this help?"
+#       quick_replies:
+#         - { id: yes, label: "Yes" }
+#         - { id: no,  label: "No" }
+#     on_reply:
+#       yes: shared_satisfied
+#       no:  shared_collect_dissatisfaction
+#
+# Phase 1 implementation note: the `include:` directive is not yet wired in the
+# compiler. For Phase 1 intents, copy these node patterns inline. Phase 2 adds
+# the include mechanism.
+# =============================================================================
+
+shared_nodes:
+
+  - id: shared_satisfied
+    type: end
+    outcome: self_served
+    prompt:
+      text: "Glad I could help! 🙏 Take care."
+
+  - id: shared_collect_dissatisfaction
+    type: message
+    prompt:
+      text: "Sorry to hear that. Would you like to describe a different issue, or raise a support ticket?"
+    quick_replies:
+      - { id: describe, label: "🔁 My issue is different" }
+      - { id: ticket,   label: "🎫 Raise a ticket" }
+    on_reply:
+      save_to: collected.dissatisfaction_action
+      describe: shared_reclassify_keyword
+      ticket:   shared_raise_ticket
+
+  - id: shared_reclassify_keyword
+    type: collect
+    prompt:
+      text: "Describe your issue briefly — I'll try to point you to the right place."
+    field:
+      name: collected.user_issue_description
+      type: text
+    next: shared_keyword_route
+
+  - id: shared_keyword_route
+    type: branch
+    rules:
+      - { if: "'certificate' in lower(ctx.collected.user_issue_description)", then: route_to_certificate }
+      - { if: "'designation' in lower(ctx.collected.user_issue_description)", then: route_to_designation }
+      - { if: "'progress' in lower(ctx.collected.user_issue_description)",   then: route_to_progress }
+      - { if: "'profile' in lower(ctx.collected.user_issue_description)",    then: route_to_profile }
+    default: shared_raise_ticket
+
+  - id: shared_raise_ticket
+    type: message
+    prompt:
+      text: "Raising a ticket so the L2 team can investigate. One moment..."
+    next: shared_create_ticket_call
+
+  - id: shared_create_ticket_call
+    type: api_call
+    integration: zoho_desk_api
+    method: create_ticket
+    args:
+      subject:     "Bot escalation — {{ ctx.flow_id }}"
+      description: "{{ ctx.collected | to_yaml }}"
+      category:    "GENERAL_INQUIRY"
+      priority:    "P3"
+    response_mapping:
+      - { from: $.ticketNumber, to: collected.ticket_id }
+    on_success: shared_ticket_confirmation
+    on_error:
+      any: shared_ticket_failed
+
+  - id: shared_ticket_confirmation
+    type: end
+    outcome: ticket_raised
+    prompt:
+      text: "✅ Ticket #{{ ctx.collected.ticket_id }} raised. L2 team will reach you within 1-2 working days."
+
+  - id: shared_ticket_failed
+    type: end
+    outcome: error
+    prompt:
+      text: "I couldn't raise the ticket. Please email support@igotkarmayogi.gov.in directly. Apologies."

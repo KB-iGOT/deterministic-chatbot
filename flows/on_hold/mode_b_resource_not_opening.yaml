@@ -1,0 +1,285 @@
+# =============================================================================
+# MODE B — DETERMINISTIC + LLM TICKET TAIL
+# =============================================================================
+# Flow: Resource / Content Not Opening (UC-04)
+#
+# Covers all resource types: SCORM/HTML-archive, PDF, MP4 video, YouTube, Assessment
+#
+# Mode B pattern:
+#   1. User picks affected course from enrollment list
+#   2. User picks resource type they're having trouble with
+#   3. Type-specific troubleshooting guidance
+#   4. If unresolved → collect email → transfer_llm (auto_raise) → Zoho ticket
+#
+# APIs used:
+#   POST /api/course/private/v4/user/enrollment/list/{user_id}   (enrollment verify)
+#   GET  /api/content/v2/read/{course_id}                        (hierarchy, no auth)
+#   POST /api/content/v1/search                                  (resource metadata, no auth)
+# =============================================================================
+
+flow_id: RESOURCE_NOT_OPENING
+flow_type: deterministic_with_llm_fallback
+version: 1
+
+metadata:
+  category:         course
+  menu_label:       "📂 Resource not opening"
+  menu_group:       "Learning"
+  menu_order:       4
+  classification:   Incident
+  default_portal:   Learner Portal
+  default_priority: P3
+  default_severity: Sev 3
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "resource not opening"
+    - "content not loading"
+    - "video not playing"
+    - "pdf not opening"
+    - "scorm not working"
+    - "youtube not loading"
+    - "assessment not opening"
+    - "content not working"
+    - "module not opening"
+
+entry_node: pick_course
+
+imports:
+  - _terminal
+  - fragment: _zoho_ticket
+    with:
+      cf_category:     course
+      cf_sub_category: resource_not_opening
+      cf_flow_id:      RESOURCE_NOT_OPENING
+
+nodes:
+
+  # ===========================================================================
+  # 1. Select course from enrollment list
+  # ===========================================================================
+  - id: pick_course
+    type: collect
+    prompt:
+      text: "Please select the course that has the resource not opening:"
+    field:
+      name: collected.course_id
+      type: select
+    dynamic_options:
+      source: api
+      integration: karmayogi
+      request:
+        method: POST
+        url: "/api/course/private/v4/user/enrollment/list/{{ ctx.user_id_hash }}"
+        body:
+          request:
+            retiredCoursesEnabled: true
+            status: ["In-Progress", "Completed"]
+      response_mapping:
+        list_path:       "$.courses"
+        id_field:        courseId
+        label_field:     courseName
+        sub_label_field: completionPercentage
+      extra_fields:
+        - { from: courseName, to: collected.course_name }
+      search:     { enabled: true, placeholder: "Search your enrolled courses..." }
+      pagination: { enabled: true, page_size: 10 }
+      cache_ttl:  300
+    next: ask_resource_type
+
+  # ===========================================================================
+  # 2. Ask what type of resource is not opening
+  # ===========================================================================
+  - id: ask_resource_type
+    type: message
+    prompt:
+      text:  "What type of resource or content is not opening in **{{ ctx.collected.course_name }}**?"
+      voice: "What type of content is not working? Press the option number."
+    quick_replies:
+      - { id: SCORM,      label: "Interactive / SCORM content", icon: "🖥️"  }
+      - { id: VIDEO,      label: "Video (MP4)", icon: "🎬" }
+      - { id: PDF,        label: "PDF document", icon: "📄" }
+      - { id: YOUTUBE,    label: "YouTube video", icon: "▶️" }
+      - { id: ASSESSMENT, label: "Assessment / Quiz", icon: "📝" }
+    disable_input: true
+    on_reply:
+      save_to: collected.resource_type
+      next:    branch_resource_type
+
+  - id: branch_resource_type
+    type: branch
+    rules:
+      - { if: "ctx.collected.resource_type == 'SCORM'",      then: guidance_scorm }
+      - { if: "ctx.collected.resource_type == 'VIDEO'",      then: guidance_video }
+      - { if: "ctx.collected.resource_type == 'PDF'",        then: guidance_pdf }
+      - { if: "ctx.collected.resource_type == 'YOUTUBE'",    then: guidance_youtube }
+      - { if: "ctx.collected.resource_type == 'ASSESSMENT'", then: guidance_assessment }
+    default: guidance_general
+
+  # ===========================================================================
+  # Guidance nodes by resource type
+  # ===========================================================================
+
+  # SCORM / Interactive content
+  - id: guidance_scorm
+    type: resolution
+    prompt:
+      text: "Here are steps to fix **interactive / SCORM content** not opening in **{{ ctx.collected.course_name }}**:"
+    steps:
+      - "Use **Chrome or Edge** browser — SCORM content may not work in Safari or Firefox."
+      - "**Disable browser extensions** (especially ad blockers and script blockers) that may block SCORM scripts."
+      - "Ensure **JavaScript is enabled** in your browser settings."
+      - "**Clear browser cache and cookies**, then retry."
+      - "Try in an **Incognito / Private window** to rule out extension conflicts."
+      - "Do **not** use a VPN or corporate proxy that may restrict content loading."
+      - "If on mobile, open on **desktop/laptop** — SCORM content often requires a larger screen."
+      - "Enable **third-party cookies** in browser settings (required by some SCORM players)."
+    follow_up:
+      text: "Was the interactive content able to open after trying these steps?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, it's working now" }
+        - { id: no,  label: "❌ No, still not opening" }
+    on_reply:
+      yes: satisfied
+      no:  resource_collect_email
+
+  # Video (MP4)
+  - id: guidance_video
+    type: resolution
+    prompt:
+      text: "Here are steps to fix **video content** not playing in **{{ ctx.collected.course_name }}**:"
+    steps:
+      - "**Check your internet connection** — video requires at least 2 Mbps. Switch to a stronger network if possible."
+      - "**Clear browser cache** and retry in a fresh browser window."
+      - "Try a different browser — **Chrome or Edge** recommended."
+      - "Disable browser extensions, especially **ad blockers** that may block media."
+      - "Try in **Incognito / Private mode** to rule out cache or extension issues."
+      - "If the video loads but is blank, right-click the video area and select **Show Controls**."
+      - "Check that your system's **media codecs** are up-to-date (update your browser)."
+    follow_up:
+      text: "Is the video playing now?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, playing now" }
+        - { id: no,  label: "❌ No, still not playing" }
+    on_reply:
+      yes: satisfied
+      no:  resource_collect_email
+
+  # PDF
+  - id: guidance_pdf
+    type: resolution
+    prompt:
+      text: "Here are steps to fix a **PDF** not opening in **{{ ctx.collected.course_name }}**:"
+    steps:
+      - "**Allow pop-ups** for igotkarmayogi.gov.in in your browser settings — PDFs often open in a new tab/pop-up."
+      - "**Clear browser cache** and retry."
+      - "Try in a different browser — **Chrome or Edge** recommended."
+      - "If you see a blank page, your browser's built-in PDF viewer may be disabled — check browser settings."
+      - "Try **right-clicking the PDF link** → 'Save as' to download it and open with Adobe Reader or Foxit."
+      - "On mobile, ensure you have a PDF reader app installed."
+    follow_up:
+      text: "Is the PDF opening now?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, opening now" }
+        - { id: no,  label: "❌ No, still not opening" }
+    on_reply:
+      yes: satisfied
+      no:  resource_collect_email
+
+  # YouTube
+  - id: guidance_youtube
+    type: resolution
+    prompt:
+      text: "Here are steps to fix a **YouTube video** not loading in **{{ ctx.collected.course_name }}**:"
+    steps:
+      - "Verify that **YouTube is accessible** from your network — government offices often block YouTube."
+      - "If on a restricted network, try on **personal mobile data** (4G/5G) instead of office WiFi."
+      - "**Clear browser cache** and retry."
+      - "Disable **ad blockers** — they can interfere with YouTube embeds."
+      - "Try in a different browser (**Chrome or Edge**) or Incognito mode."
+      - "If YouTube is accessible but the video shows an error, the video may have been removed — contact your MDO."
+    follow_up:
+      text: "Is the YouTube video loading now?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, loading now" }
+        - { id: no,  label: "❌ No, still not loading" }
+    on_reply:
+      yes: satisfied
+      no:  resource_collect_email
+
+  # Assessment / Quiz
+  - id: guidance_assessment
+    type: resolution
+    prompt:
+      text: "Here are steps to fix an **assessment / quiz** not opening in **{{ ctx.collected.course_name }}**:"
+    steps:
+      - "**Clear browser cache and cookies**, then retry."
+      - "Try in **Chrome or Edge** — these are the recommended browsers."
+      - "Try in an **Incognito / Private window**."
+      - "Disable browser extensions, especially **ad blockers** and **script blockers**."
+      - "Ensure **JavaScript and cookies are enabled** in browser settings."
+      - "Do **not** use a VPN or corporate proxy."
+      - "If the assessment loads but doesn't submit, check your internet connection stability."
+    follow_up:
+      text: "Is the assessment opening now?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, it's working now" }
+        - { id: no,  label: "❌ No, still not opening" }
+    on_reply:
+      yes: satisfied
+      no:  resource_collect_email
+
+  # General fallback
+  - id: guidance_general
+    type: resolution
+    prompt:
+      text: "Here are general steps to fix content not opening in **{{ ctx.collected.course_name }}**:"
+    steps:
+      - "**Clear browser cache and cookies**, then retry."
+      - "Try in **Chrome or Edge** browser."
+      - "Try in **Incognito / Private window** to rule out extension conflicts."
+      - "Disable **ad blockers** and script blockers."
+      - "Check your **internet connection** — content requires a stable connection."
+      - "Try accessing from a **different device or network**."
+    follow_up:
+      text: "Was the content able to open after trying these steps?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, working now" }
+        - { id: no,  label: "❌ No, still not opening" }
+    on_reply:
+      yes: satisfied
+      no:  resource_collect_email
+
+  # ===========================================================================
+  # Escalation — collect email then auto-generate ticket
+  # ===========================================================================
+  - id: resource_collect_email
+    type: collect
+    prompt:
+      text: "I'll raise a support ticket. Please enter your **registered email address**:"
+    field:
+      name: collected.user_email
+      type: email
+      validation:
+        pattern:   "^[\\w.+-]+@[\\w-]+\\.[a-z]{2,}$"
+        error_msg: "That doesn't look like a valid email. Please try again."
+    next: resource_auto_ticket
+
+  - id: resource_auto_ticket
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user has a resource/content opening issue that was not resolved through self-service.
+        Generate a Zoho support ticket.
+        Subject: "<resource_type> Not Opening — <course_name>"
+        Description: include course_name, course_id, resource_type (SCORM/Video/PDF/YouTube/Assessment),
+        user_email, and a brief summary of troubleshooting steps attempted.
+      priority_override: P3
+    on_complete: confirm_ticket

@@ -1,0 +1,324 @@
+# =============================================================================
+# MODE B — DETERMINISTIC + LLM TICKET TAIL
+# =============================================================================
+# Flow: Multiple Account Issue (SOP: Multiple Account Issue.txt / UC-10)
+#
+# Triggered when a user tries to update their Email ID or Mobile Number
+# but receives an error that it is already registered on another account.
+#
+# Covers:
+#   - Detect the conflicting account via user search
+#   - Fetch the conflicting account's enrollment details (org, in-progress, completed)
+#   - Present the conflict clearly to the user
+#   - Decision tree:
+#       Case A — User does NOT want to proceed → close
+#       Case B — User requests account merge → inform merge is not possible
+#       Case C — User confirms they want to proceed with deactivation → L2 ticket
+#
+# APIs used:
+#   POST /private/user/v1/search         (find conflicting account by email/mobile)
+#   POST /api/course/private/v4/user/enrollment/list/{conflict_user_id}
+#        (fetch conflict account's course stats)
+#
+# NOTES:
+#   - Account deactivation is a MANUAL L2 step — no self-service deactivation API.
+#     The flow raises a Zoho ticket with full context for the L2 team.
+#   - Enrollment list for the conflicting user ID requires system-level credentials
+#     (the bot's API key). If the platform restricts cross-user enrollment reads,
+#     the count fields will be None and the message falls back to "has enrollments".
+# =============================================================================
+
+flow_id: MULTIPLE_ACCOUNT
+flow_type: deterministic_with_llm_fallback
+version: 1
+
+metadata:
+  category:         profile
+  menu_label:       "👥 Multiple account / email conflict"
+  menu_group:       "Account & Login"
+  menu_order:       3
+  classification:   Service Request
+  default_priority: P3
+  default_severity: Sev 3
+  default_portal:   Learner Portal
+
+enabled_channels: [web]
+
+imports:
+  - fragment: _zoho_ticket
+    with:
+      cf_category:     "Account & Login"
+      cf_sub_category: "Multiple Account / Email Conflict"
+      cf_flow_id:      "MULTIPLE_ACCOUNT"
+
+entry_node: intro_message
+
+nodes:
+
+  # ===========================================================================
+  # 1. Introduce the flow
+  # ===========================================================================
+  - id: intro_message
+    type: message
+    prompt:
+      text: |
+        I can help with this. This usually happens when the email ID or mobile number you are trying to update is **already registered to another account** on the platform.
+
+        Let me look up the details so we can figure out the best next step.
+    quick_replies:
+      - { id: email,  label: "📧 Email ID conflict" }
+      - { id: mobile, label: "📱 Mobile number conflict" }
+    disable_input: true
+    on_reply:
+      save_to: collected.conflict_type
+      email:  ask_conflict_email
+      mobile: ask_conflict_mobile
+
+  # ===========================================================================
+  # 2. Collect the conflicting identifier
+  # ===========================================================================
+  - id: ask_conflict_email
+    type: collect
+    prompt:
+      text: |
+        Please share the **email address** you are trying to update to.
+    field:
+      name:        collected.conflict_identifier
+      type:        email
+      placeholder: "conflicting.email@example.com"
+    next: search_conflict_account
+
+  - id: ask_conflict_mobile
+    type: collect
+    prompt:
+      text: |
+        Please share the **mobile number** you are trying to update to.
+    field:
+      name:        collected.conflict_identifier
+      placeholder: "e.g. 9876543210"
+    next: search_conflict_account
+
+  # ===========================================================================
+  # 3. Search for the conflicting account
+  # ===========================================================================
+  - id: search_conflict_account
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/private/user/v1/search"
+      body:
+        request:
+          filters:
+            email: "{{ ctx.collected.conflict_identifier }}"
+          limit: 1
+    response_mapping:
+      - { from: "$.response.count",                                               to: collected.conflict_account_count }
+      - { from: "$.response.content[0].identifier",                               to: collected.conflict_user_id }
+      - { from: "$.response.content[0].channel",                                  to: collected.conflict_org_name }
+      - { from: "$.response.content[0].profileDetails.personalDetails.firstname", to: collected.conflict_first_name }
+    on_success: branch_on_conflict
+    on_error:
+      any: search_error
+
+  - id: branch_on_conflict
+    type: branch
+    rules:
+      - { if: "ctx.collected.conflict_user_id == None", then: no_conflict_found }
+    default: fetch_conflict_enrollments
+
+  # ===========================================================================
+  # 4. Fetch enrollment details for the conflicting account
+  # ===========================================================================
+  - id: fetch_conflict_enrollments
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/course/private/v4/user/enrollment/list/{{ ctx.collected.conflict_user_id }}"
+      body:
+        request:
+          retiredCoursesEnabled: true
+    response_mapping:
+      - { from: "$.courses", to: collected.conflict_total,      transform: count_courses_total }
+      - { from: "$.courses", to: collected.conflict_inprogress, transform: count_courses_inprogress }
+      - { from: "$.courses", to: collected.conflict_completed,  transform: count_courses_completed }
+    on_success: show_conflict_details
+    on_error:
+      # If enrollment fetch fails (e.g. permission), still show what we know
+      any: show_conflict_details
+
+  # ===========================================================================
+  # 5. Show conflict details and ask user how to proceed
+  # ===========================================================================
+  - id: show_conflict_details
+    type: message
+    prompt:
+      text: |
+        ⚠️ The {{ ctx.collected.conflict_type or "identifier" }} **{{ ctx.collected.conflict_identifier }}** is already registered to another account.
+
+        **Conflicting account details:**
+        🏢 Organization: **{{ ctx.collected.conflict_org_name or "Unknown" }}**
+        📚 Total enrollments: **{{ ctx.collected.conflict_total or "Unknown" }}**
+        🔄 In Progress: **{{ ctx.collected.conflict_inprogress or "—" }}**
+        ✅ Completed: **{{ ctx.collected.conflict_completed or "—" }}**
+
+        If you proceed, the conflicting account will be **deactivated** and you will lose access to its enrollments and progress.
+
+        How would you like to proceed?
+    quick_replies:
+      - { id: no_proceed,  label: "❌ Don't proceed — keep as-is" }
+      - { id: merge,       label: "🔗 Can we merge both accounts?" }
+      - { id: yes_proceed, label: "⚠️ Proceed — deactivate the other account" }
+    disable_input: true
+    on_reply:
+      save_to: collected.conflict_decision
+      no_proceed:  case_a_close
+      merge:       case_b_merge_not_possible
+      yes_proceed: case_c_confirm_deactivation
+
+  # ===========================================================================
+  # Case A — User does not want to proceed
+  # ===========================================================================
+  - id: case_a_close
+    type: end
+    outcome: self_served
+
+  # ===========================================================================
+  # Case B — User requests account merge (not possible)
+  # ===========================================================================
+  - id: case_b_merge_not_possible
+    type: resolution
+    prompt:
+      text: |
+        Unfortunately, **merging two accounts is not possible** on the iGOT Karmayogi platform.
+    steps:
+      - "**Option 1**: Keep your current account and use a different email/mobile for the update"
+      - "**Option 2**: Deactivate the conflicting account and update your current account with this identifier (this will result in loss of progress on the other account)"
+    follow_up:
+      text: "What would you like to do?"
+      quick_replies:
+        - { id: raise_ticket, label: "🎫 Raise a support ticket" }
+        - { id: close,        label: "✅ Close — I'll keep my current account" }
+    on_reply:
+      raise_ticket: collect_user_email
+      close:        case_a_close
+
+  # ===========================================================================
+  # Case C — User confirms deactivation of the other account
+  # ===========================================================================
+  - id: case_c_confirm_deactivation
+    type: message
+    prompt:
+      text: |
+        ⚠️ **Please confirm** — if you proceed, the account associated with **{{ ctx.collected.conflict_identifier }}** (registered to **{{ ctx.collected.conflict_org_name or "another organization" }}**) will be **permanently deactivated**.
+
+        - **{{ ctx.collected.conflict_inprogress or "Some" }}** in-progress courses will be lost
+        - **{{ ctx.collected.conflict_completed or "Some" }}** completed courses will no longer be accessible from that account
+        - This action **cannot be undone**
+
+        Which account needs the update — your **current account** or the **conflicting account**?
+    quick_replies:
+      - { id: current,  label: "✏️ Update my current account" }
+      - { id: conflict, label: "✏️ Update the other (conflicting) account" }
+      - { id: cancel,   label: "❌ Cancel — don't proceed" }
+    disable_input: true
+    on_reply:
+      save_to: collected.update_target
+      current:  collect_user_email
+      conflict: conflict_scenario_2
+      cancel:   case_a_close
+
+  - id: conflict_scenario_2
+    type: resolution
+    prompt:
+      text: |
+        Updating the **conflicting account** is a more complex operation that requires backend coordination.
+    steps:
+      - "Update the identifier on the conflicting account to free it up"
+      - "Update your current account with the requested identifier"
+      - "Deactivate the conflicting account"
+    follow_up:
+      text: "Shall I raise a support ticket for this?"
+      quick_replies:
+        - { id: yes, label: "🎫 Yes, raise a ticket" }
+        - { id: no,  label: "❌ No, cancel" }
+    on_reply:
+      yes: collect_user_email
+      no:  case_a_close
+
+  # ===========================================================================
+  # No conflict found — identifier is free to use
+  # ===========================================================================
+  - id: no_conflict_found
+    type: resolution
+    prompt:
+      text: |
+        ✅ Good news — the {{ ctx.collected.conflict_type or "identifier" }} **{{ ctx.collected.conflict_identifier }}** does not appear to be registered to another account.
+
+        The issue you're experiencing may be a temporary error.
+    steps:
+      - "Try updating your email/mobile again from your profile page"
+      - "If the error persists, raise a ticket and our team will investigate"
+    follow_up:
+      text: "Were you able to update successfully?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, updated" }
+        - { id: no,  label: "❌ No, still getting an error" }
+    on_reply:
+      yes: satisfied
+      no:  collect_user_email
+
+  # ===========================================================================
+  # Search error fallback
+  # ===========================================================================
+  - id: search_error
+    type: message
+    prompt:
+      text: |
+        ⚠️ We couldn't look up the account details right now. Please try again or raise a support ticket.
+    quick_replies:
+      - { id: retry,  label: "🔄 Try again" }
+      - { id: ticket, label: "🎫 Raise a ticket" }
+    on_reply:
+      retry:  search_conflict_account
+      ticket: collect_user_email
+
+  # ===========================================================================
+  # Escalation
+  # ===========================================================================
+  - id: collect_user_email
+    type: collect
+    prompt:
+      text: |
+        Please share your **registered email address** so we can include it in the ticket.
+    field:
+      name:        collected.email
+      type:        email
+      placeholder: "your.email@example.com"
+    next: multiple_account_escalate
+
+  - id: multiple_account_escalate
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user has a multiple account / email-mobile conflict issue on iGOT Karmayogi.
+        Generate a Zoho support ticket.
+        Subject: "Multiple Account Conflict — {{ ctx.collected.conflict_identifier }}"
+        Description: include conflict_type (email/mobile), the conflicting identifier,
+        conflict_org_name, enrollment stats (total/inprogress/completed) for the conflicting
+        account, conflict_decision (no_proceed / merge_not_possible / yes_proceed),
+        update_target (current / conflict) if applicable, and the user's email.
+        This is a P3 ticket requiring manual L2 account deactivation.
+      priority_override: P3
+    on_complete: confirm_ticket
+
+  # ── Terminal nodes ────────────────────────────────────────────────────────────
+  - id: satisfied
+    type: end
+    outcome: self_served

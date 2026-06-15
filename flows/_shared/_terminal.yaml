@@ -1,0 +1,13 @@
+fragment_id: terminal
+# Common terminal nodes — include in every flow
+
+nodes:
+  - id: satisfied
+    type: end
+    outcome: self_served
+    prompt:
+      text: "Glad I could help! 🙏"
+
+  - id: ticket_raised_end
+    type: end
+    outcome: ticket_raised

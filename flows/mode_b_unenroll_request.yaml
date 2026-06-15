@@ -1,0 +1,60 @@
+# =============================================================================
+# MODE B — DETERMINISTIC (no LLM tail — no ticket per SOP)
+# =============================================================================
+# Flow: Request to Unenroll from a Course / Program / Event
+#
+# SOP: Use Case – Request to Unenroll from a Course _ Program _ Event.docx
+#
+# Key SOP ruling:
+#   "Currently, there is no functionality available on the platform to unenroll
+#    from an already enrolled course, program, or event."
+#   "No ticket needs to be created, as this does not require any technical
+#    assistance. Do not raise or escalate tickets for this use case."
+#
+# This flow is pure informational guidance — no API calls, no ticket.
+# =============================================================================
+
+flow_id: UNENROLL_REQUEST
+flow_type: deterministic
+version: 1
+
+metadata:
+  category:         course
+  menu_label:       "🚫 Unenroll from a course/program/event"
+  menu_group:       "Learning"
+  menu_order:       9
+  classification:   Query
+  default_priority: P4
+  default_severity: Sev 4
+  default_portal:   Learner Portal
+
+enabled_channels: [web]
+
+entry_node: inform_unavailable
+
+nodes:
+
+  # ===========================================================================
+  # 1. Inform user — unenrollment is not available
+  # ===========================================================================
+  - id: inform_unavailable
+    type: resolution
+    prompt:
+      text: |
+        Currently, there is **no functionality available on iGOT Karmayogi to unenroll** from an enrolled course, program, or event.
+
+        This is a platform-level limitation
+    steps:
+      - "You may **continue and complete** the enrolled content at your own pace"
+      - "Alternatively, you may **ignore the enrolled content** — it will remain in your profile but will not affect your other courses or progress"
+    follow_up:
+      text: "Is there anything else I can help you with?"
+      quick_replies:
+        - { id: ok, label: "✅ Understood, thank you" }
+    on_reply:
+      ok: satisfied
+
+  # ── Terminal nodes ────────────────────────────────────────────────────────────
+  - id: satisfied
+    type: end
+    outcome: self_served

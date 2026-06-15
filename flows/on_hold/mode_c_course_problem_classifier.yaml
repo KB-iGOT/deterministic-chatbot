@@ -1,0 +1,162 @@
+# =============================================================================
+# MODE C — LLM-GUIDED FSM (PHASE 3)
+# =============================================================================
+# Flow: Generic "course problem" landing flow
+# When to use this mode: At certain decision points, the user's free-text
+# description is genuinely ambiguous and the bot needs the LLM to classify it
+# into one of N pre-declared sub-intents. The LLM's output is constrained to
+# the candidate set — it cannot invent a new branch.
+#
+# This flow is a Phase 3 reference — the `llm_choose` node is stubbed in
+# Phase 1 scaffold. Schema and structure are stable for early review.
+# =============================================================================
+
+flow_id: COURSE_PROBLEM_CLASSIFIER
+flow_type: llm_guided_fsm
+version: 1
+
+metadata:
+  category:         course
+  classification:   Incident
+  default_portal:   Learner Portal
+  default_priority: P3
+  default_severity: Sev 3
+
+# Voice excluded — Mode C in voice channel is risky with ASR mis-transcription.
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "course problem"
+    - "course not working"
+    - "issue with course"
+
+entry_node: ask_describe_issue
+
+nodes:
+
+  # --- 1. Open free-text capture ---
+  - id: ask_describe_issue
+    type: collect
+    prompt:
+      text: "What course problem are you facing? Describe in your own words."
+    field:
+      name: collected.user_description
+      type: text
+    next: classify
+
+  # --- 2. LLM picks one of N pre-declared sub-intents ---
+  # The chosen candidate's `id` IS a node id — the engine adds conditional edges
+  # to every candidate node automatically. No separate `on_complete` needed.
+  - id: classify
+    type: llm_choose
+    input: "{{ ctx.collected.user_description }}"
+    candidates:
+      - id: dispatch_progress_issue
+        criteria: "User says progress isn't updating, course stuck, module not marked complete, SCORM not finishing"
+      - id: dispatch_certificate_issue
+        criteria: "User mentions certificate (missing, wrong name, can't download, not generated)"
+      - id: dispatch_content_issue
+        criteria: "User can't open / view / play content; video stuck; page won't load; resource error"
+      - id: dispatch_assessment_issue
+        criteria: "User mentions test, quiz, assessment, score, attempt"
+    confidence_threshold: 0.8
+    on_low_confidence: ask_clarification
+
+  - id: ask_clarification
+    type: message
+    prompt:
+      text: |
+        I'm not sure I understood — could you be more specific?
+        Pick the closest match:
+    quick_replies:
+      - { id: progress,    label: "Course progress / completion" }
+      - { id: certificate, label: "Certificate" }
+      - { id: content,     label: "Video / content not opening" }
+      - { id: assessment,  label: "Test / quiz / assessment" }
+    on_reply:
+      save_to: collected.user_choice
+      progress:    dispatch_progress_issue
+      certificate: dispatch_certificate_issue
+      content:     dispatch_content_issue
+      assessment:  dispatch_assessment_issue
+
+  # --- 3. Dispatch nodes — each redirects to a dedicated flow (Phase 3 mechanism) ---
+  - id: dispatch_progress_issue
+    type: message
+    prompt:
+      text: "Looks like a **progress** issue. Routing you to the Course Progress flow..."
+    next: route_to_progress
+
+  - id: dispatch_certificate_issue
+    type: message
+    prompt:
+      text: "Looks like a **certificate** issue. Routing you to the Certificate flow..."
+    next: route_to_certificate
+
+  - id: dispatch_content_issue
+    type: message
+    prompt:
+      text: "Looks like a **content / resource** issue. Routing you to the Resource flow..."
+    next: route_to_content
+
+  - id: dispatch_assessment_issue
+    type: message
+    prompt:
+      text: "Looks like an **assessment** issue. Let me raise a ticket — L2 handles those manually."
+    next: route_to_assessment_ticket
+
+  # --- Cross-flow routing placeholders (Phase 3 mechanism — `transfer_to_flow:` planned) ---
+  - id: route_to_progress
+    type: end
+    outcome: redirected
+    prompt:
+      text: |
+        📊 **Course Progress Issue** identified.
+
+        Our team tracks progress sync errors daily. Please try:
+        1. Reload the course and check your progress bar.
+        2. Complete any pending module assessments.
+        3. Log out and log back in — progress sometimes needs a refresh.
+
+        If the issue persists after 24 hours, start a new session and choose **Certificate help** to raise a ticket.
+
+  - id: route_to_certificate
+    type: end
+    outcome: redirected
+    prompt:
+      text: |
+        🎓 **Certificate Issue** identified.
+
+        Start a new session and choose **🎓 Certificate help** — that flow will
+        walk you through the exact steps and raise a support ticket if needed.
+
+  - id: route_to_content
+    type: end
+    outcome: redirected
+    prompt:
+      text: |
+        🎥 **Content / Resource Issue** identified.
+
+        Please try:
+        1. Clear browser cache and reload the course.
+        2. Try a different browser (Chrome or Edge recommended).
+        3. Disable browser extensions that may block media playback.
+
+        If content still won't open, email **support@igotkarmayogi.gov.in** with
+        the course name and a screenshot — our team will investigate within 2 business days.
+
+  - id: route_to_assessment_ticket
+    type: end
+    outcome: ticket_raised
+    prompt:
+      text: |
+        📝 **Assessment / Quiz Issue** identified.
+
+        Assessment issues are handled by our L2 team. Please email
+        **support@igotkarmayogi.gov.in** with:
+        - Course name
+        - Assessment name / attempt number
+        - Screenshot of the error or score discrepancy
+
+        Expected resolution: **2 business days**.

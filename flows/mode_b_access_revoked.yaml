@@ -1,0 +1,460 @@
+
+# =============================================================================
+# MODE B — DETERMINISTIC WITH LLM FALLBACK
+# =============================================================================
+# Flow: Access Revoked (UC-01)
+#
+# Covers:
+#   Path A — Transfer request already raised
+#              → fetch org details → confirm org
+#              → if correct: find MDO admin → share contact / YP fallback
+#              → if wrong: guide to cancel and re-raise
+#   Path B — No transfer request raised
+#              → guide user to raise transfer request
+#              → button disabled: guide to withdraw pending request
+#              → can't find org: search org API → share name / YP fallback
+#
+# API calls:
+#   POST /api/private/user/v1/search  — fetch user profile + transfer request
+#   POST /api/org/v1/search           — fetch org name by rootOrgId / orgName
+#   POST /api/private/user/v1/search  — fetch MDO admin by rootOrgId + role
+# =============================================================================
+
+flow_id: ACCESS_REVOKED
+flow_type: deterministic_with_llm_fallback
+version: 2
+
+metadata:
+  category:         profile
+  menu_label:       "🔒 Access revoked"
+  menu_group:       "Account & Login"
+  menu_order:       2
+  classification:   Incident
+  default_portal:   Learner Portal
+  default_priority: P2
+  default_severity: Sev 2
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "access has been revoked"
+    - "organization no longer identifies you as a user"
+    - "submit a transfer request"
+    - "not my user"
+    - "access revoked"
+
+entry_node: intro_context
+
+imports:
+  - _terminal
+  - fragment: _zoho_ticket
+    with:
+      cf_category:     profile
+      cf_sub_category: access_revoked
+      cf_flow_id:      ACCESS_REVOKED
+  - fragment: _yp_lookup
+
+nodes:
+
+  # ===========================================================================
+  # 1. Intro & Context (SOP Step 1)
+  # ===========================================================================
+  - id: intro_context
+    type: message
+    prompt:
+      text: |
+        I understand you're having an issue with your account access. Are you seeing this specific error message on the platform?
+
+        > "Your access has been revoked because your organization no longer identifies you as a user. To regain access, please submit a ‘Transfer Request’ and choose the correct organization.”
+    quick_replies:
+      - { id: yes, label: "✅ Yes, that's the error" }
+      - { id: no,  label: "❌ No, I have a different issue" }
+    disable_input: true
+    on_reply:
+      yes: inform_and_fetch
+      no:  different_issue_fallback
+
+  - id: inform_and_fetch
+    type: message
+    prompt:
+      text: |
+        Thank you for confirming.
+
+    next: fetch_transfer_status
+
+  # ===========================================================================
+  # 2. Verify Transfer Request Status (SOP Step 2.1: Private User Search API)
+  # ===========================================================================
+  - id: fetch_transfer_status
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            userId: "{{ ctx.user_id_hash }}"
+          limit: 1
+    response_mapping:
+      # Check if user exists
+      - { from: "$.response.count",                                       to: collected.user_found_count }
+      # Keep full transfer object for robust pending-request detection
+      - { from: "$.response.content[0].wfTransferRequest",                to: collected.wf_transfer_request }
+      # Extract transfer request status fields
+      - { from: "$.response.content[0].wfTransferRequest.wfId",           to: collected.wf_transfer_id }
+      - { from: "$.response.content[0].wfTransferRequest.departmentName", to: collected.transfer_dept_name }
+      - { from: "$.response.content[0].wfTransferRequest.rootOrgId",      to: collected.transfer_root_org_id }
+      - { from: "$.response.content[0].wfTransferRequest.orgName",        to: collected.transfer_org_name }
+      # Extract org details from user's organisations array (used as fallback when wfTransferRequest.rootOrgId is null)
+      - { from: "$.response.content[0].organisations[0].orgName",          to: collected.profile_org_name }
+      - { from: "$.response.content[0].organisations[0].organisationId",   to: collected.profile_root_org_id }
+      # Extract current user profile details
+      - { from: "$.response.content[0].channel",                          to: collected.user_channel }
+      - { from: "$.response.content[0].channel",                          to: collected.org_channel }
+      - { from: "$.response.content[0].rootOrgId",                        to: collected.root_org_id }
+      - { from: "$.response.content[0].profileStatus",                    to: collected.profile_status }
+    on_success: branch_on_transfer_status
+    on_error:
+      any: escalate_api_error
+
+  - id: branch_on_transfer_status
+    type: branch
+    rules:
+      - { if: "ctx.collected.user_found_count == 0", then: user_not_found_fallback }
+      # SOP Step 2.2: If Transfer Request is Already Raised
+      - { if: "(ctx.collected.wf_transfer_id != None and ctx.collected.wf_transfer_id != '') or (ctx.collected.wf_transfer_request != None and ctx.collected.wf_transfer_request != {})",
+          then: fetch_org_details }
+    # SOP Step 4: If Transfer Request is NOT Raised
+    default: guide_raise_transfer
+
+  # Fetch organization details using org API (in case orgName is missing from transfer request)
+  - id: fetch_org_details
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/org/v1/search"
+      body:
+        request:
+          filters:
+            rootOrgId: "{{ ctx.collected.transfer_root_org_id or ctx.collected.profile_root_org_id }}"
+          limit: 1
+    response_mapping:
+      - { from: "$.response.content[0].orgName", to: collected.fetched_org_name }
+    on_success: show_pending_transfer
+    on_error:
+      any: show_pending_transfer  # If org lookup fails, show with available info
+
+  # ===========================================================================
+  # 3. Path A: Transfer Request Already Raised (SOP Step 2.2)
+  # ===========================================================================
+
+  - id: user_not_found_fallback
+    type: message
+    prompt:
+      text: |
+        I'm sorry, I was unable to find an account matching your profile details.
+
+        For security reasons, I can't proceed. Please contact our support team directly at **support@igotkarmayogi.gov.in** for further assistance.
+    next: satisfied
+
+  - id: different_issue_fallback
+    type: message
+    prompt:
+      text: |
+        I see. This support flow is specifically for the "Access Revoked" error.
+
+        Please start a new conversation and choose a topic from the main menu that best matches your issue.
+    next: satisfied
+
+  - id: show_pending_transfer
+    type: message
+    prompt:
+      text: |
+        ✅ **Transfer Request Found**
+
+        We have reviewed your request and found that a transfer request has already been raised to the **{{ ctx.collected.transfer_org_name or ctx.collected.fetched_org_name or ctx.collected.profile_org_name or ctx.collected.transfer_dept_name or "organization" }}**.
+
+        Kindly confirm whether this organization is correct.
+    quick_replies:
+      - { id: yes, label: "✅ Yes, that's correct" }
+      - { id: no,  label: "❌ No, wrong organization" }
+    disable_input: true
+    on_reply:
+      save_to: collected.org_confirmed
+      # SOP Step 2.3: Once User Confirms Organization
+      yes: fetch_mdo_admin_details
+      # SOP Step 5.5: Cancel Request (If Required)
+      no:  cancel_and_reraise_guide
+
+  # SOP 2.3: Identify Concerned MDO Admin/Leader
+  - id: fetch_mdo_admin_details
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            rootOrgId: "{{ ctx.collected.transfer_root_org_id or ctx.collected.profile_root_org_id }}"
+            organisations.roles: ["MDO_ADMIN"]
+            status: 1
+          limit: 1
+    response_mapping:
+      - { from: "$.response.count",                                               to: collected.mdo_admin_count }
+      - { from: "$.response.content[0].profileDetails.personalDetails.firstname",    to: collected.mdo_admin_name }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail", to: collected.mdo_admin_email }
+    on_success: branch_on_mdo_found
+    on_error:
+      any: lookup_yp_contact  # Fallback to YP lookup if API fails
+
+  - id: branch_on_mdo_found
+    type: branch
+    rules:
+      - { if: "ctx.collected.mdo_admin_count > 0", then: show_mdo_admin_details }
+    # SOP Step 3: If No MDO Admin/Leader Exists — look up YP/SPOC
+    default: lookup_yp_contact
+
+  - id: show_mdo_admin_details
+    type: resolution
+    prompt:
+      text: |
+        ✅ **MDO Admin Contact Information**
+
+        We have identified the MDO Admin for the **{{ ctx.collected.transfer_org_name or ctx.collected.fetched_org_name or ctx.collected.transfer_dept_name }}** organization.
+        
+        **Contact Details:**
+        - **Name:** {{ ctx.collected.mdo_admin_name or "MDO Admin" }}
+        - **Email:** {{ ctx.collected.mdo_admin_email or "Contact the organization directly" }}
+    steps:
+      - "Connect with the MDO Admin using the contact information above."
+      - "Request them to review and approve your transfer request."
+      - "Your access will be restored once your request is approved."
+    next: satisfied
+
+  # SOP 5.5: Cancel and re-raise
+  - id: cancel_and_reraise_guide
+    type: resolution
+    prompt:
+      text: |
+        ⚠️ **Cancel Current Request**
+
+        Since the organization is incorrect, you need to cancel the current transfer request and raise a fresh one with the correct organization.
+    steps:
+      - "Step 1: Log in to iGOT Karmayogi."
+      - "Step 2: Click on **Profile Icon** (Top Right Corner)."
+      - "Step 3: Click on **View Profile**."
+      - "Step 4: Click on **Cancel Transfer Request**."
+      - "Step 5: Once cancelled, click **Make Transfer Request** again."
+      - "Step 6: Select the **correct organization name** from the dropdown."
+      - "Step 7: Ensure all details (Group, Designation) are accurate."
+      - "Step 8: Click **Submit**. Your new request will be sent to the MDO Admin for approval."
+    next: satisfied
+
+  # ===========================================================================
+  # 4. Path B: No Transfer Request Raised (SOP Step 4 & 5)
+  # ===========================================================================
+  - id: guide_raise_transfer
+    type: resolution
+    prompt:
+      text: |
+        📋 **Raise a Transfer Request**
+
+        Your previous department's MDO has marked your profile as **'Not My User'**. Therefore, you are required to raise a **Transfer Request** to regain access to the platform.
+    steps:
+      - "**Step 1:** Log in to iGOT Karmayogi."
+      - "**Step 2:** Click on **Profile Icon** (Top Right Corner)."
+      - "**Step 3:** Click on **View Profile**."
+      - "**Step 4:** Select **Make Transfer Request**."
+      - "**Step 5:** Select the **Correct Organization Name** from the dropdown."
+      - "**Step 6:** Choose **Group** and **Designation** (if applicable)."
+      - "**Step 7:** Ensure all details are accurate and click **Submit**."
+      - "**Step 8:** Your request will be sent to the concerned MDO Admin for approval."
+      - "**Step 9:** Access will be restored once the MDO Admin approves the request."
+    follow_up:
+      text: "Are you facing any issues while raising the request?"
+      quick_replies:
+        - { id: done,   label: "✅ I've submitted it" }
+        - { id: greyed, label: "⚠️  Button is disabled" }
+        - { id: no_org, label: "🔍 Can't find my org" }
+    on_reply:
+      done: satisfied
+      # SOP Step 6.1: Transfer Request Button Disabled
+      greyed: guide_button_disabled
+      # SOP Step 6.2: User Unable to Find Organization in Dropdown
+      no_org: collect_org_not_found_details
+
+  # SOP 6.1: Resolution for disabled button
+  - id: guide_button_disabled
+    type: resolution
+    prompt:
+      text: |
+        ⚠️ **"Make Transfer Request" Button is Disabled**
+
+        This usually happens when you have a pending request under your **Primary Details** section.
+    steps:
+      - "Step 1: Log in to iGOT Karmayogi."
+      - "Step 2: Go to **Profile** (Top Right Corner)."
+      - "Step 3: Open the **Primary Details** section."
+      - "Step 4: Click on **Withdraw Request** to cancel the pending request."
+      - "Step 5: Once withdrawn, the 'Make Transfer Request' option will become enabled again."
+      - "Step 6: Submit a fresh transfer request with the correct organization details."
+      
+    next: satisfied
+
+  # SOP 6.2: Org not found - Initial Validation
+  - id: collect_org_not_found_details
+    type: collect
+    prompt:
+      text: |
+        To help locate your organization, please share the following details:
+    prompts:
+      - { field: collected.ministry_name,   text: "🏛️  Ministry Name:", optional: false }
+      - { field: collected.state_name,      text: "🏙️  State Name:", optional: true }
+      - { field: collected.dept_name,       text: "🏢 Department Name:", optional: false }
+      - { field: collected.exact_org_name,  text: "📋 Exact Organization Name:", optional: false }
+    next: api_search_for_org
+
+  # SOP 6.2: Backend Verification using /api/org/v1/search
+  - id: api_search_for_org
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/org/v1/search"
+      body:
+        request:
+          filters:
+            orgName: "{{ ctx.collected.exact_org_name }}"
+          limit: 5
+    response_mapping:
+      - { from: "$.response.count",                                               to: collected.org_search_count }
+      - { from: "$.response.content[0].orgName",                                  to: collected.found_org_name }
+      - { from: "$.response.content[0].rootOrgId",                                to: collected.found_org_id }
+    on_success: branch_on_org_search_result
+    on_error:
+      any: share_spoc_details_for_org_creation
+
+  - id: branch_on_org_search_result
+    type: branch
+    rules:
+      - { if: "ctx.collected.org_search_count > 0", then: share_exact_org_name }
+    default: share_spoc_details_for_org_creation
+
+  - id: share_exact_org_name
+    type: resolution
+    prompt:
+      text: |
+        ✅ **Organization Found!**
+
+        We found an organization matching your details in the system.
+    steps:
+      - "When you raise your transfer request, use the following exact organization name:\n\n**{{ ctx.collected.found_org_name }}**"
+      - "Go to your Profile → Make Transfer Request"
+      - "Select the organization name exactly as shown above"
+    next: satisfied
+
+  - id: share_spoc_details_for_org_creation
+    type: resolution
+    prompt:
+      text: |
+        ⚠️ **Organization Not Found**
+
+        We could not find the organization "**{{ ctx.collected.exact_org_name }}**" in the iGOT system based on the details provided.
+
+        This could mean the organization hasn't been onboarded yet, or the name might be spelled differently.
+    steps:
+      - "We are now looking up the YP (Young Professional) contact for your Ministry/State."
+      - "Alternatively, email **support@igotkarmayogi.gov.in** with your organization details for further assistance."
+    next: lookup_yp_contact
+
+  - id: yp_found_result
+    type: resolution
+    prompt:
+      text: |
+        📋 **YP / SPOC Contact Details**
+
+        We have identified the Young Professional (YP) for your Ministry/State.
+
+        **Contact Details:**
+        - **Name:** {{ ctx.collected.yp_name or "YP Contact" }}
+        - **Email:** {{ ctx.collected.yp_email or "N/A" }}
+        - **Mobile:** {{ ctx.collected.yp_mobile or "N/A" }}
+    steps:
+      - "Please coordinate with the YP using the contact details above."
+      - "The YP will assist with:"
+      - "  • Creation of MDO Leader/Admin for your organization"
+      - "  • Approval-related support for your transfer request"
+      - "  • Organization onboarding if not yet registered on iGOT"
+    next: satisfied
+
+  - id: yp_not_found
+    type: resolution
+    prompt:
+      text: |
+        ⚠️ **YP / SPOC Details Not Found**
+
+        We could not locate a Young Professional (YP) or SPOC for your organization in our records.
+    steps:
+      - "Please email our support team at **support@igotkarmayogi.gov.in** with the following details:"
+      - "  • Your Ministry / State / Department name"
+      - "  • Your organization name"
+      - "  • A brief description of your issue"
+      - "Our team will assist you with MDO Admin creation or organization onboarding."
+    next: satisfied
+
+  # ===========================================================================
+  # 5. Escalation & Terminal
+  # ===========================================================================
+  - id: escalate_api_error
+    type: message
+    prompt:
+      text: |
+        I'm sorry, I encountered a technical issue while checking your profile and can't proceed with the automated steps right now.
+
+        This might be a temporary problem. If it continues, please email our support team directly at **support@igotkarmayogi.gov.in** for assistance.
+    next: satisfied
+
+  - id: escalate_to_ticket
+    type: collect
+    prompt:
+      text: "I will raise a support ticket for your access issue. Please enter your **registered email address**:"
+    field: { name: collected.email, type: email }
+    next: access_revoked_auto_ticket
+
+  - id: access_revoked_auto_ticket
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user's access has been revoked. 
+        Generate a support ticket.
+        Subject: "Access Revoked / Transfer Request Support"
+        Description: Include whether a transfer request was already pending (wf_transfer_id: {{ ctx.collected.wf_transfer_id }}), the target organization ({{ ctx.collected.transfer_dept_name }}), which path the user followed (e.g., pending request, no request, button disabled, org not found), and the user's current organization/channel ({{ ctx.collected.user_channel }}).
+      priority_override: P2
+    on_complete: confirm_ticket
+
+  - id: confirm_ticket
+    type: message
+    prompt:
+      text: |
+        ✅ Your support ticket has been successfully raised.
+
+        Our support team will review your access revoked issue and contact you shortly at **{{ ctx.collected.email }}**.
+
+        In the meantime, you can also check the steps provided in this conversation to try resolving the issue on your own.
+    next: satisfied
+
+  - id: satisfied
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        Is there anything else I can help you with today?

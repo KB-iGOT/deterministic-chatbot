@@ -1,0 +1,407 @@
+# =============================================================================
+# MODE B — DETERMINISTIC
+# =============================================================================
+# Flow: Profile Verification — Designation / Group Not Verified (UC-05-v2)
+#
+# SOP:  Profile Verification Flow – Designation or Group Not Verified
+# APIs: UC-05 Profile Verification — Designation / Group Transfer Request — API Integration Guide
+#
+# Execution order (per API doc):
+#   STEP 1  POST /private/user/v1/search
+#             → reads wfTransferRequest; determines has_pending_request
+#             → if pending   → STEP 2
+#             → if not found → guide submission steps (no further API call)
+#             → API error    → error message
+#
+#   STEP 2  POST /private/user/v1/search   (pending request path only)
+#             filters: channel = departmentName, role = MDO_LEADER
+#             → MDO_LEADER found  → show admin contact
+#             → MDO_LEADER absent → YP lookup (in-memory Excel)
+#             → API 401/403/404   → YP lookup (in-memory Excel)
+#
+#   YP FALLBACK (Global Rule — no admin available)
+#             → data_lookup via yp_lookup service (Excel)
+#             → YP found    → show yp contact
+#             → YP not found → generic message
+#
+# SOP sub-scenarios §1.1–§1.4 are handled by asking the user after submission
+# steps and re-reading the private profile to recheck wfTransferRequest.
+#
+# In-memory service:
+#   yp_lookup  (_yp_lookup — Excel-backed YP/SPOC contact by org_channel)
+# =============================================================================
+
+flow_id: PROFILE_VERIFICATION_DESIGNATION
+flow_type: deterministic
+version: 2
+
+metadata:
+  category:         profile
+  menu_label:       "✅ Designation / Group not verified"
+  menu_group:       "Profile"
+  menu_order:       6
+  classification:   Service Request
+  default_portal:   Learner Portal
+  default_priority: P3
+  default_severity: Sev 3
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "designation not verified"
+    - "group not verified"
+    - "profile not verified"
+    - "verification pending"
+    - "designation verification"
+    - "group verification"
+    - "designation not showing"
+    - "designation pending"
+    - "group pending"
+
+entry_node: fetch_private_profile
+
+imports:
+  - _yp_lookup
+  - _terminal
+
+nodes:
+
+  # ===========================================================================
+  # STEP 1 — POST /private/user/v1/search
+  #           Fetch private profile to read wfTransferRequest
+  # ===========================================================================
+
+  - id: fetch_private_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            userId: "{{ ctx.user_id_hash }}"
+          limit: 1
+    response_mapping:
+      - { from: "$.response.content[0].wfTransferRequest.wfId",                                    to: collected.wf_id }
+      - { from: "$.response.content[0].wfTransferRequest.departmentName",                          to: collected.transfer_dept_name }
+      - { from: "$.response.content[0].channel",                                                   to: collected.org_channel }
+      - { from: "$.response.content[0].rootOrgId",                                                 to: collected.root_org_id }
+      - { from: "$.response.content[0].profileDetails.profileDesignationStatus",                   to: collected.designation_status }
+      - { from: "$.response.content[0].profileDetails.professionalDetails[0].designation",         to: collected.current_designation }
+      - { from: "$.response.content[0].profileDetails.professionalDetails[0].group",               to: collected.current_group }
+      - { from: "$.response.content[0].profileDetails.professionalDetails[0].name",                to: collected.current_dept_name }
+    on_success: branch_on_pending_request
+    on_error:
+      any: profile_api_error
+    timeout_ms: 5000
+
+  - id: profile_api_error
+    type: message
+    prompt:
+      text: |
+        I was unable to retrieve your profile details at this time.
+
+        Please try again in a few minutes. If the issue persists, write to
+        **support@igotkarmayogi.gov.in** with your registered email and a
+        description of the issue.
+    next: resolution_check
+
+  # ===========================================================================
+  # Branch — does a pending transfer/designation request exist?
+  # Decision: wfId present OR departmentName present → has_pending_request = true
+  # ===========================================================================
+
+  - id: branch_on_pending_request
+    type: branch
+    rules:
+      - if: "(ctx.collected.wf_id != None and ctx.collected.wf_id != '') or (ctx.collected.transfer_dept_name != None and ctx.collected.transfer_dept_name != '')"
+        then: lookup_mdo_leader
+    default: show_submission_steps
+    # No wfTransferRequest → guide user to submit; no further API call
+
+  # ===========================================================================
+  # STEP 2 — POST /private/user/v1/search
+  #           MDO_LEADER lookup for transfer target department
+  #           Runs ONLY on pending request path
+  # ===========================================================================
+
+  - id: lookup_mdo_leader
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          query: ""
+          filters:
+            channel: "{{ ctx.collected.transfer_dept_name }}"
+            organisations.roles: ["MDO_LEADER"]
+            status: 1
+          limit: 1
+    response_mapping:
+      - { from: "$.response.count",                                                          to: collected.mdo_leader_count }
+      - { from: "$.response.content[0].profileDetails.personalDetails.firstname",            to: collected.mdo_leader_name }
+      - { from: "$.response.content[0].profileDetails.personalDetails.surname",              to: collected.mdo_leader_surname }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail",         to: collected.mdo_leader_email }
+      - { from: "$.response.content[0].firstName",                                           to: collected.mdo_leader_name_fallback }
+      - { from: "$.response.content[0].email",                                               to: collected.mdo_leader_email_fallback }
+    on_success: branch_mdo_leader_found
+    on_error:
+      # 401 / 403 / 404 / any → treat as not found per API doc
+      any: lookup_yp_contact
+    timeout_ms: 5000
+
+  - id: branch_mdo_leader_found
+    type: branch
+    rules:
+      - if: "ctx.collected.mdo_leader_count != None and ctx.collected.mdo_leader_count > 0"
+        then: show_admin_contact
+    default: lookup_yp_contact
+    # count = 0 or empty content → Global Rule: look up YP
+
+  # ---------------------------------------------------------------------------
+  # §1.1.1 — MDO Leader / Org Admin present
+  # ---------------------------------------------------------------------------
+
+  - id: show_admin_contact
+    type: message
+    prompt:
+      text: |
+        Your request to transfer to **{{ ctx.collected.transfer_dept_name }}**
+        is currently **pending approval**.
+
+        The organisation admin who will approve your request is:
+
+        👤 **{{ ctx.collected.mdo_leader_name or ctx.collected.mdo_leader_name_fallback }}**
+        📧 {{ ctx.collected.mdo_leader_email or ctx.collected.mdo_leader_email_fallback }}
+
+        Your designation will reflect in your profile once the admin approves it.
+
+        > 💡 *Tip:* Log out and log back in after approval to see the updated designation.
+    next: resolution_check
+
+  # ---------------------------------------------------------------------------
+  # §1.1.2 — No Org Admin → Global Rule: YP lookup from Excel
+  #           _yp_lookup fragment provides lookup_yp_contact
+  #           key: collected.org_channel (channel from Step 1 profile)
+  #           on_success → yp_found_result
+  #           on_error   → yp_not_found
+  # ---------------------------------------------------------------------------
+
+  - id: yp_found_result
+    type: message
+    prompt:
+      text: |
+        Your designation request is already submitted, but currently **no admin
+        is available** to approve it.
+
+        Please connect with your assigned **Young Professional (YP)** for
+        further assistance:
+
+        👤 **{{ ctx.collected.yp_name }}**
+        📧 {{ ctx.collected.yp_email }}
+        📞 {{ ctx.collected.yp_mobile }}
+    next: resolution_check
+
+  - id: yp_not_found
+    type: message
+    prompt:
+      text: |
+        Your designation request is already submitted, but currently **no admin
+        is available** to approve it.
+
+        Please connect with the **Young Professional (YP)** assigned to your
+        state/department for further assistance.
+    next: resolution_check
+
+  # ===========================================================================
+  # §1.2 — No pending request — guide user through submission steps
+  # ===========================================================================
+
+  - id: show_submission_steps
+    type: resolution
+    prompt:
+      text: |
+        No pending designation or group request was found for your profile.
+
+        Please follow the steps below to update and submit your designation or
+        group for approval:
+    steps:
+      - "Click on **View Profile** from the top-right menu."
+      - "Navigate to **Primary Details** and click the ✏️ **Edit (pen) icon**."
+      - "Update the correct **Group** and **Designation**."
+      - "Click **Send for Approval** to submit the changes."
+      - "The request will be sent to your organisation admin for approval."
+      - "Your designation will reflect in your profile once the admin approves it."
+    follow_up:
+      text: "Were you able to submit the request successfully?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, submitted" }
+        - { id: no,  label: "❌ No, having trouble submitting" }
+    on_reply:
+      save_to: collected.submission_attempt
+      yes: ask_is_designation_visible
+      no:  resolution_check
+
+  # ===========================================================================
+  # §1.3 — User submitted but designation still not visible
+  # ===========================================================================
+
+  - id: ask_is_designation_visible
+    type: message
+    prompt:
+      text: |
+        Is the designation now visible in your profile, or is it still not
+        reflecting?
+    quick_replies:
+      - { id: visible,     label: "✅ Yes, it is now visible" }
+      - { id: not_visible, label: "❌ No, still not showing" }
+    disable_input: true
+    on_reply:
+      visible:     satisfied
+      not_visible: recheck_private_profile
+
+  # ===========================================================================
+  # §1.3 / §1.4 — Re-read private profile to recheck wfTransferRequest
+  #               Same STEP 1 API: POST /private/user/v1/search
+  # ===========================================================================
+
+  - id: recheck_private_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            userId: "{{ ctx.user_id_hash }}"
+          limit: 1
+    response_mapping:
+      - { from: "$.response.content[0].wfTransferRequest.wfId",           to: collected.wf_id }
+      - { from: "$.response.content[0].wfTransferRequest.departmentName",  to: collected.transfer_dept_name }
+      - { from: "$.response.content[0].channel",                           to: collected.org_channel }
+    on_success: branch_recheck_pending
+    on_error:
+      any: show_submission_steps_repeat
+    timeout_ms: 5000
+
+  - id: branch_recheck_pending
+    type: branch
+    rules:
+      - if: "(ctx.collected.wf_id != None and ctx.collected.wf_id != '') or (ctx.collected.transfer_dept_name != None and ctx.collected.transfer_dept_name != '')"
+        then: lookup_mdo_leader_recheck
+    default: show_submission_steps_repeat
+    # Still no pending request → guide to resubmit (§1.3.2 / §1.4.2)
+
+  # ===========================================================================
+  # §1.4.1 — Request now found after recheck → MDO_LEADER lookup (STEP 2 again)
+  # ===========================================================================
+
+  - id: lookup_mdo_leader_recheck
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          query: ""
+          filters:
+            channel: "{{ ctx.collected.transfer_dept_name }}"
+            organisations.roles: ["MDO_LEADER"]
+            status: 1
+          limit: 1
+    response_mapping:
+      - { from: "$.response.count",                                                          to: collected.mdo_leader_count }
+      - { from: "$.response.content[0].profileDetails.personalDetails.firstname",            to: collected.mdo_leader_name }
+      - { from: "$.response.content[0].profileDetails.personalDetails.surname",              to: collected.mdo_leader_surname }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail",         to: collected.mdo_leader_email }
+      - { from: "$.response.content[0].firstName",                                           to: collected.mdo_leader_name_fallback }
+      - { from: "$.response.content[0].email",                                               to: collected.mdo_leader_email_fallback }
+    on_success: branch_recheck_admin_found
+    on_error:
+      any: lookup_yp_contact
+    timeout_ms: 5000
+
+  - id: branch_recheck_admin_found
+    type: branch
+    rules:
+      - if: "ctx.collected.mdo_leader_count != None and ctx.collected.mdo_leader_count > 0"
+        then: show_admin_contact_recheck
+    default: lookup_yp_contact
+
+  - id: show_admin_contact_recheck
+    type: message
+    prompt:
+      text: |
+        ✅ Your designation request has been submitted successfully.
+
+        Please **log out and log back in** to verify if the designation is
+        now reflecting in your profile.
+
+        Your organisation admin will approve the request shortly:
+
+        👤 **{{ ctx.collected.mdo_leader_name or ctx.collected.mdo_leader_name_fallback }}**
+        📧 {{ ctx.collected.mdo_leader_email or ctx.collected.mdo_leader_email_fallback }}
+
+        Your designation will reflect once the admin completes the approval.
+    next: resolution_check
+
+  # ===========================================================================
+  # §1.3.2 / §1.4.2 — No pending request after recheck → guide steps again
+  # ===========================================================================
+
+  - id: show_submission_steps_repeat
+    type: resolution
+    prompt:
+      text: |
+        We still could not find a pending designation request in the system.
+
+        Please follow the steps below to re-submit your designation or group
+        for approval:
+    steps:
+      - "Click on **View Profile** from the top-right menu."
+      - "Navigate to **Primary Details** and click the ✏️ **Edit (pen) icon**."
+      - "Update the correct **Group** and **Designation**."
+      - "Click **Send for Approval** to submit the changes."
+      - "The request will be sent to your organisation admin for approval."
+      - "Your designation will reflect in your profile once the admin approves it."
+    follow_up:
+      text: "Were you able to re-submit the request?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, re-submitted" }
+        - { id: no,  label: "❌ No, still having trouble" }
+    on_reply:
+      yes: resolution_check
+      no:  resolution_check
+
+  # ===========================================================================
+  # Resolution check
+  # ===========================================================================
+
+  - id: resolution_check
+    type: message
+    prompt:
+      text: "Did this help resolve your designation / group verification issue?"
+    quick_replies:
+      - { id: yes, label: "✅ Yes, resolved" }
+      - { id: no,  label: "❌ No, need more help" }
+    disable_input: true
+    on_reply:
+      yes: satisfied
+      no:  unresolved_end
+
+  - id: unresolved_end
+    type: end
+    outcome: unresolved
+    prompt:
+      text: |
+        I'm sorry I couldn't fully resolve this for you.
+
+        Please write to **support@igotkarmayogi.gov.in** with your registered
+        email, organisation name, and a description of the issue. Our L2 team
+        will assist you within 2 working days.

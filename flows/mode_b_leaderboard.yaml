@@ -1,0 +1,90 @@
+# =============================================================================
+# MODE B — DETERMINISTIC (NO API, NO TICKET)
+# =============================================================================
+# Flow: Leaderboard / Top Karmayogi Dashboard Issue (UC-09)
+#
+# Covers:
+#   L1 — Leaderboard not visible / can't find it  → navigation steps
+#   L2 — Leaderboard visible but not updated       → monthly refresh info
+#
+# SOP note: "Avoid raising tickets — not required for this use case."
+# No API calls required. Pure guidance flow.
+# =============================================================================
+
+flow_id: LEADERBOARD_ISSUE
+flow_type: deterministic
+version: 1
+
+metadata:
+  category:         platform
+  menu_label:       "🏆 Leaderboard issue"
+  menu_group:       "Reports & Data"
+  menu_order:       8
+  classification:   Service Request
+  default_portal:   Learner Portal
+  default_priority: P3
+  default_severity: Sev 3
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "leaderboard not showing"
+    - "top karmayogi not visible"
+    - "leader board not updated"
+    - "karmayogi dashboard not displaying"
+    - "leaderboard issue"
+    - "top karmayogi dashboard"
+
+entry_node: ask_leaderboard_issue
+
+imports:
+  - _terminal
+
+nodes:
+
+  # ===========================================================================
+  # 1. Identify sub-issue
+  # ===========================================================================
+  - id: ask_leaderboard_issue
+    type: message
+    prompt:
+      text: "What issue are you facing with the **Leaderboard / Top Karmayogi Dashboard**?"
+    quick_replies:
+      - { id: NOT_VISIBLE, label: "🔍 Can't find it / not displaying" }
+      - { id: NOT_UPDATED, label: "📊 Visible but not updated" }
+    disable_input: true
+    on_reply:
+      save_to: collected.leaderboard_issue
+      NOT_VISIBLE: show_navigation_steps
+      NOT_UPDATED: show_update_info
+
+  # ===========================================================================
+  # L1 — Not visible: show navigation steps and close (SOP 1.2: just close)
+  # ===========================================================================
+  - id: show_navigation_steps
+    type: message
+    prompt:
+      text: |
+        Here's how to access the **Leaderboard / Top Karmayogi Dashboard**:
+
+        1. Go to the **Home Page**
+        2. Click on **Leader Dashboard / Leaderboard**
+        3. You will be redirected to the **Leader Card / Top Karmayogi Card**
+
+        Please follow the above steps to access your leaderboard.
+    next: satisfied
+
+  # ===========================================================================
+  # L2 — Not updated: monthly refresh info
+  # ===========================================================================
+  - id: show_update_info
+    type: message
+    prompt:
+      text: |
+        The **Leaderboard / Top Karmayogi Dashboard** is refreshed **once every month** — on the **1st of each month**.
+
+        If your recent activity is not yet reflected, please check again after the next monthly update on the 1st.
+
+        
+    next: satisfied

@@ -1,0 +1,396 @@
+# =============================================================================
+# MODE B — DETERMINISTIC + LLM TICKET TAIL
+# =============================================================================
+# Flow: Resource / Content Not Opening (UC-04)
+#
+# Covers:
+#   - Mobile App vs Web Browser detection
+#   - Mobile App unsupported guidance & Desktop Site fallback
+#   - YouTube resource configuration checks (Streaming, Registration, Artifact URLs)
+#   - YouTube network restriction checks
+#   - SCORM/Other format escalation
+#
+# APIs used:
+#   POST /api/course/private/v4/user/enrollment/list/{user_id}
+#   GET  /api/content/v2/read/{course_id}
+#   POST /api/content/v1/search
+#   GET  /api/content/v1/read/{resource_id}
+# =============================================================================
+
+flow_id: RESOURCE_NOT_OPENING
+flow_type: deterministic_with_llm_fallback
+version: 2
+
+metadata:
+  category:         course
+  menu_label:       "📂 Resource not opening"
+  menu_group:       "Learning"
+  menu_order:       4
+  classification:   Incident
+  default_portal:   Learner Portal
+  default_priority: P3
+  default_severity: Sev 3
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "resource not opening"
+    - "content not loading"
+    - "video not playing"
+    - "pdf not opening"
+    - "scorm not working"
+    - "youtube not loading"
+    - "assessment not opening"
+    - "content not working"
+    - "module not opening"
+
+entry_node: ask_device_type
+
+imports:
+  - _terminal
+  - fragment: _zoho_ticket
+    with:
+      cf_category:     course
+      cf_sub_category: resource_not_opening
+      cf_flow_id:      RESOURCE_NOT_OPENING
+
+nodes:
+
+  # ===========================================================================
+  # 1. Identify User Device (User Selection)
+  # ===========================================================================
+  - id: ask_device_type
+    type: message
+    prompt:
+      text: "Are you accessing iGOT Karmayogi through a mobile application or a web browser?"
+    quick_replies:
+      - { id: mobile, label: "📱 Mobile Application" }
+      - { id: web,    label: "💻 Web Browser" }
+    disable_input: true
+    on_reply:
+      save_to: collected.device_type
+      mobile: mobile_app_guidance
+      web:    web_pick_course
+
+  # ===========================================================================
+  # CASE 1: Mobile Application
+  # ===========================================================================
+  - id: mobile_app_guidance
+    type: resolution
+    prompt:
+      text: |
+        It appears that the resource is not supported on the mobile application. Kindly try consuming the course using a desktop or laptop browser.
+    steps:
+      - "Open Google Chrome browser on your desktop or laptop."
+      - "In the address bar, type **iGOT Karmayogi** and press Enter."
+      - "Login using your registered credentials."
+      - "Search for the course in which you are enrolled."
+      - "Click **Resume** and try opening the video or resource again."
+    follow_up:
+      text: "Would you like to try this on a desktop, or do you want to continue troubleshooting on your mobile device?"
+      quick_replies:
+        - { id: desktop, label: "💻 I'll try on desktop" }
+        - { id: mobile,  label: "📱 Continue on mobile" }
+    on_reply:
+      desktop: satisfied
+      mobile:  mobile_desktop_mode_guidance
+
+  - id: mobile_desktop_mode_guidance
+    type: resolution
+    prompt:
+      text: "Let's try using Desktop Mode on your mobile browser."
+    steps:
+      - "Open **Google Chrome** browser on your mobile device."
+      - "Click on the **three dots** at the top right corner of the browser."
+      - "Enable **Desktop Site** / **Desktop Mode**."
+      - "Navigate to iGOT Karmayogi and login."
+      - "Search for the course, click **Resume**, and try opening the resource again."
+    follow_up:
+      text: "Did the resource open successfully in Desktop Mode?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, it opened" }
+        - { id: no,  label: "❌ No, still not opening" }
+    on_reply:
+      yes: satisfied
+      no:  mobile_collect_details
+
+  - id: mobile_collect_details
+    type: collect
+    prompts:
+      - { field: collected.course_name,   text: "Please share the Course Name:" }
+      - { field: collected.resource_name, text: "Please share the Resource Name:" }
+      - { field: collected.mobile_model,  text: "Please share your Mobile Device Model (e.g., Samsung Galaxy S21):" }
+      - { field: collected.app_version,   text: "Please share your Mobile Application Version (if known):", optional: true }
+    next: escalate_to_ticket
+
+  # ===========================================================================
+  # CASE 2: Web Browser
+  # ===========================================================================
+
+  # Step 1: Select course from enrollment list
+  - id: web_pick_course
+    type: collect
+    prompt:
+      text: "Please select the course that has the resource not opening:"
+    field:
+      name: collected.course_id
+      type: select
+    dynamic_options:
+      source: api
+      integration: karmayogi
+      request:
+        method: POST
+        url: "/api/course/private/v4/user/enrollment/list/{{ ctx.user_id_hash }}"
+        body:
+          request:
+            retiredCoursesEnabled: true
+            status: ["In-Progress", "Completed"]
+      response_mapping:
+        list_path:       "$.courses"
+        id_field:        courseId
+        label_field:     courseName
+        sub_label_field: completionPercentage
+        extra_fields: # This was incorrectly indented
+          - { from: courseName, to: collected.course_name }
+      search:     { enabled: true, placeholder: "Search your enrolled courses..." }
+      pagination: { enabled: true, page_size: 10 }
+      cache_ttl:  300
+    next: api_fetch_hierarchy
+
+  # Step 2: Fetch hierarchy to get resource IDs (Leaf Nodes)
+  - id: api_fetch_hierarchy
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/content/v2/read/{{ ctx.collected.course_id }}"
+    response_mapping:
+      # Try leafNodes first, fall back to children identifiers if it's a program
+      - from: "$.content.leafNodes"
+        to: collected.all_resource_ids
+      - from: "$.content.children" # Use a separate field for children
+        to: collected.all_child_ids
+        transform: extract_child_course_ids
+    on_success: web_pick_resource
+    on_error:
+      any: api_error_fallback
+
+  # Step 3: Select the resource from a searchable list
+  - id: web_pick_resource
+    type: collect
+    prompt:
+      text: "I found the following resources in **{{ ctx.collected.course_name }}**. Which one is not opening?"
+    field:
+      name: collected.resource_id
+      type: select
+    dynamic_options:
+      source: api
+      integration: karmayogi
+      request:
+        method: POST
+        url: "/api/content/v1/search"
+        body:
+          request:
+            filters:
+              identifier: "{{ ctx.collected.all_resource_ids or ctx.collected.all_child_ids or [] }}"
+            isSecureSettingsDisabled: true
+            fields: ["identifier", "name", "mimeType"]
+            limit: 1000
+      response_mapping:
+        list_path:       "$.content"
+        id_field:        identifier
+        label_field:     name
+        extra_fields:
+          - { from: name,     to: collected.resource_name }
+          - { from: mimeType, to: collected.resource_mime_type }
+      search: { enabled: true, placeholder: "Search for a video or module name..." }
+      pagination: { enabled: true, page_size: 15 }
+    next: branch_resource_type_step
+
+  - id: branch_resource_type_step
+    type: branch
+    rules:
+      - { if: "ctx.collected.resource_mime_type in ['text/x-url']", 
+          then: api_youtube_read }
+      - { if: "ctx.collected.resource_mime_type == 'application/vnd.ekstep.html-archive'", 
+          then: scorm_format_issue }
+    default: other_format_issue
+
+  # Step 4: YouTube URL Configuration Check
+  - id: api_youtube_read
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/content/v1/read/{{ ctx.collected.resource_id }}"
+    response_mapping:
+      - { from: "$.content.streamingUrl", to: collected.streaming_url }
+      - { from: "$.content.artifactUrl",  to: collected.artifact_url }
+      - { from: "$.content.previewUrl",   to: collected.preview_url }
+    on_success: branch_youtube_config
+    on_error:
+      any: api_error_fallback
+
+  - id: branch_youtube_config
+    type: branch
+    rules:
+      - if: "ctx.collected.streaming_url != None and ctx.collected.streaming_url == ctx.collected.artifact_url and ctx.collected.streaming_url == ctx.collected.preview_url"
+        then: ask_youtube_restricted
+    default: youtube_config_issue
+
+  # ===========================================================================
+  # CASE 2A: YouTube Resource
+  # ===========================================================================
+
+  - id: ask_youtube_restricted
+    type: message
+    prompt:
+      text: "Is YouTube access restricted or blocked in your system or organization's network?"
+    quick_replies:
+      - { id: yes_restricted, label: "🚫 Yes, it is restricted" }
+      - { id: no_open,        label: "✅ No, it is not restricted" }
+    disable_input: true
+    on_reply:
+      save_to: collected.youtube_restricted
+      yes_restricted: youtube_restricted_guidance
+      no_open:        youtube_unrestricted_ticket
+
+  - id: youtube_restricted_guidance
+    type: resolution
+    prompt:
+      text: |
+        This content is YouTube-based, and it appears your organization blocks YouTube in desktop browsers.
+
+        You can watch this video using the mobile application instead.
+    steps:
+      - "Open the **iGOT Karmayogi Mobile Application**."
+      - "Login using your registered credentials."
+      - "Search for the course."
+      - "Click **Resume** and watch the video."
+    follow_up:
+      text: "Does this resolve your issue?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, thank you" }
+    
+    on_reply:
+      yes: satisfied
+      
+
+  - id: youtube_unrestricted_ticket
+    type: message
+    prompt:
+      text: |
+        Since YouTube is not restricted and the resource configuration appears correct, this may require a deeper investigation.
+
+        Shall I create a support ticket for you? We will include the following details:
+        - **Course:** {{ ctx.collected.course_name }}
+        - **Resource:** {{ ctx.collected.resource_name }}
+    quick_replies:
+      - { id: yes, label: "✅ Yes, create a ticket" }
+      - { id: no,  label: "❌ No, I'll check again later" }
+    disable_input: true
+    on_reply:
+      yes: escalate_to_ticket
+      no:  satisfied
+
+  - id: youtube_config_issue
+    type: message
+    prompt:
+      text: |
+        It appears that there may be a configuration issue in the resource. This may require a deeper investigation.
+
+        Shall I create a support ticket for you? We will include the following details:
+        - **Course:** {{ ctx.collected.course_name }}
+        - **Resource:** {{ ctx.collected.resource_name }}
+    quick_replies:
+      - { id: yes, label: "✅ Yes, create a ticket" }
+      - { id: no,  label: "❌ No, I'll check again later" }
+    disable_input: true
+    on_reply:
+      yes: escalate_to_ticket
+      no:  satisfied
+
+  # Fallback for API failures
+  - id: api_error_fallback
+    type: message
+    prompt:
+      text: |
+        I'm having trouble fetching your course or resource details right now. Please try again later or share the details so I can raise a ticket.
+    next: escalate_to_ticket
+
+  # ===========================================================================
+  # CASE 2B: SCORM / Other Formats
+  # ===========================================================================
+  - id: scorm_format_issue
+    type: message
+    prompt:
+      text: |
+        The resource **{{ ctx.collected.resource_name }}** appears to be in **SCORM format**. This may require a deeper investigation.
+
+        Shall I create a support ticket for you? We will include the following details:
+        - **Course:** {{ ctx.collected.course_name }}
+        - **Resource:** {{ ctx.collected.resource_name }}
+    quick_replies:
+      - { id: yes, label: "✅ Yes, create a ticket" }
+      - { id: no,  label: "❌ No, I'll check again later" }
+    disable_input: true
+    on_reply:
+      yes: escalate_to_ticket
+      no:  satisfied
+
+  - id: other_format_issue
+    type: message
+    prompt:
+      text: |
+        {% set r_type = "a content module" %}
+        {% if ctx.collected.resource_mime_type == 'application/pdf' %}
+        {% set r_type = "a PDF document" %}
+        {% elif ctx.collected.resource_mime_type == 'video/mp4' %}
+        {% set r_type = "a video file" %}
+        {% elif ctx.collected.resource_mime_type == 'application/vnd.sunbird.questionset' %}
+        {% set r_type = "an assessment" %}
+        {% endif %}
+        The resource **{{ ctx.collected.resource_name }}** appears to be {{ r_type }}. This may require a deeper investigation.
+
+        Shall I create a support ticket for you? We will include the following details:
+        - **Course:** {{ ctx.collected.course_name }}
+        - **Resource:** {{ ctx.collected.resource_name }}
+    quick_replies:
+      - { id: yes, label: "✅ Yes, create a ticket" }
+      - { id: no,  label: "❌ No, I'll check again later" }
+    disable_input: true
+    on_reply:
+      yes: escalate_to_ticket
+      no:  satisfied
+
+  # ===========================================================================
+  # Escalation
+  # ===========================================================================
+  - id: escalate_to_ticket
+    type: collect
+    prompt:
+      text: "I will raise a support ticket. Please enter your **registered email address** so we can contact you:"
+    field:
+      name: collected.user_email
+      type: email
+      validation:
+        pattern:   "^[\\w.+-]+@[\\w-]+\\.[a-z]{2,}$"
+        error_msg: "That doesn't look like a valid email. Please try again."
+    next: resource_auto_ticket
+
+  - id: resource_auto_ticket
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user has a resource/content opening issue.
+        Generate a Zoho support ticket.
+        Subject: "Resource Not Opening — {{ ctx.collected.course_name | default('Course') }}"
+        Description: include course name, resource name, channel ({{ ctx.channel }}), resource type, and email.
+      priority_override: P3
+    on_complete: confirm_ticket

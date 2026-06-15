@@ -1,0 +1,36 @@
+# =============================================================================
+# docker-compose.override.yml — Dev overrides (auto-applied by Docker Compose)
+# =============================================================================
+# Applied automatically when you run: docker compose up
+# Adds: hot-reload, volume mounts so code changes reflect without rebuild.
+#
+# To use production behaviour locally (no overrides):
+#   docker compose -f docker-compose.yml up
+# =============================================================================
+
+services:
+
+  saathi:
+    build:
+      target: builder      # use builder stage — has uv, faster iteration
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --reload            # live-reload on Python file changes
+      - --log-level
+      - debug
+    environment:
+      SAATHI_ENV:  dev
+      LOG_LEVEL:   DEBUG
+    volumes:
+      # Mount source directories — code changes reflect immediately (--reload picks them up)
+      - ./app:/app/app:ro
+      - ./flows:/app/flows:ro
+      - ./prompts:/app/prompts:ro
+      - ./dev_ui:/app/dev_ui:ro
+      # Mount alembic for migration development
+      - ./alembic:/app/alembic:rw

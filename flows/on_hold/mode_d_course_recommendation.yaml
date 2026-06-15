@@ -1,0 +1,146 @@
+# =============================================================================
+# MODE D — OPEN LLM WITH TOOLS (PHASE 3)
+# =============================================================================
+# Flow: Course Recommendation
+# When to use this mode: The user's request is genuinely unbounded (e.g.,
+# "recommend me a course on data analytics for senior officers"). There is no
+# fixed decision tree. The AI needs to call multiple tools, search the course
+# catalog with semantic embeddings, filter by user's prior enrolments, and
+# return ranked recommendations.
+#
+# Mode D is the most powerful AND the most risky. It is RAG-bounded — the
+# AI can only answer using the indexed course catalog; topical guardrails
+# (NeMo Guardrails or regex) block off-topic queries; output is structured
+# via Outlines/Instructor.
+#
+# This flow is a Phase 3 reference — the `open_llm_subgraph` node is stubbed
+# in Phase 1 scaffold.
+# =============================================================================
+
+flow_id: COURSE_RECOMMENDATION
+flow_type: llm_driven
+version: 1
+
+metadata:
+  category:         course
+  classification:   Query
+  default_portal:   Learner Portal
+  default_priority: P4
+  default_severity: Sev 4
+
+# VOICE EXCLUDED — Mode D in voice is risky (free-form LLM + STT mis-transcribe).
+# Phase 4 voice channel will refuse Mode D flows by enabled_channels check.
+enabled_channels: [web]
+
+# Safety bounds — enforced by the engine before invoking the subgraph
+safety:
+  banned_topics: [legal_advice, medical_advice, financial_advice, political_opinion]
+  max_llm_calls_per_session: 5
+  max_tokens_total: 4000
+  pii_redaction: required
+
+# Knowledge corpus — what the LLM is allowed to ground its answers in
+rag:
+  source: karmayogi_course_catalog
+  index: pgvector
+  filter:
+    only_published: true
+    exclude_archived: true
+
+classification:
+  triggers:
+    - "recommend a course"
+    - "find me a course on"
+    - "courses about"
+
+entry_node: ask_what_to_learn
+
+nodes:
+
+  # --- 1. Capture user's learning goal in free text ---
+  - id: ask_what_to_learn
+    type: collect
+    prompt:
+      text: |
+        What would you like to learn about? Be as specific or general as you like.
+        For example: "data analytics for senior officers" or "RTI Act compliance".
+    field:
+      name: collected.user_query
+      type: text
+    next: invoke_recommender
+
+  # Note: PII redaction for user_query happens INSIDE the open_llm_subgraph
+  # node handler (same pattern as transfer_llm_node.py calling presidio.redact()
+  # before building the prompt). No explicit api_call node is needed — Presidio
+  # is a local in-process adapter, not an HTTP integration.
+
+  # --- 2. Invoke the AI subgraph (Phase 3) ---
+  - id: invoke_recommender
+    type: open_llm_subgraph
+    subgraph: course_recommender
+    inputs:
+      query:        "{{ ctx.collected.user_query }}"
+      user_id_hash: "{{ ctx.user_id_hash }}"
+      language:     "{{ ctx.language | default('en') }}"
+      max_results:  5
+    timeout_seconds: 30
+    max_llm_calls: 5
+    store_as: collected.recommendations
+    on_success: present_recommendations
+    on_error:
+      timeout: fallback_template_search
+      any:     fallback_template_search
+
+  # --- 4. Present results (always deterministic to render) ---
+  - id: present_recommendations
+    type: message
+    prompt:
+      text: |
+        Here are courses I found for you:
+
+        {% for course in ctx.collected.recommendations %}
+        **{{ loop.index }}. {{ course.title }}**
+        Provider: {{ course.provider }} · Duration: {{ course.duration }} · Karma points: {{ course.karma_points }}
+        > {{ course.relevance_explanation }}
+
+        {% endfor %}
+    quick_replies:
+      - { id: enrol_top, label: "📚 Enrol in #1" }
+      - { id: see_more,  label: "🔍 Show me more" }
+      - { id: refine,    label: "✏️ Refine my query" }
+      - { id: done,      label: "👍 Thanks" }
+    on_reply:
+      save_to: collected.recommendation_action
+      enrol_top: route_to_enrolment
+      see_more:  invoke_recommender   # rerun subgraph with offset
+      refine:    ask_what_to_learn
+      done:      satisfied
+
+  # --- 5. Deterministic fallback if the AI subgraph fails ---
+  - id: fallback_template_search
+    type: message
+    prompt:
+      text: |
+        I couldn't generate AI-powered recommendations right now. Here's how to search
+        the catalog manually:
+
+        1. Go to **Karmayogi → Browse Courses**
+        2. Use the search bar with your query: "{{ ctx.collected.user_query }}"
+        3. Filter by language, duration, and karma points
+
+        Apologies for the inconvenience.
+    next: satisfied
+
+  - id: route_to_enrolment
+    type: end
+    outcome: redirected
+    prompt:
+      text: |
+        📚 To enrol, visit **iGOT Karmayogi → Browse Courses**, search for the course title,
+        and click **Enrol**. Karma points are credited on completion. Happy learning! 🙏
+
+  - id: satisfied
+    type: end
+    outcome: self_served
+    prompt:
+      text: "Happy learning! 🙏"

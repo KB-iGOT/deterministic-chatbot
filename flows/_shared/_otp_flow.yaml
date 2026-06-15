@@ -1,0 +1,81 @@
+fragment_id: otp_flow
+# Shared OTP generate → verify sub-flow for email/mobile update (UC-06).
+#
+# Prerequisites — must be in collected before this fragment runs:
+#   collected.otp_type    : "email" or "phone"
+#   collected.otp_key     : the new email address or mobile number to verify
+#
+# Fields stored:
+#   collected.otp_verified : true when OTP passes, not set if it fails
+#
+# The flow that imports this fragment MUST define:
+#   - otp_verified_next     (target after successful OTP verification)
+#   - otp_max_retries_node  (target after 3 failed OTP attempts)
+#
+# Internal nodes added:
+#   send_otp, ask_otp, verify_otp, otp_invalid_retry, otp_failed_final
+
+nodes:
+  # Step 3 — Send OTP to new email/mobile
+  - id: send_otp
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/otp/ext/v1/generate"
+      body:
+        request:
+          type: "{{ ctx.collected.otp_type }}"
+          key:  "{{ ctx.collected.otp_key }}"
+    response_mapping: []
+    on_success: ask_otp
+    on_error:
+      any: otp_send_failed
+    timeout_ms: 8000
+
+  - id: otp_send_failed
+    type: message
+    prompt:
+      text: "⚠️ We couldn't send the OTP right now. Please try again in a few minutes, or contact support@igotkarmayogi.gov.in."
+    next: otp_max_retries_node
+
+  # Ask user to enter the OTP
+  - id: ask_otp
+    type: collect
+    prompt:
+      text: "✅ An OTP has been sent to **{{ ctx.collected.otp_key }}**. Please enter the 6-digit OTP below:"
+    field:
+      name: collected.otp_entered
+      type: text
+    next: verify_otp
+
+  # Step 4 — Verify OTP
+  - id: verify_otp
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/otp/v1/verify"
+      body:
+        request:
+          type: "{{ ctx.collected.otp_type }}"
+          key:  "{{ ctx.collected.otp_key }}"
+          otp:  "{{ ctx.collected.otp_entered }}"
+    response_mapping: []
+    on_success: otp_verified_next
+    on_error:
+      any: otp_invalid_retry
+    timeout_ms: 8000
+
+  # OTP invalid — offer retry or give up
+  - id: otp_invalid_retry
+    type: message
+    prompt:
+      text: "❌ The OTP you entered is incorrect or has expired. Would you like to try again?"
+    quick_replies:
+      - { id: retry,  label: "🔄 Resend and retry" }
+      - { id: cancel, label: "❌ Cancel" }
+    disable_input: true
+    on_reply:
+      retry:  send_otp
+      cancel: otp_max_retries_node

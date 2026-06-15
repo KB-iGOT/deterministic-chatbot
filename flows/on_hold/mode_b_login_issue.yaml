@@ -1,0 +1,261 @@
+# =============================================================================
+# MODE B — DETERMINISTIC + LLM TICKET TAIL
+# =============================================================================
+# Flow: Login Issue
+#
+# Covers:
+#   L1 — Forgot password / can't reset
+#   L2 — OTP not received (mobile or email)
+#   L3 — Account locked or disabled
+#   L4 — SSO / department portal not working
+#   L5 — Email ID not recognised
+#
+# Mode B pattern:
+#   Deterministic resolution steps → if unresolved → collect user email
+#   → transfer_llm (auto_raise:true) generates ticket summary from context
+#   → Zoho ticket created automatically → session ends
+#
+# No Karmayogi APIs called in this flow (login issues are account-layer, not API-driven).
+# Zoho ticket via _zoho_ticket fragment.
+# =============================================================================
+
+flow_id: LOGIN_ISSUE
+flow_type: deterministic_with_llm_fallback
+version: 2
+
+metadata:
+  category:         account
+  menu_label:       "🔐 Login issue"
+  menu_group:       "Account & Login"
+  menu_order:       2
+  classification:   Service Request
+  default_portal:   Learner Portal
+  default_priority: P3
+  default_severity: Sev 3
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "can't login"
+    - "unable to log in"
+    - "login not working"
+    - "forgot password"
+    - "otp not received"
+    - "account locked"
+    - "sso not working"
+    - "email not recognised"
+    - "password reset"
+
+entry_node: ask_login_issue
+
+imports:
+  - _terminal
+  - fragment: _zoho_ticket
+    with:
+      cf_category:     account
+      cf_sub_category: login_issue
+      cf_flow_id:      LOGIN_ISSUE
+
+nodes:
+
+  # ===========================================================================
+  # 1. Identify which login issue the user is facing
+  # ===========================================================================
+  - id: ask_login_issue
+    type: message
+    prompt:
+      text:  "What's the issue you're facing while logging in?"
+      voice: "Tell me what's wrong when you try to log in. Press the option number."
+    quick_replies:
+      - { id: L1, label: "Forgot password / can't reset it", icon: "🔑" }
+      - { id: L2, label: "OTP not received on mobile/email", icon: "📩" }
+      - { id: L3, label: "Account locked or disabled", icon: "🔒" }
+      - { id: L4, label: "SSO / department portal not working", icon: "🏛️" }
+      - { id: L5, label: "Email ID not recognised", icon: "❓" }
+    disable_input: true
+    on_reply:
+      save_to: collected.sub_scenario
+      next:    branch_on_login_issue
+
+  - id: branch_on_login_issue
+    type: branch
+    rules:
+      - { if: "ctx.collected.sub_scenario == 'L1'", then: resolution_forgot_password }
+      - { if: "ctx.collected.sub_scenario == 'L2'", then: ask_otp_channel }
+      - { if: "ctx.collected.sub_scenario == 'L3'", then: resolution_account_locked }
+      - { if: "ctx.collected.sub_scenario == 'L4'", then: resolution_sso }
+      - { if: "ctx.collected.sub_scenario == 'L5'", then: resolution_email_not_found }
+    default: resolution_generic
+
+  # ===========================================================================
+  # L1. Forgot password — self-service resolution
+  # ===========================================================================
+  - id: resolution_forgot_password
+    type: resolution
+    prompt:
+      text: "Let's reset your password step by step:"
+    steps:
+      - "Go to the **iGOT login page** and click **Forgot Password**."
+      - "Enter your **registered email address**."
+      - "Check your **inbox and spam folder** for the reset link."
+      - "Click the link and set a new password **within 30 minutes** of receiving it."
+    follow_up:
+      text: "Did this resolve your issue?"
+      quick_replies:
+        - { id: YES, label: "✅ Yes, resolved" }
+        - { id: NO,  label: "❌ No, still facing issue" }
+    on_reply:
+      YES: satisfied
+      NO:  collect_email_for_ticket
+
+  # ===========================================================================
+  # L2. OTP not received
+  # ===========================================================================
+  - id: ask_otp_channel
+    type: message
+    prompt:
+      text:  "Where should the OTP be arriving?"
+      voice: "Where is your OTP supposed to come? Press 1 for mobile, 2 for email."
+    quick_replies:
+      - { id: OTP_MOBILE, label: "Mobile (SMS)", icon: "📱" }
+      - { id: OTP_EMAIL,  label: "Email", icon: "📧" }
+    disable_input: true
+    on_reply:
+      save_to: collected.otp_channel
+      next:    resolution_otp
+
+  - id: resolution_otp
+    type: resolution
+    prompt:
+      text: "Here are steps to fix the OTP issue:"
+    steps:
+      - "**Mobile OTP:** Confirm your registered mobile number matches your SIM. Disable DND. Wait 2–3 minutes and retry."
+      - "**Email OTP:** Check your **spam/junk** folder. Add noreply@igotkarmayogi.gov.in to safe senders and retry."
+      - "Request a new OTP **after 5 minutes** — OTPs expire quickly."
+      - "If DND is active on your mobile, temporarily disable it and retry."
+    follow_up:
+      text: "Did the OTP arrive after trying these steps?"
+      quick_replies:
+        - { id: YES, label: "✅ Yes, got the OTP" }
+        - { id: NO,  label: "❌ No, still not receiving" }
+    on_reply:
+      YES: satisfied
+      NO:  collect_email_for_ticket
+
+  # ===========================================================================
+  # L3. Account locked
+  # ===========================================================================
+  - id: resolution_account_locked
+    type: resolution
+    prompt:
+      text: "Your account may be locked due to multiple failed login attempts."
+    steps:
+      - "Wait **30 minutes** and try logging in again — some temporary locks are time-based."
+      - "Use the **Forgot Password** option to reset your password (this can unlock the account)."
+      - "Clear your browser cache and cookies, then retry."
+      - "If the lock persists, our team will need to unlock it manually."
+    follow_up:
+      text: "Were you able to log in after these steps?"
+      quick_replies:
+        - { id: YES, label: "✅ Yes, logged in" }
+        - { id: NO,  label: "❌ Still locked / blocked" }
+    on_reply:
+      YES: satisfied
+      NO:  collect_email_for_ticket
+
+  # ===========================================================================
+  # L4. SSO / department portal not working
+  # ===========================================================================
+  - id: resolution_sso
+    type: resolution
+    prompt:
+      text: "Let's troubleshoot your SSO / department portal login:"
+    steps:
+      - "Ensure you are using your **official government email ID** (not a personal email)."
+      - "**Clear browser cache and cookies** — then retry in a fresh browser window."
+      - "Try a different browser — **Chrome or Edge** are recommended."
+      - "If your department recently migrated to iGOT, contact your **nodal officer** — your account may need re-linking."
+      - "Disable any VPN and retry if you are connecting from outside the office network."
+    follow_up:
+      text: "Did this resolve your SSO login issue?"
+      quick_replies:
+        - { id: YES, label: "✅ Yes, resolved" }
+        - { id: NO,  label: "❌ No, still not working" }
+    on_reply:
+      YES: satisfied
+      NO:  collect_email_for_ticket
+
+  # ===========================================================================
+  # L5. Email ID not recognised
+  # ===========================================================================
+  - id: resolution_email_not_found
+    type: resolution
+    prompt:
+      text: "Here are reasons why your email might not be recognised:"
+    steps:
+      - "You may have registered with a **different email address** — try alternate emails."
+      - "Your department **nodal officer** may need to provision your account (especially for new employees)."
+      - "Account creation for new joiners can take **up to 48 hours** after onboarding."
+      - "Check if you are trying to log in on the correct portal — `igotkarmayogi.gov.in`."
+    follow_up:
+      text: "Were you able to find your account?"
+      quick_replies:
+        - { id: YES, label: "✅ Yes, found it" }
+        - { id: NO,  label: "❌ No, need help" }
+    on_reply:
+      YES: satisfied
+      NO:  collect_email_for_ticket
+
+  # ===========================================================================
+  # Generic fallback
+  # ===========================================================================
+  - id: resolution_generic
+    type: resolution
+    prompt:
+      text: "Let me give you general troubleshooting steps for login issues:"
+    steps:
+      - "Clear your browser cache and cookies, then retry."
+      - "Try a different browser (Chrome or Edge recommended)."
+      - "Use **Forgot Password** to reset — this often fixes login issues."
+      - "Try logging in from a different device or network."
+    follow_up:
+      text: "Did any of these steps help?"
+      quick_replies:
+        - { id: YES, label: "✅ Yes, resolved" }
+        - { id: NO,  label: "❌ Still not working" }
+    on_reply:
+      YES: satisfied
+      NO:  collect_email_for_ticket
+
+  # ===========================================================================
+  # Escalation path — collect email once, then auto-generate ticket
+  # ===========================================================================
+  - id: collect_email_for_ticket
+    type: collect
+    prompt:
+      text: "I'll raise a support ticket for you. Please enter your **registered email address** so we can reach you:"
+    field:
+      name: collected.user_email
+      type: email
+      validation:
+        pattern:   "^[\\w.+-]+@[\\w-]+\\.[a-z]{2,}$"
+        error_msg: "That doesn't look like a valid email. Please try again."
+    next: login_auto_ticket
+
+  - id: login_auto_ticket
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user could not resolve a login issue through self-service steps.
+        Generate a Zoho support ticket summary.
+        Subject: "<Login Issue Type> — Login Issue" (e.g. "Forgot Password — Login Issue")
+        Description: include sub_scenario (L1=forgot password, L2=OTP, L3=locked, L4=SSO, L5=email not found),
+        otp_channel if relevant, user_email, and a brief summary of the troubleshooting attempted.
+      priority_override: P3
+    on_complete: confirm_ticket

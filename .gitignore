@@ -1,0 +1,107 @@
+# =============================================================================
+# Saathi — .gitignore
+# =============================================================================
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.Python
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Package build / dist ─────────────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+MANIFEST
+
+# ── Installers / lock files (keep pyproject.toml; exclude generated) ─────────
+# uv.lock is intentionally NOT ignored — pin deps in CI
+# pip-*.txt generated files if any
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.env
+# service account JSON files (Vertex AI etc.)
+service-account*.json
+*-service-account.json
+credentials*.json
+gcp-key*.json
+
+# ── Keys / certs ──────────────────────────────────────────────────────────────
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ── Local SQLite / LangGraph dev checkpointer ────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+langgraph.db
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+*.log.*
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+test_reports/
+
+# ── Type / lint caches ────────────────────────────────────────────────────────
+.mypy_cache/
+.ruff_cache/
+.pytype/
+pyrightconfig.json
+
+# ── IDEs ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Temporary / scratch ──────────────────────────────────────────────────────
+tmp/
+temp/
+scratch/
+*.local
+*.bak
+*.orig
+
+# ── Alembic auto-generated (keep versions/ tracked; ignore pycache inside) ───
+alembic/versions/__pycache__/
+
+# ── Node (if a JS widget is ever added) ──────────────────────────────────────
+node_modules/
+.npm/
+
+.env
+creds.json
+.creds.json
+.github/instructions/add_usecase_instructions.instructions.md
+
+# YP allocation data — contains PII, never commit
+data/
