@@ -17,7 +17,8 @@ App opens
     ↓
 GET  /ai-chatbot/v1/sessions/mine     ← check if user has an active session
     │
-    ├─ session found → GET /ai-chatbot/v1/sessions/{id}   ← restore where they left off
+    ├─ session found → GET /ai-chatbot/v1/sessions/{id}          ← restore where they left off
+    │                  GET /ai-chatbot/v1/sessions/{id}/history  ← (optional) render full thread
     │
     └─ no session   → POST /ai-chatbot/v1/sessions        ← start fresh
                             ↓
@@ -73,13 +74,29 @@ GET  /ai-chatbot/v1/sessions/mine     ← check if user has an active session
 | 1 | `GET /ai-chatbot/v1/sessions/mine` | On app open — check if the user has an active session |
 | 2a | `GET /ai-chatbot/v1/sessions/{id}` | Active session found — restore conversation state |
 | 2b | `POST /ai-chatbot/v1/sessions` | No active session — start a new one |
+| 2c | `GET /ai-chatbot/v1/sessions/{id}/history` | Active session found — load full conversation thread for display |
 | 3 | `POST /ai-chatbot/v1/sessions/{id}/turn` | On every user action (button tap, text submit, picker selection) |
 
 The frontend **never** calls Karmayogi, Zoho, OTP, or any other backend service directly. All of that happens server-side.
 
 ---
 
-### 0.3 UI Components to Build
+### 0.3 Why each endpoint exists
+
+| Endpoint | Why it exists |
+|----------|--------------|
+| `GET /health` | Load balancer and k8s liveness probe — confirms the pod is up |
+| `POST /sessions` | Creates a new conversation — allocates session_id, shows greeting + topic menu |
+| `POST /sessions/{id}/turn` | The main conversation driver — every user tap/input goes here; server runs the flow and returns the next bot activities |
+| `GET /sessions/mine` | Cross-device resume — Redis maps user_id → session_id so any device can find the active session without the client storing anything |
+| `GET /sessions/{id}` | Pod-restart recovery — if the server restarts, in-memory state is lost; this reconstructs it from the Postgres checkpoint so turns continue working |
+| `GET /sessions/{id}/history` | Full thread display — returns every user and bot message so the UI can render a scrollable chat history, not just the last bot response |
+| `GET /admin/sessions/{id}/trace` | Debugging — full node-by-node trace of what the engine did (not yet wired) |
+| `DELETE /admin/sessions/{id}` | DPDP compliance — right-to-erasure, deletes all stored conversation data for a user (not yet wired) |
+
+---
+
+### 0.5 UI Components to Build
 
 Every API response contains `activities: [...]`. Each object in that array maps directly to one UI component. There are **7 component types**:
 
@@ -88,10 +105,10 @@ Every API response contains `activities: [...]`. Each object in that array maps 
 | `markdown` | Chat bubble — render with a Markdown library | Bold (`**text**`), bullet lists, `\n\n` = paragraph break |
 | `text` | Chat bubble — plain text, no Markdown | Same layout as `markdown`, just skip the parser |
 | `quick_replies` | Row of tappable button chips | On tap → send `select_choice`; see §4 |
-| `input` | Free-text input box + submit | 3 variants: plain text, email, OTP — see §0.4 |
-| `picker` | Searchable scrollable list | With secondary text, optional "Other" button — see §0.5 |
+| `input` | Free-text input box + submit | 3 variants: plain text, email, OTP — see §0.6 |
+| `picker` | Searchable scrollable list | With secondary text, optional "Other" button — see §0.7 |
 | `typing` | Typing / loading animation | Always followed by real content in the same response (Phase 1) |
-| `end` | End-of-conversation banner | 4 outcome variants — see §0.6 |
+| `end` | End-of-conversation banner | 4 outcome variants — see §0.8 |
 
 > ℹ️ A single response may contain **multiple activities in one array** — render all of them, top to bottom, in order before waiting for the next user action.
 
@@ -104,7 +121,7 @@ Every API response contains `activities: [...]`. Each object in that array maps 
 
 ---
 
-### 0.4 Input Field Variants
+### 0.6 Input Field Variants
 
 The `input` activity type covers three use cases, distinguished by the `input_id` or `validate_regex` field:
 
@@ -130,7 +147,7 @@ If `validate_regex` is present, validate client-side first — don't call the AP
 
 ---
 
-### 0.5 Picker Types
+### 0.7 Picker Types
 
 All pickers use the same `picker` activity schema — you build **one reusable picker component**. The server fetches and shapes the data; you just render `items[]`. Across all 12 active flows you will encounter these picker shapes:
 
@@ -163,7 +180,7 @@ All pickers use the same `picker` activity schema — you build **one reusable p
 
 ---
 
-### 0.6 End-of-Conversation Banners
+### 0.8 End-of-Conversation Banners
 
 When `activities[]` contains `{ "type": "end" }`, the conversation is over. Show a status banner based on `outcome`:
 
@@ -171,6 +188,7 @@ When `activities[]` contains `{ "type": "end" }`, the conversation is over. Show
 |-----------|-----------------|------------|
 | `self_served` | ✅ Green — "Issue resolved!" | — |
 | `ticket_raised` | 🎫 Blue — "Support ticket raised" | Show `ticket_id` from the response root: *"Ticket #12345678 raised. L2 team will reach out within 2 business days."* |
+| `ticket_failed` | ⚠️ Yellow — "Could not raise ticket automatically" | Bot message will say to email support directly. No `ticket_id` in this case. |
 | `unresolved` | ⚠️ Yellow — "We'll follow up shortly" | — |
 | `ended` | ⬜ Neutral — conversation closed | — |
 
@@ -178,7 +196,7 @@ After showing the banner, display a **"Start a new conversation"** button. On ta
 
 ---
 
-### 0.7 Session Lifecycle (frontend logic)
+### 0.9 Session Lifecycle (frontend logic)
 
 ```
 On app / page load
@@ -213,7 +231,7 @@ On error responses
 
 ---
 
-### 0.8 Quick Replies — Key Rules
+### 0.10 Quick Replies — Key Rules
 
 - **Always send back the `id`, never the `label`** — labels may be translated; IDs are always English internal identifiers.
 - **Never show `id` to the user** — always display `label`.
@@ -1025,6 +1043,53 @@ Save the new `session_id` to localStorage.
 
 `GET /sessions/mine` returns `{ "session_id": null }` — client starts a new session. Nothing breaks.
 
+### Full conversation history
+
+Call `GET /ai-chatbot/v1/sessions/{id}/history` to get every message from the start of the session:
+
+```bash
+curl http://localhost:8000/ai-chatbot/v1/sessions/{id}/history \
+  -H "x-authenticated-user-token: <token>"
+```
+
+```json
+{
+  "session_id": "...",
+  "messages": [
+    {
+      "role": "bot",
+      "activities": [{ "type": "markdown", "content": "Android or iPhone?" }, { "type": "quick_replies", "choices": [...] }],
+      "ts": "2026-06-16T10:01:00Z"
+    },
+    {
+      "role": "user",
+      "action": "select_choice",
+      "text": "Android",
+      "ts": "2026-06-16T10:01:15Z"
+    },
+    {
+      "role": "bot",
+      "activities": [{ "type": "markdown", "content": "Clear cache steps..." }, { "type": "quick_replies", "choices": [...] }],
+      "ts": "2026-06-16T10:01:16Z"
+    }
+  ]
+}
+```
+
+**Rendering rules:**
+- `role: "bot"` — render `activities[]` exactly as you would a normal turn response (same rendering code)
+- `role: "user"` — render `text` as the user's message bubble
+- Entries are in chronological order — render top to bottom
+- The **last entry is always `role: "bot"`** — that's the current state still awaiting input; its activities[] contain the pending buttons/picker
+
+**When to call:**
+- On resume (`GET /sessions/mine` returned a session_id): call history first to render the thread, then the last bot entry's activities are already shown at the bottom
+- On initial load of a conversation view (if you want to show a scrollable thread)
+
+**Note:** History starts from the first topic selection. The initial greeting (welcome message + topic picker shown at session start) is not included — it is always identical and the frontend can prepend it locally if needed.
+
+Returns `messages: []` for sessions where no flow has been selected yet, or for sessions started before history tracking was added.
+
 ---
 
 ## 10. Complete Worked Examples (curl)
@@ -1493,6 +1558,7 @@ The JWT `iss` claim must match the configured `KEYCLOAK_HOST` — mismatches cau
 | `POST` | `/ai-chatbot/v1/sessions/{id}/turn` | JWT | Send user action, get bot activities |
 | `GET` | `/ai-chatbot/v1/sessions/mine` | JWT | Get caller's active session ID (Redis lookup) |
 | `GET` | `/ai-chatbot/v1/sessions/{id}` | JWT | Restore full session state |
+| `GET` | `/ai-chatbot/v1/sessions/{id}/history` | JWT | Full conversation history (chronological) |
 | `GET` | `/ai-chatbot/v1/admin/sessions/{id}/trace` | JWT | Full conversation trace *(not yet wired)* |
 | `DELETE` | `/ai-chatbot/v1/admin/sessions/{id}` | JWT | DPDP data deletion *(not yet wired)* |
 | `GET` | `/docs` | None | OpenAPI / Swagger UI |
@@ -1515,5 +1581,4 @@ No authentication required. Use for uptime monitoring.
 | `GET /admin/sessions/{id}/trace` | Not yet wired (returns 501) |
 | `DELETE /admin/sessions/{id}` | Not yet wired (returns 501) |
 | Free-text before topic selection | Bot re-shows menu; no NLP intent matching |
-| Conversation history in response | Past activities not returned — only the latest pending activities |
 | WebSocket / streaming | All activities sent at once; no token-by-token streaming |

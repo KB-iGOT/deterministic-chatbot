@@ -47,6 +47,7 @@ docker compose up
 | `POST` | `/ai-chatbot/v1/sessions/{id}/turn` | JWT | Send user action, receive bot activities |
 | `GET` | `/ai-chatbot/v1/sessions/mine` | JWT | Get caller's active session ID |
 | `GET` | `/ai-chatbot/v1/sessions/{id}` | JWT | Restore session state |
+| `GET` | `/ai-chatbot/v1/sessions/{id}/history` | JWT | Full conversation history |
 | `GET` | `/docs` | — | OpenAPI / Swagger UI |
 
 Hot-reload is active in dev mode — edit YAML or Python, changes apply immediately.

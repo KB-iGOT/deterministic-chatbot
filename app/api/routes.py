@@ -16,19 +16,21 @@ WebSocket upgrade path (Phase 2):
             await ws.send_json(activity.model_dump(exclude_none=True))
 
 Endpoints (all under /ai-chatbot/v1):
-    POST   /ai-chatbot/v1/sessions                  Start a new session
-    POST   /ai-chatbot/v1/sessions/{id}/turn        Submit a user action; returns activities
-    GET    /ai-chatbot/v1/sessions/mine             Return caller's active session_id (Redis-backed)
-    GET    /ai-chatbot/v1/sessions/{id}             Resume an existing session
-    GET    /ai-chatbot/v1/admin/sessions/{id}/trace Admin-only: full conversation trace
-    DELETE /ai-chatbot/v1/admin/sessions/{id}       DPDP DSR: hard-delete session
-    GET    /health                                  Liveness check (root-level, not versioned)
+    POST   /ai-chatbot/v1/sessions                      Start a new session
+    POST   /ai-chatbot/v1/sessions/{id}/turn            Submit a user action; returns activities
+    GET    /ai-chatbot/v1/sessions/mine                 Return caller's active session_id (Redis-backed)
+    GET    /ai-chatbot/v1/sessions/{id}                 Resume an existing session
+    GET    /ai-chatbot/v1/sessions/{id}/history         Full conversation history for a session
+    GET    /ai-chatbot/v1/admin/sessions/{id}/trace     Admin-only: full conversation trace
+    DELETE /ai-chatbot/v1/admin/sessions/{id}           DPDP DSR: hard-delete session
+    GET    /health                                      Liveness check (root-level, not versioned)
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -37,7 +39,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from langchain_core.messages import HumanMessage
 
 from app.api.auth import hash_user_id, require_jwt
-from app.api.schemas import ActiveSessionResponse, StartSessionRequest, StartSessionResponse, TurnRequest, TurnResponse
+from app.api.schemas import ActiveSessionResponse, HistoryResponse, MessageEntry, StartSessionRequest, StartSessionResponse, TurnRequest, TurnResponse
 from app.config import settings
 from app.engine.activity import Activity, QuickReply
 from app.engine.runner import _translate_activity
@@ -305,6 +307,22 @@ async def submit_turn(
                 result.get("zoho_ticket_id") or "-",
             )
 
+        # Append user action + bot response to persistent conversation history
+        _history_graph = request.app.state.graphs.get(flow_id) if flow_id else None
+        if _history_graph is not None:
+            _user_text = (
+                body.user_says or body.text or body.choice_id or body.item_label or body.other_query
+            )
+            _user_msg = {"role": "user", "action": body.action, "text": _user_text, "ts": datetime.utcnow().isoformat()}
+            _bot_msg  = {"role": "bot", "activities": activities, "ts": datetime.utcnow().isoformat()}
+            try:
+                await _history_graph.aupdate_state(
+                    {"configurable": {"thread_id": sid}},
+                    {"messages": [_user_msg, _bot_msg]},
+                )
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("[history] failed to append messages for session=%s: %s", sid, _exc)
+
         return TurnResponse(
             session_id=session_id,
             activities=activities,
@@ -444,6 +462,22 @@ async def submit_turn(
     else:
         if _store:
             await _store.refresh(session["user_id_hash"], session["ttl_minutes"])
+
+    # Append user action + bot response to persistent conversation history
+    _history_graph = request.app.state.graphs.get(flow_id) if flow_id else None
+    if _history_graph is not None:
+        _user_text = (
+            body.user_says or body.text or body.choice_id or body.item_label or body.other_query
+        )
+        _user_msg = {"role": "user", "action": body.action, "text": _user_text, "ts": datetime.utcnow().isoformat()}
+        _bot_msg  = {"role": "bot", "activities": activities, "ts": datetime.utcnow().isoformat()}
+        try:
+            await _history_graph.aupdate_state(
+                {"configurable": {"thread_id": sid}},
+                {"messages": [_user_msg, _bot_msg]},
+            )
+        except Exception as _exc:  # noqa: BLE001
+            log.warning("[history] failed to append messages for session=%s: %s", sid, _exc)
 
     return TurnResponse(
         session_id=session_id,
@@ -612,6 +646,64 @@ async def resume_session(
         flow_id=flow_id,
         current_node=sv.get("current_node"),
     )
+
+
+@router.get("/sessions/{session_id}/history", response_model=HistoryResponse, tags=["chat"])
+async def get_session_history(
+    session_id: UUID,
+    request: Request,
+    claims: dict[str, Any] = Depends(require_jwt),
+) -> HistoryResponse:
+    """Return the full conversation history for a session.
+
+    Each entry is either:
+      role=user  — the action the user sent (action, text, ts)
+      role=bot   — the activities the bot returned (activities[], ts)
+
+    Entries are in chronological order. The last entry is always a bot message
+    showing the current state waiting for user input.
+
+    Returns empty messages[] for sessions started before history tracking was added,
+    or when no flow has been selected yet (only topic picker shown so far).
+    """
+    sid = str(session_id)
+    user_id = claims["sub"]
+    user_id_hash = hash_user_id(user_id)
+
+    # Locate the right graph — need flow_id from session metadata or checkpointer
+    session_meta = request.app.state.sessions.get(sid)
+    flow_id = session_meta.get("flow_id") if session_meta else None
+
+    graphs: dict = getattr(request.app.state, "graphs", {})
+    graph = graphs.get(flow_id) if flow_id else (next(iter(graphs.values())) if graphs else None)
+
+    if graph is None:
+        return HistoryResponse(session_id=session_id, messages=[])
+
+    lg_config = {"configurable": {"thread_id": sid}}
+    try:
+        snapshot = await graph.aget_state(lg_config)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[history] aget_state failed for session=%s: %s", sid, exc)
+        return HistoryResponse(session_id=session_id, messages=[])
+
+    if not snapshot or not snapshot.values:
+        return HistoryResponse(session_id=session_id, messages=[])
+
+    sv = snapshot.values
+
+    # Security: session must belong to the requesting user
+    stored_hash = sv.get("user_id_hash", "")
+    if stored_hash and stored_hash != user_id_hash:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Session does not belong to this user")
+
+    raw_messages = sv.get("messages") or []
+    # Filter to only dict entries that have a "role" key (history entries),
+    # skipping any LangChain BaseMessage objects stored by the engine internals.
+    history_entries = [m for m in raw_messages if isinstance(m, dict) and "role" in m]
+    entries = [MessageEntry(**m) for m in history_entries]
+    return HistoryResponse(session_id=session_id, messages=entries)
 
 
 @router.get("/admin/sessions/{session_id}/trace", tags=["admin"])
