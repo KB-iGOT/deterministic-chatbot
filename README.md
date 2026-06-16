@@ -38,6 +38,17 @@ docker compose up
 | <http://localhost:8000/docs>   | OpenAPI (Swagger) UI |
 | <http://localhost:8000/health> | Liveness check |
 
+**API endpoints:**
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| `GET` | `/health` | — | Liveness check |
+| `POST` | `/ai-chatbot/v1/sessions` | JWT | Start a new session |
+| `POST` | `/ai-chatbot/v1/sessions/{id}/turn` | JWT | Send user action, receive bot activities |
+| `GET` | `/ai-chatbot/v1/sessions/mine` | JWT | Get caller's active session ID |
+| `GET` | `/ai-chatbot/v1/sessions/{id}` | JWT | Restore session state |
+| `GET` | `/docs` | — | OpenAPI / Swagger UI |
+
 Hot-reload is active in dev mode — edit YAML or Python, changes apply immediately.
 
 **Reset all data** (wipes DB volumes):

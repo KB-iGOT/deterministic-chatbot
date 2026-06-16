@@ -6,6 +6,29 @@
 
 ---
 
+## TL;DR — How It Works
+
+The chatbot is a request-response API. Every response is a list of **activities** (messages, buttons, pickers) that you render in order. You never parse free text or make decisions — the server drives all logic.
+
+**The flow every frontend follows:**
+
+```
+App opens
+    ↓
+GET  /ai-chatbot/v1/sessions/mine     ← check if user has an active session
+    │
+    ├─ session found → GET /ai-chatbot/v1/sessions/{id}   ← restore where they left off
+    │
+    └─ no session   → POST /ai-chatbot/v1/sessions        ← start fresh
+                            ↓
+              POST /ai-chatbot/v1/sessions/{id}/turn       ← one call per user action
+              (repeat until response contains type:"end")
+```
+
+**Session TTL:** 30 minutes sliding (resets on every turn). Configured via `IGOT_WEB_SESSION_TTL_MINUTES`.
+
+---
+
 ## Table of Contents
 
 0. [Frontend Quick Start — What You Need to Build](#0-frontend-quick-start--what-you-need-to-build)
@@ -22,7 +45,7 @@
 11. [Multi-language Support](#11-multi-language-support)
 12. [Environments and Base URLs](#12-environments-and-base-urls)
 13. [Endpoints Summary](#13-endpoints-summary)
-14. [Known Gaps (Phase 2)](#14-known-gaps-phase-2)
+14. [Current Limitations](#14-current-limitations)
 
 ---
 
@@ -43,15 +66,16 @@
 
 ---
 
-### 0.2 API Surface — You Only Call Three Endpoints
+### 0.2 API Surface — 4 Endpoints
 
-The frontend **never** calls Karmayogi, Zoho, OTP, or any other backend service directly. All of that happens server-side. You only ever hit:
+| # | Endpoint | When to call |
+|---|----------|-------------|
+| 1 | `GET /ai-chatbot/v1/sessions/mine` | On app open — check if the user has an active session |
+| 2a | `GET /ai-chatbot/v1/sessions/{id}` | Active session found — restore conversation state |
+| 2b | `POST /ai-chatbot/v1/sessions` | No active session — start a new one |
+| 3 | `POST /ai-chatbot/v1/sessions/{id}/turn` | On every user action (button tap, text submit, picker selection) |
 
-| Endpoint | When to call |
-|----------|-------------|
-| `POST /ai-chatbot/v1/sessions` | On app/page load — start a new session or resume an existing one |
-| `POST /ai-chatbot/v1/sessions/{id}/turn` | On every user action (button tap, text submit, picker selection) |
-| `GET /health` | Liveness / readiness check (optional) |
+The frontend **never** calls Karmayogi, Zoho, OTP, or any other backend service directly. All of that happens server-side.
 
 ---
 
@@ -150,7 +174,7 @@ When `activities[]` contains `{ "type": "end" }`, the conversation is over. Show
 | `unresolved` | ⚠️ Yellow — "We'll follow up shortly" | — |
 | `ended` | ⬜ Neutral — conversation closed | — |
 
-After showing the banner, display a **"Start a new conversation"** button. On tap, call `POST /ai-chatbot/v1/sessions` (new session — no `resume_session_id`).
+After showing the banner, display a **"Start a new conversation"** button. On tap, call `POST /ai-chatbot/v1/sessions` to start a new session.
 
 ---
 
@@ -158,16 +182,15 @@ After showing the banner, display a **"Start a new conversation"** button. On ta
 
 ```
 On app / page load
-─────────────────
-1. Read "igot_session_id" from storage
-2. If found:
-     POST /ai-chatbot/v1/sessions  { "channel": "web", "language": "en", "resume_session_id": "<saved_id>" }
-     If response is HTTP 404 → session expired → go to step 3
-     If response.resumed = true → show greeting again (user re-picks topic)
-3. If not found (or 404):
-     POST /ai-chatbot/v1/sessions  { "channel": "web", "language": "en" }
-4. Save response.session_id to storage
-5. Render response.activities[]
+──────────────────
+1. Call GET /ai-chatbot/v1/sessions/mine
+2. If response.session_id is not null:
+     Call GET /ai-chatbot/v1/sessions/{session_id}
+     Render the returned activities — user continues where they left off
+3. If response.session_id is null (no active session, expired, or Redis unavailable):
+     Call POST /ai-chatbot/v1/sessions  { "channel": "web", "language": "en" }
+     Save response.session_id to localStorage
+     Render response.activities[]
 
 On every user action (button tap / text submit / picker select)
 ──────────────────────────────────────────────────────────────
@@ -181,10 +204,11 @@ On every user action (button tap / text submit / picker select)
 
 On error responses
 ──────────────────
-  401 → refresh Keycloak token, then retry the request once
+  401 → refresh Keycloak token, retry once
   404 → session gone → start a new session (step 3 above)
-  422 → request body wrong (developer error — fix the payload)
-  500 → show generic error state; log detail for debugging
+  410 → session expired → start a new session (step 3 above)
+  422 → request body wrong (developer error — fix the payload, do not retry)
+  5xx → wait 2 seconds, retry once; if still failing, show error state
 ```
 
 ---
@@ -290,7 +314,6 @@ POST /ai-chatbot/v1/sessions
 |-------|------|----------|-------------|
 | `channel` | string | ✅ | `"web"` \| `"mobile"` \| `"whatsapp"` |
 | `language` | string | ✅ | BCP-47 language code: `"en"`, `"hi"`, etc. |
-| `resume_session_id` | UUID string | ❌ | If set, attempts to resume an existing session |
 
 **Response:**
 
@@ -301,7 +324,6 @@ POST /ai-chatbot/v1/sessions
 | `status` | string | Always `"awaiting_user"` on session start |
 | `flow_id` | null | No flow selected yet |
 | `current_node` | null | No flow running yet |
-| `resumed` | bool | `true` if session was resumed from `resume_session_id` |
 
 ```bash
 curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
@@ -313,7 +335,6 @@ curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
 ```json
 {
   "session_id": "550e8400-e29b-41d4-a716-446655440000",
-  "resumed": false,
   "activities": [
     {
       "type": "markdown",
@@ -345,7 +366,7 @@ curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
 }
 ```
 
-> **Frontend:** Save `session_id` to localStorage immediately. Hide the free-text input box when `disable_input: true` — the user must pick a button.
+> **Frontend:** Save `session_id` to localStorage immediately. Use `GET /sessions/mine` on next app open to resume. Hide the free-text input box when `disable_input: true` — the user must pick a button.
 
 ---
 
@@ -806,6 +827,20 @@ All errors follow standard HTTP + JSON pattern:
 | `500 Internal Server Error` | Flow execution error | Show generic error; log `detail` for debugging |
 | `503 Service Unavailable` | A required flow was not loaded at startup | Notify backend team |
 
+### Retry Guidance
+
+| Error | Should retry? | How |
+|-------|--------------|-----|
+| Network timeout / connection refused | Yes | Wait **2 seconds**, retry **once** |
+| `5xx` server error | Yes | Wait **2 seconds**, retry **once** |
+| `401 Unauthorized` | Yes, but refresh first | Refresh the Keycloak token, then retry once |
+| `404 Not Found` | No — start fresh | Session gone — call `POST /sessions` instead |
+| `410 Gone` | No — start fresh | Session expired — call `POST /sessions` instead |
+| `422 Unprocessable Entity` | No | Fix the request body (developer error) |
+| Other `4xx` | No | Show user an error message |
+
+**Rule of thumb:** never retry more than once automatically. If the retry also fails, show an error state and let the user initiate a retry manually.
+
 **Example 401:**
 ```bash
 curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
@@ -933,50 +968,49 @@ Render top-to-bottom: first message, then typing indicator (briefly), then secon
 
 ## 9. Session History and Resumption
 
-### Current behaviour (Phase 1)
+Sessions are stored in two places:
+- **Redis** — maps `user_id → session_id` with a sliding 30-minute TTL
+- **Postgres checkpointer** — stores the full LangGraph conversation state, survives pod restarts
 
-Sessions are stored in the **Postgres checkpointer** — they survive server restarts. However, the in-memory session metadata (`channel`, `language`, `status`) is lost on restart.
+### Session resume flow
 
-**On page refresh or browser back:**
-- The session is likely still alive in Postgres (30-minute sliding TTL by default)
-- But `GET /ai-chatbot/v1/sessions/{id}` currently returns `501` — so you cannot restore the UI state from the server
+On every app open, call `GET /ai-chatbot/v1/sessions/mine`:
 
-**Recommended Phase 1 approach:**
-```javascript
-// On page load
-const savedSessionId = localStorage.getItem('igot_session_id');
-if (savedSessionId) {
-  // Try to resume — if 404, session expired → start fresh
-  const resp = await startSession({ resume_session_id: savedSessionId });
-  if (resp.resumed) {
-    // Session found — show the greeting again (user will need to re-pick topic)
-    // Note: conversation history is NOT returned in Phase 1
-  }
-}
+```bash
+curl http://localhost:8000/ai-chatbot/v1/sessions/mine \
+  -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001"
 ```
+
+**Response — active session exists:**
+```json
+{ "session_id": "550e8400-e29b-41d4-a716-446655440000", "status": "in_flow", "flow_id": "CERTIFICATE_DOWNLOAD" }
+```
+
+**Response — no active session:**
+```json
+{ "session_id": null }
+```
+
+When `session_id` is returned, call `GET /ai-chatbot/v1/sessions/{id}` to restore the conversation:
+
+```bash
+curl http://localhost:8000/ai-chatbot/v1/sessions/550e8400-e29b-41d4-a716-446655440000 \
+  -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001"
+```
+
+Returns the last `activities[]` and `current_node` so the UI renders exactly where the user left off. From that point, continue sending turns as normal.
 
 ### Session TTL (sliding window)
 
-| Channel | TTL |
-|---------|-----|
-| `web` | 30 minutes (resets on each turn) |
-| `mobile` | 30 minutes |
-| `whatsapp` | 1440 minutes (24 hours) |
+| Channel | Default TTL | Config key |
+|---------|------------|------------|
+| `web` | 30 minutes | `IGOT_WEB_SESSION_TTL_MINUTES` |
+| `mobile` | 30 minutes | `IGOT_WEB_SESSION_TTL_MINUTES` |
+| `whatsapp` | 1440 minutes (24 h) | hardcoded for Meta's 24h window |
 
-After TTL expiry, the server returns a restart message:
-```json
-{
-  "activities": [
-    { "type": "text", "content": "Your session timed out after inactivity. Let's start fresh — what can I help you with today?" }
-  ]
-}
-```
+TTL resets on every user turn. After expiry, `GET /sessions/mine` returns `null` and `POST /sessions/{id}/turn` returns an expired message — both signal the client to start a new session.
 
-The frontend should detect this and display a "Start new session" button.
-
-### Starting a new session
-
-Always call `POST /ai-chatbot/v1/sessions` without `resume_session_id` to get a fresh session:
+### Starting fresh
 
 ```bash
 curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
@@ -985,11 +1019,11 @@ curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
   -d '{"channel": "web", "language": "en"}'
 ```
 
-Store the new `session_id` in localStorage, replacing the old one.
+Save the new `session_id` to localStorage.
 
-### Phase 2 — Full resumption (not yet wired)
+### Redis unavailable
 
-`GET /ai-chatbot/v1/sessions/{id}` will return the full conversation history once wired. Until then, page refresh always starts the greeting fresh.
+`GET /sessions/mine` returns `{ "session_id": null }` — client starts a new session. Nothing breaks.
 
 ---
 
@@ -1024,7 +1058,6 @@ curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
 ```json
 {
   "session_id": "550e8400-e29b-41d4-a716-446655440000",
-  "resumed": false,
   "status": "awaiting_user",
   "flow_id": null,
   "current_node": null,
@@ -1456,11 +1489,12 @@ The JWT `iss` claim must match the configured `KEYCLOAK_HOST` — mismatches cau
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | `GET` | `/health` | None | Liveness check |
-| `POST` | `/ai-chatbot/v1/sessions` | ✅ JWT | Start (or resume) a session |
-| `POST` | `/ai-chatbot/v1/sessions/{id}/turn` | ✅ JWT | Send user action, get bot activities |
-| `GET` | `/ai-chatbot/v1/sessions/{id}` | ✅ JWT | Resume session *(501 — Phase 2)* |
-| `GET` | `/admin/sessions/{id}/trace` | ✅ JWT | Full conversation trace *(501 — Phase 2)* |
-| `DELETE` | `/admin/sessions/{id}` | ✅ JWT | DPDP data deletion *(501 — Phase 2)* |
+| `POST` | `/ai-chatbot/v1/sessions` | JWT | Start a new session |
+| `POST` | `/ai-chatbot/v1/sessions/{id}/turn` | JWT | Send user action, get bot activities |
+| `GET` | `/ai-chatbot/v1/sessions/mine` | JWT | Get caller's active session ID (Redis lookup) |
+| `GET` | `/ai-chatbot/v1/sessions/{id}` | JWT | Restore full session state |
+| `GET` | `/ai-chatbot/v1/admin/sessions/{id}/trace` | JWT | Full conversation trace *(not yet wired)* |
+| `DELETE` | `/ai-chatbot/v1/admin/sessions/{id}` | JWT | DPDP data deletion *(not yet wired)* |
 | `GET` | `/docs` | None | OpenAPI / Swagger UI |
 
 ### `/health`
@@ -1474,14 +1508,12 @@ No authentication required. Use for uptime monitoring.
 
 ---
 
-## 14. Known Gaps (Phase 2)
+## 14. Current Limitations
 
-| Gap | Impact | Status |
-|-----|--------|--------|
-| `GET /ai-chatbot/v1/sessions/{id}` returns 501 | Page refresh cannot restore conversation history | Phase 2 |
-| In-memory session metadata | Server restart loses `channel`/`language`/`status` of active sessions | Phase 2 — move to Redis |
-| `user_token` not forwarded to platform APIs | System API key used for all Karmayogi calls | Phase 2 |
-| Free-text before topic selection | Bot re-shows menu; no NLP intent matching | Phase 2 — Mode A |
-| `DELETE /admin/sessions/{id}` returns 501 | DPDP data deletion not wired | Phase 2 |
-| Conversation history in response | Activities from past turns not returned | Phase 2 |
-| WebSocket / streaming | Bot sends all activities at once; no token-by-token streaming | Phase 2 |
+| Item | Status |
+|------|--------|
+| `GET /admin/sessions/{id}/trace` | Not yet wired (returns 501) |
+| `DELETE /admin/sessions/{id}` | Not yet wired (returns 501) |
+| Free-text before topic selection | Bot re-shows menu; no NLP intent matching |
+| Conversation history in response | Past activities not returned — only the latest pending activities |
+| WebSocket / streaming | All activities sent at once; no token-by-token streaming |

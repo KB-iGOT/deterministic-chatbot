@@ -38,7 +38,6 @@ class Settings(BaseSettings):
     # Set these only to override the auto-derived values.
     keycloak_jwks_url: str = ""
     keycloak_issuer: str = ""
-    keycloak_audience: str = "saathi"
 
     # Auth behaviour flags
     # Set AUTH_DISABLED=true to bypass all JWT verification (local dev only).

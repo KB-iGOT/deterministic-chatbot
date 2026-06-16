@@ -15,8 +15,6 @@ from pydantic import BaseModel
 class StartSessionRequest(BaseModel):
     channel: Literal["web", "mobile", "whatsapp", "voice"] = "web"
     language: str = "en"
-    # Optional resume hint — if client has a prior session_id in localStorage
-    resume_session_id: UUID | None = None
 
 
 class TurnRequest(BaseModel):
@@ -61,4 +59,15 @@ class TurnResponse(BaseModel):
 
 
 class StartSessionResponse(TurnResponse):
-    resumed: bool = False
+    pass
+
+
+class ActiveSessionResponse(BaseModel):
+    """Response for GET /sessions/mine.
+
+    session_id is null when no active session exists or Redis is unavailable.
+    Clients should call POST /sessions to start a new one in that case.
+    """
+    session_id: UUID | None = None
+    status: str | None = None
+    flow_id: str | None = None

@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     "name": "iGOT Deterministic Chatbot — iGOT Karmayogi Support API",
-    "description": "REST API for the iGOT Deterministic Chatbot — iGOT Karmayogi Bharat support assistant.\n\n## Auth modes\n\n**WITHOUT_JWT (local dev / AUTH_DISABLED=true)**\nSet `AUTH_DISABLED=true` in `.env`. The value of the `x-authenticated-user-token` header is used directly as `user_id`. Pass any UUID — no Keycloak required.\n\n**WITH_JWT (production / AUTH_DISABLED=false)**\nSet `AUTH_DISABLED=false` in `.env`. Pass a real Keycloak JWT as the `x-authenticated-user-token` header value. The `sub` claim (`f:<x>:<uuid>`) is automatically extracted as `user_id`.\n\n## Quick Setup\n\n1. **Local dev without JWT:** set `AUTH_DISABLED=true` in `.env`, use the default `auth_token` collection variable (any UUID).\n2. **Production testing:** set `auth_token` collection variable to a real Keycloak JWT, ensure `AUTH_DISABLED=false` in `.env`.\n3. **session_id** is auto-populated by the Start Session test script — run that request first before any turn requests.\n\n## Base URL\n\nDefault: `http://localhost:8000`. Override the `base_url` collection variable if running on a different host/port.",
+    "description": "REST API for the iGOT Deterministic Chatbot.\n\n## Auth\n\n**Local dev (AUTH_DISABLED=true):** Pass any UUID as `x-authenticated-user-token`. Set `auth_token` collection variable.\n\n**Production:** Pass a real Keycloak JWT as `x-authenticated-user-token`.\n\n## Setup\n\n1. Set `base_url` collection variable (default: `http://localhost:8000`).\n2. Run **Start Session** first — the test script auto-populates `session_id`.\n3. Use `session_id` in all subsequent requests.\n\n## Endpoint order\n1. Health check\n2. Start session → get session_id\n3. GET /sessions/mine → check for active session  \n4. GET /sessions/{id} → restore session\n5. Topic selection (select_choice)\n6. User actions (turn requests)\n7. Admin endpoints",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -1064,11 +1064,50 @@
       ]
     },
     {
-      "name": "6 — Admin (Phase 2 — returns 501)",
-      "description": "Admin and DPDP endpoints. These are reserved for Phase 2 and currently return HTTP 501 Not Implemented.",
+      "name": "6 — Session Resume & Admin",
+      "description": "Session resume endpoints (now implemented) and admin endpoints (not yet wired — return 501).",
       "item": [
         {
-          "name": "Resume session (501)",
+          "name": "Get active session (mine)",
+          "id": "c9999990-9999-9999-9999-999999999990",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-authenticated-user-token",
+                "value": "{{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/ai-chatbot/v1/sessions/mine",
+              "host": ["{{base_url}}"],
+              "path": ["ai-chatbot", "v1", "sessions", "mine"]
+            },
+            "description": "Check if the current user has an active session. Returns session_id if found (Redis lookup), or null if no active session / Redis unavailable.\n\nCall this on app open before deciding to start a new session or resume an existing one.\n\nThe test script saves the returned session_id to the collection variable if present."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const r = pm.response.json();",
+                  "if (r.session_id) {",
+                  "    pm.collectionVariables.set('session_id', r.session_id);",
+                  "    console.log('Active session found:', r.session_id);",
+                  "} else {",
+                  "    console.log('No active session — start a new one with POST /sessions');",
+                  "}",
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Resume session by ID",
           "id": "c9999991-9999-9999-9999-999999999991",
           "request": {
             "method": "GET",
@@ -1082,9 +1121,9 @@
             "url": {
               "raw": "{{base_url}}/ai-chatbot/v1/sessions/{{session_id}}",
               "host": ["{{base_url}}"],
-              "path": ["chat", "sessions", "{{session_id}}"]
+              "path": ["ai-chatbot", "v1", "sessions", "{{session_id}}"]
             },
-            "description": "Retrieve full session state. Phase 2 — currently returns HTTP 501 Not Implemented."
+            "description": "Restore a session by ID. Returns the last pending activities and current_node so the frontend can render exactly where the user left off.\n\nCall this after GET /sessions/mine returns a session_id. From the response, render the activities and continue sending turns as normal.\n\nReturns 404 if session not found, 410 if expired, 403 if wrong user."
           },
           "response": []
         },
@@ -1101,11 +1140,11 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/admin/sessions/{{session_id}}/trace",
+              "raw": "{{base_url}}/ai-chatbot/v1/admin/sessions/{{session_id}}/trace",
               "host": ["{{base_url}}"],
-              "path": ["admin", "sessions", "{{session_id}}", "trace"]
+              "path": ["ai-chatbot", "v1", "admin", "sessions", "{{session_id}}", "trace"]
             },
-            "description": "Retrieve the full decision trace for a session (every node visited, branch decisions, API call results). Phase 2 — currently returns HTTP 501 Not Implemented."
+            "description": "Full conversation trace for a session (every node visited, branch decisions, API call results). Not yet wired — returns HTTP 501."
           },
           "response": []
         },
@@ -1122,9 +1161,9 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/admin/sessions/{{session_id}}",
+              "raw": "{{base_url}}/ai-chatbot/v1/admin/sessions/{{session_id}}",
               "host": ["{{base_url}}"],
-              "path": ["admin", "sessions", "{{session_id}}"]
+              "path": ["ai-chatbot", "v1", "admin", "sessions", "{{session_id}}"]
             },
             "description": "Delete all personal data for a session (DPDP / right-to-erasure compliance). Phase 2 — currently returns HTTP 501 Not Implemented."
           },

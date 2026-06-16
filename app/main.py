@@ -58,6 +58,22 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
         checkpointer = MemorySaver()
         _pg_cm = None
 
+    # Session store — Redis-backed user→session_id mapping for cross-device resume.
+    # Falls back gracefully: GET /sessions/mine returns null when Redis is unavailable.
+    _redis_client = None
+    session_store = None
+    try:
+        import redis.asyncio as aioredis
+        from app.services.session_store import SessionStore
+        _redis_client = aioredis.from_url(
+            settings.redis_url, decode_responses=False, socket_connect_timeout=3
+        )
+        await _redis_client.ping()
+        session_store = SessionStore(_redis_client, settings.igot_redis_namespace)
+        print("✅ Session store: Redis")
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️  Redis unavailable ({e}) — GET /sessions/mine will always return null")
+
     # Flow compiler — loads and validates all YAML flows at startup.
     # Server refuses to start if any flow fails compilation (fast fail).
     compiler = FlowCompiler(services=services)
@@ -99,7 +115,8 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
     app.state.graphs = compiled
     app.state.checkpointer = checkpointer
     app.state.system_messages = system_messages
-    app.state.sessions: dict[str, dict] = {}  # in-memory session metadata (dev only)
+    app.state.sessions: dict[str, dict] = {}  # in-memory session metadata
+    app.state.session_store = session_store   # Redis-backed; None when Redis unavailable
 
     # Dev UI banner — printed after all startup tasks so the port is known.
     if settings.igot_env in ("dev", "staging"):
@@ -113,6 +130,8 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
     await services.aclose()
     if _pg_cm is not None:
         await _pg_cm.__aexit__(None, None, None)
+    if _redis_client is not None:
+        await _redis_client.aclose()
 
 
 app = FastAPI(
