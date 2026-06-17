@@ -16,19 +16,21 @@ WebSocket upgrade path (Phase 2):
             await ws.send_json(activity.model_dump(exclude_none=True))
 
 Endpoints (all under /ai-chatbot/v1):
-    POST   /ai-chatbot/v1/sessions                  Start a new session
-    POST   /ai-chatbot/v1/sessions/{id}/turn        Submit a user action; returns activities
-    GET    /ai-chatbot/v1/sessions/mine             Return caller's active session_id (Redis-backed)
-    GET    /ai-chatbot/v1/sessions/{id}             Resume an existing session
-    GET    /ai-chatbot/v1/admin/sessions/{id}/trace Admin-only: full conversation trace
-    DELETE /ai-chatbot/v1/admin/sessions/{id}       DPDP DSR: hard-delete session
-    GET    /health                                  Liveness check (root-level, not versioned)
+    POST   /ai-chatbot/v1/sessions                      Start a new session
+    POST   /ai-chatbot/v1/sessions/create               Start a new session
+    POST   /ai-chatbot/v1/sessions/turn/{id}            Submit a user action; returns activities
+    GET    /ai-chatbot/v1/sessions/list                 Return caller's active session_id (Redis-backed)
+    GET    /ai-chatbot/v1/sessions/history/{id}         Full conversation history for a session
+    GET    /ai-chatbot/v1/admin/sessions/{id}/trace     Admin-only: full conversation trace
+    DELETE /ai-chatbot/v1/admin/sessions/{id}           DPDP DSR: hard-delete session
+    GET    /health                                      Liveness check (root-level, not versioned)
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -37,7 +39,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from langchain_core.messages import HumanMessage
 
 from app.api.auth import hash_user_id, require_jwt
-from app.api.schemas import ActiveSessionResponse, StartSessionRequest, StartSessionResponse, TurnRequest, TurnResponse
+from app.api.schemas import ActiveSessionResponse, HistoryResponse, MessageEntry, StartSessionRequest, StartSessionResponse, TurnRequest, TurnResponse
 from app.config import settings
 from app.engine.activity import Activity, QuickReply
 from app.engine.runner import _translate_activity
@@ -100,7 +102,7 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@router.post("/sessions", response_model=StartSessionResponse, tags=["chat"])
+@router.post("/sessions/create", response_model=StartSessionResponse, tags=["chat"])
 async def start_session(
     body: StartSessionRequest,
     request: Request,
@@ -173,7 +175,7 @@ async def start_session(
     )
 
 
-@router.post("/sessions/{session_id}/turn", response_model=TurnResponse, tags=["chat"])
+@router.post("/sessions/turn/{session_id}", response_model=TurnResponse, tags=["chat"])
 async def submit_turn(
     session_id: UUID,
     body: TurnRequest,
@@ -304,6 +306,22 @@ async def submit_turn(
                 sid, user_id_hash, flow_id, result_status,
                 result.get("zoho_ticket_id") or "-",
             )
+
+        # Append user action + bot response to persistent conversation history
+        _history_graph = request.app.state.graphs.get(flow_id) if flow_id else None
+        if _history_graph is not None:
+            _user_text = (
+                body.user_says or body.text or body.choice_id or body.item_label or body.other_query
+            )
+            _user_msg = {"role": "user", "action": body.action, "text": _user_text, "ts": datetime.utcnow().isoformat()}
+            _bot_msg  = {"role": "bot", "activities": activities, "ts": datetime.utcnow().isoformat()}
+            try:
+                await _history_graph.aupdate_state(
+                    {"configurable": {"thread_id": sid}},
+                    {"messages": [_user_msg, _bot_msg]},
+                )
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("[history] failed to append messages for session=%s: %s", sid, _exc)
 
         return TurnResponse(
             session_id=session_id,
@@ -445,6 +463,22 @@ async def submit_turn(
         if _store:
             await _store.refresh(session["user_id_hash"], session["ttl_minutes"])
 
+    # Append user action + bot response to persistent conversation history
+    _history_graph = request.app.state.graphs.get(flow_id) if flow_id else None
+    if _history_graph is not None:
+        _user_text = (
+            body.user_says or body.text or body.choice_id or body.item_label or body.other_query
+        )
+        _user_msg = {"role": "user", "action": body.action, "text": _user_text, "ts": datetime.utcnow().isoformat()}
+        _bot_msg  = {"role": "bot", "activities": activities, "ts": datetime.utcnow().isoformat()}
+        try:
+            await _history_graph.aupdate_state(
+                {"configurable": {"thread_id": sid}},
+                {"messages": [_user_msg, _bot_msg]},
+            )
+        except Exception as _exc:  # noqa: BLE001
+            log.warning("[history] failed to append messages for session=%s: %s", sid, _exc)
+
     return TurnResponse(
         session_id=session_id,
         activities=activities,
@@ -454,7 +488,7 @@ async def submit_turn(
     )
 
 
-@router.get("/sessions/mine", response_model=ActiveSessionResponse, tags=["chat"])
+@router.get("/sessions/list", response_model=ActiveSessionResponse, tags=["chat"])
 async def get_my_session(
     request: Request,
     claims: dict[str, Any] = Depends(require_jwt),
@@ -468,22 +502,22 @@ async def get_my_session(
 
     Client flow:
       1. Call this endpoint on app open.
-      2. If session_id is returned  → call GET /sessions/{id} to restore state.
-      3. If null                    → call POST /sessions to start fresh.
+      2. If session_id is returned  → call GET /sessions/history/{id} to resume.
+      3. If null (or history empty) → call POST /sessions/create to start fresh.
     """
     user_id = claims["sub"]
     user_id_hash = hash_user_id(user_id)
 
     _store = getattr(request.app.state, "session_store", None)
     if _store is None:
-        log.debug("[sessions/mine] session_store unavailable — returning null")
+        log.debug("[sessions/list] session_store unavailable — returning null")
         return ActiveSessionResponse()
 
     session_id = await _store.get_active(user_id_hash)
     if not session_id:
         return ActiveSessionResponse()
 
-    # Return any in-memory metadata we have; client uses GET /sessions/{id} for full state
+    # Return any in-memory metadata we have alongside the session_id
     meta = request.app.state.sessions.get(session_id, {})
     return ActiveSessionResponse(
         session_id=session_id,
@@ -492,126 +526,63 @@ async def get_my_session(
     )
 
 
-@router.get("/sessions/{session_id}", response_model=TurnResponse, tags=["chat"])
-async def resume_session(
+
+@router.get("/sessions/history/{session_id}", response_model=HistoryResponse, tags=["chat"])
+async def get_session_history(
     session_id: UUID,
     request: Request,
     claims: dict[str, Any] = Depends(require_jwt),
-) -> TurnResponse:
-    """Restore a previous session.
+) -> HistoryResponse:
+    """Return the full conversation history for a session.
 
-    Returns the last pending activities and current node so the frontend can
-    render exactly where the user left off.
+    Each entry is either:
+      role=user  — the action the user sent (action, text, ts)
+      role=bot   — the activities the bot returned (activities[], ts)
 
-    Also re-populates in-memory session metadata from the LangGraph checkpoint
-    when the pod has restarted (metadata lives in-memory; conversation state
-    lives in Postgres via the LangGraph checkpointer).
+    Entries are in chronological order. The last entry is always a bot message
+    showing the current state waiting for user input.
+
+    Returns empty messages[] for sessions started before history tracking was added,
+    or when no flow has been selected yet (only topic picker shown so far).
     """
     sid = str(session_id)
     user_id = claims["sub"]
     user_id_hash = hash_user_id(user_id)
 
-    # ── Fast path: metadata still in memory (same pod, no restart) ──────────
+    # Locate the right graph — need flow_id from session metadata or checkpointer
     session_meta = request.app.state.sessions.get(sid)
+    flow_id = session_meta.get("flow_id") if session_meta else None
 
-    # ── Slow path: load from LangGraph checkpointer (pod restarted) ─────────
-    if session_meta is None:
-        graphs: dict = getattr(request.app.state, "graphs", {})
-        if not graphs:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
-
-        # All flows share the same ConversationState schema — any graph can read the checkpoint.
-        any_graph = next(iter(graphs.values()))
-        lg_config = {"configurable": {"thread_id": sid}}
-        try:
-            snapshot = await any_graph.aget_state(lg_config)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("[resume] checkpointer read failed for session=%s: %s", sid, exc)
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found") from exc
-
-        if not snapshot or not snapshot.values:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
-
-        sv = snapshot.values
-
-        # Security: session must belong to the requesting user
-        stored_hash = sv.get("user_id_hash", "")
-        if stored_hash and stored_hash != user_id_hash:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
-                                detail="Session does not belong to this user")
-
-        # Check TTL using stored expires_at
-        from app.engine.runner import _is_expired
-        from app.engine.state import ConversationState
-        try:
-            if _is_expired(ConversationState(**sv)):
-                raise HTTPException(status_code=status.HTTP_410_GONE, detail="Session has expired")
-        except HTTPException:
-            raise
-        except Exception:  # noqa: BLE001
-            pass  # malformed state — continue and let caller decide
-
-        # Restore in-memory metadata so subsequent turns work normally
-        session_meta = {
-            "user_id_hash": stored_hash or user_id_hash,
-            "channel":      sv.get("channel", "web"),
-            "language":     sv.get("language", "en"),
-            "flow_id":      sv.get("flow_id"),
-            "status":       "in_flow" if sv.get("flow_id") else "selecting_topic",
-            "ttl_minutes":  sv.get("ttl_minutes", settings.igot_web_session_ttl_minutes),
-        }
-        request.app.state.sessions[sid] = session_meta
-        log.info("[resume] restored session=%s from checkpointer flow=%s", sid, sv.get("flow_id"))
-
-    # ── Session exists but no flow chosen yet — re-show the topic menu ───────
-    flow_id = session_meta.get("flow_id")
-    lang = session_meta.get("language", "en")
-    translation_svc = getattr(request.app.state, "services", {}).get("translation")
-
-    if not flow_id or session_meta.get("status") == "selecting_topic":
-        activities = [
-            Activity.markdown(
-                _sys(request, "welcome_back",
-                     "👋 Welcome back! What can I help you with today?")
-            ).model_dump(exclude_none=True),
-            Activity.quick_replies(choices=_menu_quick_replies(request)).model_dump(exclude_none=True),
-        ]
-        activities = await _translate_activities(activities, lang, translation_svc)
-        return TurnResponse(
-            session_id=session_id,
-            activities=activities,
-            status=FlowStatus.AWAITING_USER.value,
-            flow_id=None,
-            current_node=None,
-        )
-
-    # ── Active flow — fetch latest state and return pending activities ────────
     graphs: dict = getattr(request.app.state, "graphs", {})
-    graph = graphs.get(flow_id)
+    graph = graphs.get(flow_id) if flow_id else (next(iter(graphs.values())) if graphs else None)
+
     if graph is None:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                            detail=f"Flow '{flow_id}' not loaded")
+        return HistoryResponse(session_id=session_id, messages=[])
 
     lg_config = {"configurable": {"thread_id": sid}}
     try:
         snapshot = await graph.aget_state(lg_config)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Could not load session state: {exc}") from exc
+        log.warning("[history] aget_state failed for session=%s: %s", sid, exc)
+        return HistoryResponse(session_id=session_id, messages=[])
 
     if not snapshot or not snapshot.values:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session state not found")
+        return HistoryResponse(session_id=session_id, messages=[])
 
     sv = snapshot.values
-    activities = sv.get("pending_activities") or []
-    activities = await _translate_activities(activities, lang, translation_svc)
 
-    return TurnResponse(
-        session_id=session_id,
-        activities=activities,
-        status=sv.get("status", FlowStatus.AWAITING_USER.value),
-        flow_id=flow_id,
-        current_node=sv.get("current_node"),
-    )
+    # Security: session must belong to the requesting user
+    stored_hash = sv.get("user_id_hash", "")
+    if stored_hash and stored_hash != user_id_hash:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Session does not belong to this user")
+
+    raw_messages = sv.get("messages") or []
+    # Filter to only dict entries that have a "role" key (history entries),
+    # skipping any LangChain BaseMessage objects stored by the engine internals.
+    history_entries = [m for m in raw_messages if isinstance(m, dict) and "role" in m]
+    entries = [MessageEntry(**m) for m in history_entries]
+    return HistoryResponse(session_id=session_id, messages=entries)
 
 
 @router.get("/admin/sessions/{session_id}/trace", tags=["admin"])

@@ -12,6 +12,21 @@ from uuid import UUID
 from pydantic import BaseModel
 
 
+class MessageEntry(BaseModel):
+    """One turn in the conversation — either a user action or a bot response."""
+    role: Literal["user", "bot"]
+    action: str | None = None        # user messages: the action type (select_choice, send_message, etc.)
+    text: str | None = None          # user messages: display text of what the user did
+    activities: list[dict[str, Any]] | None = None  # bot messages: the activities array
+    ts: str | None = None            # ISO timestamp
+
+
+class HistoryResponse(BaseModel):
+    """Response for GET /sessions/{id}/history."""
+    session_id: UUID
+    messages: list[MessageEntry]
+
+
 class StartSessionRequest(BaseModel):
     channel: Literal["web", "mobile", "whatsapp", "voice"] = "web"
     language: str = "en"

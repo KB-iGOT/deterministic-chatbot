@@ -441,6 +441,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
       <div class="sb-actions">
         <button class="btn-s" onclick="checkHealth()" title="GET /health">💓 Health</button>
         <button class="btn-s" onclick="copyId()"     title="Copy session UUID">📋 Copy ID</button>
+        <button class="btn-s" onclick="showHistory()" title="GET /sessions/history/{id}">📜 History</button>
         <button class="btn-s" onclick="showCollected()" title="Fetch /admin trace">🔍 Trace</button>
       </div>
       <p style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.5">
@@ -503,7 +504,7 @@ function url(path) { return CFG.api + path; }
 function hdrs() {
   return {
     'Content-Type': 'application/json',
-    'Authorization': 'Bearer ' + CFG.jwt,
+    'x-authenticated-user-token': CFG.jwt,
   };
 }
 
@@ -531,7 +532,7 @@ async function startSession() {
   setStrip('Connecting…');
 
   try {
-    const r = await fetch(url('/ai-chatbot/v1/sessions'), {
+    const r = await fetch(url('/ai-chatbot/v1/sessions/create'), {
       method: 'POST',
       headers: hdrs(),
       body: JSON.stringify({ channel: 'web', language: S.language }),
@@ -554,7 +555,7 @@ async function turn(payload) {
   disableInput();
   showTyping();
   try {
-    const r = await fetch(url('/ai-chatbot/v1/sessions/' + S.sessionId + '/turn'), {
+    const r = await fetch(url('/ai-chatbot/v1/sessions/turn/' + S.sessionId), {
       method: 'POST',
       headers: hdrs(),
       body: JSON.stringify(payload),
@@ -878,6 +879,18 @@ async function showCollected() {
     sec.style.display = '';
     document.getElementById('collectedData').textContent = JSON.stringify(d, null, 2);
     toast('Trace loaded');
+  } catch(e) { toast('Error: ' + e.message, true); }
+}
+
+async function showHistory() {
+  if (!S.sessionId) { toast('No session'); return; }
+  try {
+    const r = await fetch(url('/ai-chatbot/v1/sessions/history/' + S.sessionId), { headers: hdrs() });
+    const d = await r.json();
+    const sec = document.getElementById('collectedSection');
+    sec.style.display = '';
+    document.getElementById('collectedData').textContent = JSON.stringify(d, null, 2);
+    toast('History loaded — ' + (d.messages?.length || 0) + ' messages');
   } catch(e) { toast('Error: ' + e.message, true); }
 }
 

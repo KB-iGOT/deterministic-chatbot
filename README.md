@@ -44,9 +44,9 @@ docker compose up
 |--------|------|------|---------|
 | `GET` | `/health` | — | Liveness check |
 | `POST` | `/ai-chatbot/v1/sessions` | JWT | Start a new session |
-| `POST` | `/ai-chatbot/v1/sessions/{id}/turn` | JWT | Send user action, receive bot activities |
-| `GET` | `/ai-chatbot/v1/sessions/mine` | JWT | Get caller's active session ID |
-| `GET` | `/ai-chatbot/v1/sessions/{id}` | JWT | Restore session state |
+| `POST` | `/ai-chatbot/v1/sessions/turn/{id}` | JWT | Send user action, receive bot activities |
+| `GET` | `/ai-chatbot/v1/sessions/list` | JWT | Get caller's active session ID |
+| `GET` | `/ai-chatbot/v1/sessions/history/{id}` | JWT | Full conversation history (use for resume) |
 | `GET` | `/docs` | — | OpenAPI / Swagger UI |
 
 Hot-reload is active in dev mode — edit YAML or Python, changes apply immediately.
@@ -162,7 +162,7 @@ det-chatbot/
 │   ├── logging_setup.py           Centralised logging: colour console + rotating JSON file
 │   │
 │   ├── api/
-│   │   ├── routes.py              POST /ai-chatbot/v1/sessions, POST .../turn — menu is auto-generated
+│   │   ├── routes.py              POST /ai-chatbot/v1/sessions/create, POST .../turn — menu is auto-generated
 │   │   ├── auth.py                Keycloak JWT validator; AUTH_DISABLED=true uses token as user_id
 │   │   └── schemas.py             Request/response Pydantic models
 │   │
@@ -217,7 +217,7 @@ det-chatbot/
 ## 3. How the engine works
 
 ```
-POST /ai-chatbot/v1/sessions
+POST /ai-chatbot/v1/sessions/create
   → validate JWT (or use token as user_id if AUTH_DISABLED=true)
   → create session (uuid, user_id_hash, channel)
   → show greeting + topic picker (auto-generated from flow YAML metadata)
@@ -227,7 +227,7 @@ POST /ai-chatbot/v1/sessions
   → returns pending_activities[] to client
   → state persisted via LangGraph checkpointer (Postgres)
 
-POST /ai-chatbot/v1/sessions/{id}/turn
+POST /ai-chatbot/v1/sessions/turn/{id}
   → load checkpoint
   → translate user action → state update
       select_choice → collected._last_choice_id (+ save_to field if configured)
@@ -424,7 +424,7 @@ Every significant user action emits a structured `[activity]` event at `INFO` le
 
 | event | Emitted when |
 |---|---|
-| `session_start` | A new session is created (`POST /ai-chatbot/v1/sessions`) |
+| `session_start` | A new session is created (`POST /ai-chatbot/v1/sessions/create`) |
 | `topic_selected` | User picks a flow from the topic menu |
 | `user_turn` | User sends any action to a running flow |
 | `flow_ended` | A flow reaches an `end` node (outcome captured) |
@@ -613,7 +613,7 @@ Leave `LANGFUSE_ENABLED=false` (the default) to disable tracing entirely. If `LA
 
 | What | How it appears in Langfuse |
 |---|---|
-| One HTTP turn (`POST /ai-chatbot/v1/sessions` or `POST .../turn`) | One **Trace** |
+| One HTTP turn (`POST /ai-chatbot/v1/sessions/create` or `POST .../turn`) | One **Trace** |
 | `user_id` and `session_id` | Set as `user_id` and `session_id` on every trace — use these to filter |
 | LLM calls (ticket summary, `transfer_llm` node) | **Generation** spans nested inside the turn trace |
 | Flow and node context | Span metadata (`flow_id`, `node_id`, `action`) |
