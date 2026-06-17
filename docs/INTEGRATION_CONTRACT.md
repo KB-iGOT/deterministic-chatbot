@@ -279,37 +279,35 @@ Frontend                          iGOT Deterministic Chatbot API
 
 ## 2. Authentication
 
-### Header
+Two integration patterns are supported. Choose based on your client type:
+
+### Pattern A — Kong Direct (mobile / backend)
+
+Two headers required on every request:
 
 ```
 x-authenticated-user-token: <keycloak_jwt>
 Authorization: Bearer <kong_jwt>
 ```
 
-Two headers are required when calling through Kong (dev / UAT / prod):
-- `x-authenticated-user-token` — Keycloak JWT identifying the user (extracted from `sub` claim)
-- `Authorization: Bearer` — Kong API gateway JWT authorizing API access
+- `x-authenticated-user-token` — user's Keycloak JWT (extracted from portal session)
+- `Authorization: Bearer` — Kong API gateway JWT
 
-Local dev (direct, no Kong): only `x-authenticated-user-token` is needed (any UUID when `AUTH_DISABLED=true`).
+The backend extracts `user_id` from the JWT `sub` claim (`f:<federation-id>:<user-uuid>` → last segment).
 
-### Dev / UAT — Kong + Keycloak
+### Pattern B — UI Proxy (web frontend)
 
-```bash
-curl -X POST https://portal.dev.karmayogibharat.net/api/ai/chatbot/v1/sessions/create \
-  -H "Content-Type: application/json" \
-  -H "x-authenticated-user-token: <keycloak-jwt>" \
-  -H "Authorization: Bearer <kong-jwt>" \
-  -d '{"channel": "web", "language": "en"}'
+One header only — the browser session cookie:
+
+```
+cookie: connect.sid=<session_cookie>
 ```
 
-The JWT is the user's existing iGOT portal session token — read it from the browser cookie or `localStorage` where the portal already stores it. **The frontend never passes a user ID explicitly** — the backend extracts it from the JWT `sub` claim.
+The proxy resolves the user session internally — no JWT handling needed in the frontend code. Get `connect.sid` from DevTools → Application → Cookies after logging in to the portal.
 
-**JWT claim extraction (server-side):**
-- `sub`: format `f:<federation-id>:<user-uuid>` → last segment is used as `user_id`
-- `user_roles`: array of role strings
-- `channel`, `organisations`: org information for flow routing
+> See §12 for full base URLs and curl examples for each pattern.
 
-### Dev / `AUTH_DISABLED=true`
+### Local dev (`AUTH_DISABLED=true`)
 
 When `AUTH_DISABLED=true` in `.env`, JWT validation is bypassed entirely:
 
@@ -319,8 +317,7 @@ When `AUTH_DISABLED=true` in `.env`, JWT validation is bypassed entirely:
 | Nothing / empty | `IGOT_TEST_USER_ID` from `.env` |
 
 ```bash
-# Dev mode — pass a UUID directly as the token value
-curl -X POST http://localhost:8000/ai-chatbot/v1/sessions \
+curl -X POST http://localhost:8000/ai-chatbot/v1/sessions/create \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{"channel": "web", "language": "en"}'
@@ -1544,20 +1541,80 @@ All bot messages in `activities` will be in the requested language.
 
 ## 12. Environments and Base URLs
 
-| Environment | Base URL | Auth |
-|-------------|----------|------|
-| Local dev | `http://localhost:8000` | `AUTH_DISABLED=true` → pass UUID as token |
-| UAT | `https://igot-chatbot-uat.karmayogibharat.net` | Real Keycloak JWT required |
-| Production | `https://igot-chatbot.igotkarmayogi.gov.in` | Real Keycloak JWT required |
+There are two ways to call the chatbot API depending on your integration type:
 
-**Keycloak hosts:**
+### Option A — Kong Direct (mobile / backend)
 
-| Env | Keycloak issuer |
-|-----|----------------|
-| UAT | `https://portal.uat.karmayogibharat.net/auth/realms/sunbird` |
-| Production | `https://portal.igotkarmayogi.gov.in/auth/realms/sunbird` |
+Two auth headers required on every request:
 
-The JWT `iss` claim must match the configured `KEYCLOAK_HOST` — mismatches cause `401`.
+| Header | Value |
+|--------|-------|
+| `x-authenticated-user-token` | Keycloak JWT (user's portal session token) |
+| `Authorization` | `Bearer <kong-jwt>` (API gateway token) |
+
+| Environment | Base URL |
+|-------------|----------|
+| Local dev | `http://localhost:8000/ai-chatbot/v1` |
+| Dev | `https://portal.dev.karmayogibharat.net/api/ai/chatbot/v1` |
+
+```bash
+curl -X POST https://portal.dev.karmayogibharat.net/api/ai/chatbot/v1/sessions/create \
+  -H "Content-Type: application/json" \
+  -H "x-authenticated-user-token: <keycloak-jwt>" \
+  -H "Authorization: Bearer <kong-jwt>" \
+  -d '{"channel": "web", "language": "en"}'
+```
+
+---
+
+### Option B — UI Proxy (web frontend)
+
+**Recommended for web team.** Auth is handled automatically via the browser session cookie — no JWT setup needed. The portal proxy resolves the session and forwards requests to the chatbot service internally.
+
+Only one header required:
+
+| Header | Value |
+|--------|-------|
+| `cookie` | `connect.sid=<session_cookie>` |
+
+**How to get the cookie:**
+1. Open the portal in Chrome and log in
+2. DevTools → Application → Cookies → find `connect.sid`
+3. Copy the value
+
+| Environment | Base URL |
+|-------------|----------|
+| Dev | `https://portal.dev.karmayogibharat.net/apis/proxies/v8/ai/chatbot/v1` |
+| UAT | `https://portal.uat.karmayogibharat.net/apis/proxies/v8/ai/chatbot/v1` |
+
+```bash
+# Create session via UI proxy
+curl -X POST https://portal.dev.karmayogibharat.net/apis/proxies/v8/ai/chatbot/v1/sessions/create \
+  -H "Content-Type: application/json" \
+  -H "cookie: connect.sid=<session_cookie>" \
+  -d '{"channel": "web", "language": "en"}'
+
+# Send a turn
+curl -X POST https://portal.dev.karmayogibharat.net/apis/proxies/v8/ai/chatbot/v1/sessions/turn/<session_id> \
+  -H "Content-Type: application/json" \
+  -H "cookie: connect.sid=<session_cookie>" \
+  -d '{"action": "select_choice", "choice_id": "AUTO_LOGOUT_CRASH", "user_says": "Auto logout / App crash"}'
+```
+
+> **Postman:** Use the `iGOT_Chatbot_WebProxy_API` collection — it has `session_cookie` as a collection variable and all requests pre-configured for the proxy.
+
+---
+
+### Local dev (`AUTH_DISABLED=true`)
+
+No Kong, no cookie. Pass any UUID as `x-authenticated-user-token`:
+
+```bash
+curl -X POST http://localhost:8000/ai-chatbot/v1/sessions/create \
+  -H "Content-Type: application/json" \
+  -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
+  -d '{"channel": "web", "language": "en"}'
+```
 
 ---
 
@@ -1566,12 +1623,14 @@ The JWT `iss` claim must match the configured `KEYCLOAK_HOST` — mismatches cau
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | `GET` | `/health` | None | Liveness check |
-| `POST` | `/ai-chatbot/v1/sessions` | JWT | Start a new session |
-| `POST` | `/ai-chatbot/v1/sessions/turn/{id}` | JWT | Send user action, get bot activities |
-| `GET` | `/ai-chatbot/v1/sessions/list` | JWT | Get caller's active session ID (Redis lookup) |
-| `GET` | `/ai-chatbot/v1/sessions/history/{id}` | JWT | Full conversation history + resume (last role:bot entry = current prompt) |
+| `GET` | `/ai-chatbot/v1/sessions/list` | JWT / Cookie | Check caller's active session |
+| `POST` | `/ai-chatbot/v1/sessions/create` | JWT / Cookie | Start a new session |
+| `GET` | `/ai-chatbot/v1/sessions/history/{id}` | JWT / Cookie | Full conversation history (for resume) |
+| `POST` | `/ai-chatbot/v1/sessions/turn/{id}` | JWT / Cookie | Send user action, get bot activities |
 | `GET` | `/ai-chatbot/v1/admin/sessions/{id}/trace` | JWT | Full conversation trace *(not yet wired)* |
 | `DELETE` | `/ai-chatbot/v1/admin/sessions/{id}` | JWT | DPDP data deletion *(not yet wired)* |
+
+**JWT** = Kong direct (two headers). **Cookie** = UI proxy (`connect.sid`).
 | `GET` | `/docs` | None | OpenAPI / Swagger UI |
 
 ### `/health`

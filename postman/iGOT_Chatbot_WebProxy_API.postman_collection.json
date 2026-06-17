@@ -1,0 +1,539 @@
+{
+  "info": {
+    "_postman_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+    "name": "iGOT Chatbot — Web/UI Proxy",
+    "description": "## iGOT Chatbot — Web/UI Proxy Collection\n\nFor frontend (web) integration. Auth is handled via browser session cookie — no separate JWT setup needed.\n\n### How to get your cookie\n1. Open https://portal.dev.karmayogibharat.net in Chrome\n2. Log in to the portal\n3. Open DevTools → Application → Cookies → find `connect.sid`\n4. Copy the value and paste it into the `session_cookie` collection variable\n\n### Typical flow\n```\nPOST /sessions/create      → get session_id (auto-saved by test script)\nGET  /sessions/list        → check if active session exists\nGET  /sessions/history/{id} → load conversation thread (for resume)\nPOST /sessions/turn/{id}   → send user action, repeat until type:end\n```\n\n### Activity type → next action mapping\n| Response activity type | What to render | Next action to send |\n|---|---|---|\n| `markdown` | Chat bubble with Markdown | Nothing — wait for next activity |\n| `quick_replies` | Row of tappable buttons | `select_choice` with `choice_id` from `choices[].id` |\n| `picker` | Searchable scrollable list | `pick_item` with `picker_id`, `item_id`, `item_label` |\n| `input` | Free-text input box | `send_message` with `text` = what the user typed |\n| `end` | End-of-conversation banner | Nothing — session is over |\n| `text` | Plain text bubble | Only on session expiry — call POST /sessions/create to restart |",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://portal.dev.karmayogibharat.net/apis/proxies/v8",
+      "type": "string",
+      "description": "Dev proxy base. Change host for UAT."
+    },
+    {
+      "key": "session_id",
+      "value": "",
+      "type": "string",
+      "description": "Auto-filled by the Start Session test script."
+    },
+    {
+      "key": "session_cookie",
+      "value": "<paste-connect.sid-cookie-here>",
+      "type": "string",
+      "description": "Browser session cookie. Get it from DevTools → Application → Cookies → connect.sid on the portal."
+    }
+  ],
+  "item": [
+    {
+      "name": "1 — API Reference",
+      "description": "All available endpoints, one each, in the order they are typically called. Use these as a reference or to test individual calls in isolation.",
+      "item": [
+        {
+          "name": "Health check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Liveness probe for the proxy layer. No auth or cookie required.\n\nExpected: `{\"status\": \"ok\"}`\n\nIf this returns a non-200, the proxy itself is down — no point calling any chatbot endpoints."
+          },
+          "response": []
+        },
+        {
+          "name": "Check active session (GET /sessions/list)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const r = pm.response.json();",
+                  "// If an active session exists, save it so the next requests use it automatically",
+                  "if (r.session_id) {",
+                  "    pm.collectionVariables.set('session_id', r.session_id);",
+                  "    console.log('Active session found → session_id saved:', r.session_id);",
+                  "} else {",
+                  "    console.log('No active session → run POST /sessions/create next');",
+                  "}",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "cookie",
+                "value": "connect.sid={{session_cookie}}",
+                "type": "text",
+                "description": "Browser session cookie — the proxy reads this to identify the logged-in user. Get from DevTools → Application → Cookies → connect.sid."
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/ai/chatbot/v1/sessions/list",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ai",
+                "chatbot",
+                "v1",
+                "sessions",
+                "list"
+              ]
+            },
+            "description": "Call this on every app open to check whether the user already has an in-progress session.\n\n**Response — session found:**\n```json\n{ \"session_id\": \"<uuid>\", \"status\": \"in_flow\", \"flow_id\": \"AUTO_LOGOUT_CRASH\" }\n```\n→ The test script auto-saves `session_id`. Call GET /sessions/history/{id} next to load the thread.\n- `messages[]` non-empty → render thread, last role:bot entry = current prompt\n- `messages[]` empty → call POST /sessions/create instead (user had not picked a topic yet)\n\n**Response — no active session:**\n```json\n{ \"session_id\": null }\n```\n→ Call POST /sessions/create to start fresh.\n\nAlways returns 200 — never errors. Returns null when the session store is unavailable (safe fallback)."
+          },
+          "response": []
+        },
+        {
+          "name": "Start new session (POST /sessions/create)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const r = pm.response.json();",
+                  "// Save session_id — every subsequent turn request needs it",
+                  "if (r.session_id) {",
+                  "    pm.collectionVariables.set('session_id', r.session_id);",
+                  "    console.log('New session started → session_id saved:', r.session_id);",
+                  "}",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('session_id present', () => pm.expect(r.session_id).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "cookie",
+                "value": "connect.sid={{session_cookie}}",
+                "type": "text",
+                "description": "Browser session cookie — the proxy reads this to identify the logged-in user."
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  // \"web\" | \"mobile\" | \"whatsapp\" | \"voice\" — the channel the user is on\n  \"channel\": \"web\",\n  // BCP-47 language code — \"en\" for English, \"hi\" for Hindi\n  \"language\": \"en\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai/chatbot/v1/sessions/create",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ai",
+                "chatbot",
+                "v1",
+                "sessions",
+                "create"
+              ]
+            },
+            "description": "Creates a new chat session and returns the opening greeting with a topic picker.\n\n`channel`: `web` | `mobile` | `whatsapp` | `voice`\n`language`: `en` | `hi` | any BCP-47 code\n\n**Response contains:**\n- `session_id` — saved automatically to `{{session_id}}` by the test script; used in every subsequent request\n- `activities[]` — greeting message + topic picker (quick_reply buttons, one per supported topic)\n- `status: \"awaiting_user\"`\n\nNext: call POST /sessions/turn/{{session_id}} with the topic the user picks (send the `choice_id` from the quick_reply button they tapped)."
+          },
+          "response": []
+        },
+        {
+          "name": "Get conversation history (GET /sessions/history/{{session_id}})",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "cookie",
+                "value": "connect.sid={{session_cookie}}",
+                "type": "text",
+                "description": "Browser session cookie — the proxy reads this to identify the logged-in user."
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/ai/chatbot/v1/sessions/history/{{session_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ai",
+                "chatbot",
+                "v1",
+                "sessions",
+                "history",
+                "{{session_id}}"
+              ]
+            },
+            "description": "Returns every user action and bot response from the start of the session — so the UI can render a full scrollable chat thread, not just the last bot message.\n\n`{{session_id}}` — auto-filled from the Start Session test script.\n\n**Response: `messages[]` array in chronological order.**\n- `role: 'bot'` entries: render `activities[]` using the same rendering code as a /turn response\n- `role: 'user'` entries: render `text` as a user chat bubble\n- The last entry is always `role: 'bot'` — it is the current state awaiting user input\n\nReturns `messages: []` for new sessions before any topic has been selected, or for sessions created before history tracking was added."
+          },
+          "response": []
+        },
+        {
+          "name": "Send turn (POST /sessions/turn/{{session_id}})",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "cookie",
+                "value": "connect.sid={{session_cookie}}",
+                "type": "text",
+                "description": "Browser session cookie — the proxy reads this to identify the logged-in user."
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  // ── PICK ONE action type — delete the other two before sending ────────────\n\n  // select_choice: user tapped a quick-reply button\n  //   \"action\": \"select_choice\",\n  //   \"choice_id\": \"<id>\",     // from previous response → activities[].choices[].id\n  //   \"user_says\": \"<label>\"   // optional — the button label for the transcript\n\n  // send_message: user typed free text (only when disable_input is false)\n  //   \"action\": \"send_message\",\n  //   \"text\": \"<user typed text>\"\n\n  // pick_item: user selected from a dynamic list (course picker, etc.)\n  //   \"action\": \"pick_item\",\n  //   \"picker_id\": \"<id>\",     // from previous response → activities[].picker_id\n  //   \"item_id\":    \"<id>\",    // from previous response → activities[].items[n].id\n  //   \"item_label\": \"<label>\"  // from previous response → activities[].items[n].label\n\n  // ── Active example (select_choice) ─────────────────────────────────────\n  // \"select_choice\" — user tapped a quick-reply button; choice_id MUST come from the previous response\n  \"action\": \"select_choice\",\n  // From previous response → activities[].choices[].id  (NEVER hardcode in real code)\n  \"choice_id\": \"REPLACE_WITH_CHOICE_ID\",\n  // Optional — the button label shown in the UI (for conversation transcript)\n  \"user_says\": \"REPLACE_WITH_BUTTON_LABEL\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai/chatbot/v1/sessions/turn/{{session_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ai",
+                "chatbot",
+                "v1",
+                "sessions",
+                "turn",
+                "{{session_id}}"
+              ]
+            },
+            "description": "Sends a user action and receives the bot's next activities. This is the core loop of the chatbot UI.\n\n`{{session_id}}` — auto-filled from the Start Session test script.\n\n**Action types and when to use each:**\n\n`select_choice` — user taps a quick-reply button:\n```json\n{ \"action\": \"select_choice\", \"choice_id\": \"<id from choices[]>\", \"user_says\": \"<button label>\" }\n```\n\n`send_message` — user types free text (only when `disable_input` is false in the current activity):\n```json\n{ \"action\": \"send_message\", \"text\": \"user typed this\" }\n```\n\n`pick_item` — user selects from a dynamic scrollable list (e.g. course picker):\n```json\n{ \"action\": \"pick_item\", \"picker_id\": \"<from picker activity>\", \"item_id\": \"<id>\", \"item_label\": \"<label>\" }\n```\n\n**Important:** `choice_id` and `picker_id` always come from the previous response's `activities[]` — never hardcode them in your application code.\n\nRepeat until `activities[]` contains `{ \"type\": \"end\" }` — that means the conversation is complete and the session is closed."
+          },
+          "response": []
+        },
+        {
+          "name": "Get session trace — NOT YET WIRED (501)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "cookie",
+                "value": "connect.sid={{session_cookie}}",
+                "type": "text",
+                "description": "Browser session cookie — the proxy reads this to identify the logged-in user."
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/ai/chatbot/v1/admin/sessions/{{session_id}}/trace",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ai",
+                "chatbot",
+                "v1",
+                "admin",
+                "sessions",
+                "{{session_id}}",
+                "trace"
+              ]
+            },
+            "description": "Returns the full conversation trace (every node visited, branch decisions, API calls made). Useful for debugging flow logic.\n\nNot yet implemented — returns HTTP 501.\n\n`{{session_id}}` — auto-filled from the Start Session test script."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "2 — Demo: AUTO_LOGOUT_CRASH (complete flow)",
+      "description": "A verified end-to-end walkthrough of the AUTO_LOGOUT_CRASH flow through the web proxy.\n\nRun steps 1–5 in order. Step 1 auto-saves session_id; all other steps use {{session_id}}.\n\nFull path: Start → pick topic AUTO_LOGOUT_CRASH → pick device Android → confirm resolved Yes → END\n\nOnly a browser session cookie is needed — no JWT or Kong token required.",
+      "item": [
+        {
+          "name": "Step 1 — Start session",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const r = pm.response.json();",
+                  "if (r.session_id) {",
+                  "    // Save session_id — used automatically in Steps 2–5 via {{session_id}}",
+                  "    pm.collectionVariables.set('session_id', r.session_id);",
+                  "    console.log('session_id saved:', r.session_id);",
+                  "}",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('session_id present', () => pm.expect(r.session_id).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "cookie",
+                "value": "connect.sid={{session_cookie}}",
+                "type": "text",
+                "description": "Browser session cookie — set session_cookie in collection variables."
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  // \"web\" | \"mobile\" | \"whatsapp\" | \"voice\" — the channel the user is on\n  \"channel\": \"web\",\n  // BCP-47 language code — \"en\" for English, \"hi\" for Hindi\n  \"language\": \"en\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai/chatbot/v1/sessions/create",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ai",
+                "chatbot",
+                "v1",
+                "sessions",
+                "create"
+              ]
+            },
+            "description": "Creates a new chat session.\n\nResponse: greeting message + topic picker (quick_reply buttons). The `session_id` is auto-saved to `{{session_id}}` by the test script — Steps 2–5 pick it up automatically."
+          },
+          "response": []
+        },
+        {
+          "name": "Step 2 — Pick topic: AUTO_LOGOUT_CRASH",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "cookie",
+                "value": "connect.sid={{session_cookie}}",
+                "type": "text",
+                "description": "Browser session cookie."
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  // \"select_choice\" — user tapped a quick-reply button; choice_id MUST come from the previous response\n  \"action\": \"select_choice\",\n  // choice_id from Step 1 response → activities[1].choices[].id\n  \"choice_id\": \"AUTO_LOGOUT_CRASH\",\n  // Optional — the button label shown in the UI (for conversation transcript)\n  \"user_says\": \"Auto logout / App crash\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai/chatbot/v1/sessions/turn/{{session_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ai",
+                "chatbot",
+                "v1",
+                "sessions",
+                "turn",
+                "{{session_id}}"
+              ]
+            },
+            "description": "`{{session_id}}` — auto-filled from Step 1.\n`choice_id` — taken from Step 1 response, `activities[1].choices[].id`\n\nResponse: bot asks 'Are you on Android or iPhone?' with choices `android` and `ios`."
+          },
+          "response": []
+        },
+        {
+          "name": "Step 3 — Pick device: Android",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "cookie",
+                "value": "connect.sid={{session_cookie}}",
+                "type": "text",
+                "description": "Browser session cookie."
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  // \"select_choice\" — user tapped a quick-reply button; choice_id MUST come from the previous response\n  \"action\": \"select_choice\",\n  // choice_id from Step 2 response → activities[].choices[].id\n  \"choice_id\": \"android\",\n  // Optional — the button label shown in the UI (for conversation transcript)\n  \"user_says\": \"Android\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai/chatbot/v1/sessions/turn/{{session_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ai",
+                "chatbot",
+                "v1",
+                "sessions",
+                "turn",
+                "{{session_id}}"
+              ]
+            },
+            "description": "`{{session_id}}` — auto-filled from Step 1.\n`choice_id` — taken from Step 2 response, `activities[].choices[].id`\n\nAlternative: send `\"choice_id\": \"ios\"` for iPhone-specific troubleshooting steps.\n\nResponse: numbered clear-cache / force-stop steps rendered as markdown, followed by 'Has the issue been resolved?' with choices `yes` and `no`."
+          },
+          "response": []
+        },
+        {
+          "name": "Step 4 — Confirm resolved: Yes → END",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "cookie",
+                "value": "connect.sid={{session_cookie}}",
+                "type": "text",
+                "description": "Browser session cookie."
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  // \"select_choice\" — user tapped a quick-reply button; choice_id MUST come from the previous response\n  \"action\": \"select_choice\",\n  // choice_id from Step 3 response → activities[].choices[].id\n  \"choice_id\": \"yes\",\n  // Optional — the button label shown in the UI (for conversation transcript)\n  \"user_says\": \"Yes, issue is resolved\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ai/chatbot/v1/sessions/turn/{{session_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ai",
+                "chatbot",
+                "v1",
+                "sessions",
+                "turn",
+                "{{session_id}}"
+              ]
+            },
+            "description": "`{{session_id}}` — auto-filled from Step 1.\n`choice_id` — taken from Step 3 response, `activities[].choices[].id`\n\nAlternative: send `\"choice_id\": \"no\"` to escalate to a support ticket instead.\n\n**Expected response:**\n- `activities[0]`: `{ \"type\": \"markdown\", \"text\": \"Glad I could help!\" }` — render as chat bubble\n- `activities[1]`: `{ \"type\": \"end\", \"outcome\": \"self_served\" }` — render end-of-conversation banner\n- `status: \"satisfied\"`\n\nAfter this, GET /sessions/list will return `{ \"session_id\": null }` — session is cleared."
+          },
+          "response": []
+        },
+        {
+          "name": "Step 4b — View history (optional)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "cookie",
+                "value": "connect.sid={{session_cookie}}",
+                "type": "text",
+                "description": "Browser session cookie."
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/ai/chatbot/v1/sessions/history/{{session_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ai",
+                "chatbot",
+                "v1",
+                "sessions",
+                "history",
+                "{{session_id}}"
+              ]
+            },
+            "description": "`{{session_id}}` — auto-filled from Step 1.\n\nRun this after Step 4 to see the full conversation thread that was just completed.\n\nExpected: `messages[]` with bot entries (device question, clear-cache steps, resolved confirmation) and user entries (topic selection, Android, yes).\n\nNote: the initial greeting and topic picker from Step 1 are not included — history starts from the first topic selection."
+          },
+          "response": []
+        },
+        {
+          "name": "Step 5 — Verify session cleared (optional)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const r = pm.response.json();",
+                  "pm.test('Session cleared after end', () => pm.expect(r.session_id).to.be.null);",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "cookie",
+                "value": "connect.sid={{session_cookie}}",
+                "type": "text",
+                "description": "Browser session cookie."
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/ai/chatbot/v1/sessions/list",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ai",
+                "chatbot",
+                "v1",
+                "sessions",
+                "list"
+              ]
+            },
+            "description": "Optional verification step after the flow ends.\n\nExpected: `{ \"session_id\": null }` — confirms the session was cleared after the `end` activity.\n\nThe test script asserts `session_id` is null and status is 200."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
