@@ -128,6 +128,10 @@ async def start_session(
         "ttl_minutes": ttl_minutes,
         "turn_count": 0,
         "node_path": [],
+        # Langfuse trace-chain IDs — updated after every turn so each turn's
+        # span becomes a child of the previous one inside the same LF trace.
+        "_lf_trace_id": None,
+        "_lf_obs_id": None,
     }
 
     # Register in Redis so any pod/device can look up this session by user ID
@@ -141,14 +145,18 @@ async def start_session(
     )
 
     # Greeting + topic selection — text from system_messages.yaml, menu from flow metadata
+    _sid_str = str(session_id)
     with tracing.turn_trace(
         user_id=user_id,
-        session_id=str(session_id),
+        session_id=_sid_str,
         trace_name="session-start",
         tags=[body.channel, body.language],
         channel=body.channel,
         language=body.language,
     ):
+        # Capture IDs right after span creation — used by the next turn to chain
+        _lf_tid, _lf_oid = tracing.get_current_span_ids()
+
         activities = [
             Activity.markdown(
                 _sys(request, "greeting",
@@ -167,6 +175,11 @@ async def start_session(
             input={"channel": body.channel, "language": body.language},
             output={"menu_items": len(_menu_quick_replies(request))},
         )
+
+    # Persist LF trace chain IDs so subsequent turns link into the same trace
+    _sess = request.app.state.sessions[_sid_str]
+    _sess["_lf_trace_id"] = _lf_tid
+    _sess["_lf_obs_id"] = _lf_oid
 
     return StartSessionResponse(
         session_id=session_id,
@@ -270,18 +283,23 @@ async def submit_turn(
 
         session["turn_count"] = session.get("turn_count", 0) + 1
         lg_config = {"configurable": {"thread_id": sid}}
+        _lf_tid_phase1: str | None = None
+        _lf_oid_phase1: str | None = None
         try:
             with tracing.turn_trace(
                 user_id=user_id,
                 session_id=sid,
                 trace_name=f"flow-start-{flow_id}",
                 tags=[session["channel"], session["language"], flow_id],
+                trace_id=session.get("_lf_trace_id"),
+                parent_observation_id=session.get("_lf_obs_id"),
                 flow_id=flow_id,
                 channel=session["channel"],
                 action="topic_selected",
                 user_choice=flow_id,
                 turn_count=session["turn_count"],
             ):
+                _lf_tid_phase1, _lf_oid_phase1 = tracing.get_current_span_ids()
                 tracing.set_trace_io(input={"flow_id": flow_id, "action": "topic_selected", "user_choice": flow_id})
                 result = await graph.ainvoke(state_dict, lg_config)
                 result_status = result.get("status", "active")
@@ -292,6 +310,12 @@ async def submit_turn(
         except Exception as exc:  # noqa: BLE001
             log.exception("Flow start error for %s", flow_id)
             raise HTTPException(status_code=500, detail=f"Flow error: {exc}") from exc
+
+        # Update session trace-chain IDs (span just closed, IDs captured above)
+        if _lf_tid_phase1:
+            session["_lf_trace_id"] = _lf_tid_phase1
+        if _lf_oid_phase1:
+            session["_lf_obs_id"] = _lf_oid_phase1
 
         activities = result.get("pending_activities") or []
         activities = await _translate_activities(activities, lang, translation_svc)
@@ -328,6 +352,8 @@ async def submit_turn(
                 node_path=session.get("node_path", []),
                 channel=session.get("channel", "web"),
                 language=session.get("language", "en"),
+                trace_id=session.get("_lf_trace_id"),
+                parent_observation_id=session.get("_lf_obs_id"),
             )
 
         # Append user action + bot response to persistent conversation history
@@ -440,18 +466,23 @@ async def submit_turn(
     )
     session["turn_count"] = session.get("turn_count", 0) + 1
 
+    _lf_tid_active: str | None = None
+    _lf_oid_active: str | None = None
     try:
         with tracing.turn_trace(
             user_id=user_id,
             session_id=sid,
             trace_name=f"turn-{flow_id}",
             tags=[session.get("channel", "web"), session.get("language", "en"), flow_id],
+            trace_id=session.get("_lf_trace_id"),
+            parent_observation_id=session.get("_lf_obs_id"),
             flow_id=flow_id,
             action=body.action,
             node=current_state_values.get("current_node", ""),
             user_choice=_user_choice,
             turn_count=session["turn_count"],
         ):
+            _lf_tid_active, _lf_oid_active = tracing.get_current_span_ids()
             tracing.set_trace_io(
                 input={
                     "action": body.action,
@@ -481,6 +512,12 @@ async def submit_turn(
         log.exception("Flow resume error for session %s", sid)
         raise HTTPException(status_code=500, detail=f"Flow error: {exc}") from exc
 
+    # Advance trace-chain IDs so the next turn links to THIS turn's span
+    if _lf_tid_active:
+        session["_lf_trace_id"] = _lf_tid_active
+    if _lf_oid_active:
+        session["_lf_obs_id"] = _lf_oid_active
+
     activities = result.get("pending_activities") or []
     activities = await _translate_activities(activities, lang, translation_svc)
     result_status = result.get("status", "active")
@@ -508,6 +545,8 @@ async def submit_turn(
             node_path=session.get("node_path", []),
             channel=session.get("channel", "web"),
             language=session.get("language", "en"),
+            trace_id=session.get("_lf_trace_id"),
+            parent_observation_id=session.get("_lf_obs_id"),
         )
         if _store:
             await _store.delete(session["user_id_hash"])

@@ -5,33 +5,38 @@ Toggle:
 
 When disabled (default), all functions are no-ops — zero overhead, zero imports.
 
-Langfuse v3 trace model (SDK 4.x)
-------------------------------------
-One Langfuse *trace* per HTTP turn, created via:
+Langfuse v4 trace model (SDK 4.x)
+-----------------------------------
+Each HTTP turn produces one Langfuse OBSERVATION (chain-type span).  All turns in
+the same chat session are chained into a single Langfuse TRACE via trace_id /
+parent_observation_id so the full session appears as one timeline in the UI.
 
-    with propagate_attributes(user_id=..., session_id=..., trace_name=...):
-        with _client.start_as_current_observation(name=..., as_type="chain"):
-            yield  # route handler runs here
+Trace chain per session:
+  session-start              (root span — no parent)
+    └── flow-start-{flow_id} (child of session-start)
+          └── turn-{flow_id} (child of flow-start, then child of previous turn)
+                └── ...
+                      └── session-end (child of the last turn)
 
-`propagate_attributes` injects user_id, session_id, and tags into the OTel context.
-The span processor picks these up when creating the trace, so all traces sharing the
-same session_id are grouped in the Langfuse Sessions view automatically.
+To maintain the chain:
+  • routes.py calls tracing.get_current_span_ids() INSIDE each turn_trace block
+    to capture (trace_id, observation_id) of the span just created.
+  • Those IDs are stored in the in-memory session dict.
+  • The NEXT turn passes them as trace_id / parent_observation_id so the new span
+    becomes a child of the previous one inside the same OTel trace.
 
-Within turns that trigger an LLM call, `start_as_current_observation(as_type="generation")`
-adds a child generation span so you can see model, token usage, and latency.
+Result in Langfuse UI
+  • Traces view  → one trace per session, expanding shows all turns as child spans.
+  • Sessions view → sessions grouped by session_id (backup if trace-chain breaks).
+  • Users view   → filter by user_id to see all sessions for a user.
 
-What each session produces in Langfuse
----------------------------------------
-  session-start          → 1 trace  (greeting shown, menu served)
-  flow-start-{flow_id}   → 1 trace  (user picked a topic)
-  turn-{flow_id}         → N traces (one per user action inside the flow)
-  session-end            → 1 trace  (terminal state: outcome + ticket_id + node_path)
+LLM generation spans
+  generation_span() creates a child "generation" span inside any turn_trace.
+  Call update_current_generation() inside it to record model + token counts.
 
-Filter "session-end" traces by tag to answer:
-  - "ticket_raised"        → all sessions that created a Zoho ticket
-  - "self_served"          → all self-resolved sessions
-  - "CERTIFICATE_DOWNLOAD" → all cert-download sessions, any outcome
-  - user_id = X            → every session for user X in any timeframe
+Disable
+  LANGFUSE_ENABLED=false (or missing keys) → every function is a zero-cost no-op.
+  The disable path never imports Langfuse so cold-start time is unaffected.
 """
 
 from __future__ import annotations
@@ -97,6 +102,25 @@ def is_enabled() -> bool:
     return _enabled
 
 
+# ── Span ID helpers (used by routes to chain turns into one trace) ─────────────
+
+def get_current_span_ids() -> tuple[str | None, str | None]:
+    """Return (trace_id, observation_id) of the currently active Langfuse span.
+
+    Must be called INSIDE a turn_trace block.  Returns (None, None) when tracing
+    is disabled or no span is active.
+
+    trace_id       — 32-char hex; pass as trace_id to the NEXT turn_trace call.
+    observation_id — 16-char hex; pass as parent_observation_id to the NEXT call.
+    """
+    if not _enabled or _client is None:
+        return None, None
+    try:
+        return _client.get_current_trace_id(), _client.get_current_observation_id()
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
 # ── Turn-level trace ───────────────────────────────────────────────────────────
 
 @contextmanager
@@ -106,54 +130,90 @@ def turn_trace(
     session_id: str,
     trace_name: str,
     tags: list[str] | None = None,
+    trace_id: str | None = None,
+    parent_observation_id: str | None = None,
     **metadata: Any,
 ):
-    """Context manager: open a Langfuse trace for one HTTP turn.
+    """Context manager: open a Langfuse span for one HTTP turn.
 
-    Uses propagate_attributes (Langfuse 4.x SDK) to inject user_id, session_id,
-    and tags into the OTel context before creating the root observation span.
-    The span processor picks these up so all traces with the same session_id are
-    grouped in the Langfuse Sessions view.
+    Ordering (Langfuse 4.x docs):
+      1. start_as_current_observation — creates the root span for this turn.
+      2. propagate_attributes         — sets user_id / session_id / tags directly
+                                        on the just-created root span AND injects
+                                        them into the OTel context so child spans
+                                        (generation_span, LangChain callbacks, …)
+                                        inherit them automatically.
+
+    Session chaining — all turns in a session share ONE Langfuse trace:
+      Pass trace_id + parent_observation_id (obtained via get_current_span_ids()
+      during the PREVIOUS turn) so this turn's span becomes a child of the last.
+      On the first turn (session-start) leave both as None → Langfuse creates a
+      new root trace automatically.
+
+    Exception safety:
+      Exceptions raised inside the block propagate normally (span is marked ERROR,
+      caller handles the HTTP 500).  Only Langfuse *setup* errors are caught and
+      logged so tracing failures never break the user-facing request.
 
     No-op when tracing is disabled — zero overhead, zero imports.
 
     Example::
 
+        # First turn (session-start) — no prior IDs
+        with tracing.turn_trace(user_id=uid, session_id=sid, trace_name="session-start"):
+            tid, oid = tracing.get_current_span_ids()
+            ...
+        session["_lf_trace_id"]  = tid
+        session["_lf_obs_id"]    = oid
+
+        # Subsequent turn — chains onto the previous span
         with tracing.turn_trace(
-            user_id=user_id,
-            session_id=sid,
-            trace_name="turn-CERTIFICATE_DOWNLOAD",
-            tags=["web", "en", "CERTIFICATE_DOWNLOAD"],
-            flow_id="CERTIFICATE_DOWNLOAD",
-            channel="web",
+            user_id=uid, session_id=sid, trace_name="turn-FLOW",
+            trace_id=session["_lf_trace_id"],
+            parent_observation_id=session["_lf_obs_id"],
         ):
-            result = await graph.ainvoke(...)
-            tracing.set_trace_io(input={...}, output={...})
+            tid, oid = tracing.get_current_span_ids()
+            ...
+        session["_lf_obs_id"] = oid   # trace_id never changes within a session
     """
     if not _enabled or _client is None:
         yield
         return
 
     _meta = {k: str(v) for k, v in metadata.items() if v is not None}
+    _user_code_started = False
 
     try:
         from langfuse import propagate_attributes
-        with propagate_attributes(
-            user_id=user_id,
-            session_id=session_id,
-            trace_name=trace_name,
-            tags=tags or [],
+        from langfuse.types import TraceContext
+
+        _trace_ctx: TraceContext | None = None
+        if trace_id:
+            _trace_ctx = TraceContext(trace_id=trace_id)
+            if parent_observation_id:
+                _trace_ctx["parent_span_id"] = parent_observation_id
+
+        with _client.start_as_current_observation(
+            name=trace_name,
+            as_type="chain",
             metadata=_meta,
+            trace_context=_trace_ctx,
         ):
-            with _client.start_as_current_observation(
-                name=trace_name,
-                as_type="chain",
+            with propagate_attributes(
+                user_id=user_id,
+                session_id=session_id,
+                trace_name=trace_name,
+                tags=tags or [],
                 metadata=_meta,
             ):
+                _user_code_started = True
                 yield
+
     except Exception as exc:  # noqa: BLE001
-        log.warning("[tracing] turn_trace error: %s", exc)
-        yield
+        if _user_code_started:
+            raise   # user code failed — propagate so routes.py returns HTTP 500
+        log.warning("[tracing] turn_trace setup error: %s", exc)
+        yield   # Langfuse setup failed — run user code without tracing
 
 
 def set_trace_io(
@@ -161,10 +221,10 @@ def set_trace_io(
     input: dict[str, Any] | None = None,
     output: dict[str, Any] | None = None,
 ) -> None:
-    """Update the current trace's input/output shown in the Langfuse UI.
+    """Set the current span's input/output shown in the Langfuse timeline.
 
-    Call after awaiting graph.ainvoke() to add a clean summary to the trace.
-    No-op when tracing is disabled.
+    Call inside a turn_trace block — before and after the graph invocation to
+    record what went in and what came out.  No-op when tracing is disabled.
     """
     if not _enabled or _client is None:
         return
@@ -187,16 +247,18 @@ def record_session_end(
     node_path: list[str] | None = None,
     channel: str = "web",
     language: str = "en",
+    trace_id: str | None = None,
+    parent_observation_id: str | None = None,
 ) -> None:
-    """Create a terminal summary trace for a completed session.
+    """Create a terminal summary span for a completed session.
 
-    This trace shares session_id with all turn traces so Langfuse groups them
-    together in the Sessions view.  Tags include outcome and flow_id so you can
-    pivot on them in dashboards:
+    Appended to the same trace (via trace_id / parent_observation_id) so it
+    appears as the final child in the session timeline.  Tags include outcome and
+    flow_id for dashboard pivots:
 
-      Filter "session-end" traces by tag "ticket_raised"        → ticket count per flow
-      Filter "session-end" traces by tag "CERTIFICATE_DOWNLOAD" → cert flow outcomes
-      Filter by user_id                                          → all sessions for a user
+      Filter "session-end" by tag "ticket_raised"        → sessions that raised a ticket
+      Filter "session-end" by tag "CERTIFICATE_DOWNLOAD" → cert flow outcomes
+      Filter by user_id                                   → all sessions for a user
 
     No-op when tracing is disabled.
     """
@@ -204,8 +266,15 @@ def record_session_end(
         return
     try:
         from langfuse import propagate_attributes
+        from langfuse.types import TraceContext
+
         _path_str = " → ".join(node_path) if node_path else ""
         _tags = [channel, language, flow_id or "no_flow", outcome]
+        if ticket_id:
+            _tags.append("ticket_raised")
+        if outcome == "self_served":
+            _tags.append("self_served")
+
         _input = {
             "flow_id": flow_id,
             "turn_count": turn_count,
@@ -229,21 +298,29 @@ def record_session_end(
             "language": language,
         }
 
-        with propagate_attributes(
-            user_id=user_id,
-            session_id=session_id,
-            trace_name="session-end",
-            tags=_tags,
+        _trace_ctx: TraceContext | None = None
+        if trace_id:
+            _trace_ctx = TraceContext(trace_id=trace_id)
+            if parent_observation_id:
+                _trace_ctx["parent_span_id"] = parent_observation_id
+
+        with _client.start_as_current_observation(
+            name="session-end",
+            as_type="chain",
+            input=_input,
+            output=_output,
             metadata=_meta,
+            trace_context=_trace_ctx,
         ):
-            with _client.start_as_current_observation(
-                name="session-end",
-                as_type="chain",
-                input=_input,
-                output=_output,
+            with propagate_attributes(
+                user_id=user_id,
+                session_id=session_id,
+                trace_name="session-end",
+                tags=_tags,
                 metadata=_meta,
             ):
                 pass
+
     except Exception as exc:  # noqa: BLE001
         log.debug("[tracing] record_session_end failed: %s", exc)
 
@@ -254,8 +331,8 @@ def record_session_end(
 def generation_span(*, model: str, operation: str, prompt_len: int = 0):
     """Context manager: record one LLM call as a Langfuse generation child span.
 
-    Must be nested inside a turn_trace context so Langfuse nests it under the
-    correct trace (with user_id + session_id already set on the parent trace).
+    Must be called INSIDE a turn_trace block so Langfuse nests it under the
+    correct trace (user_id + session_id already set on the parent span).
     Prompt text is NOT logged (PII) — only the character length.
     Call update_current_generation() inside the block to set the output.
 
@@ -273,6 +350,7 @@ def generation_span(*, model: str, operation: str, prompt_len: int = 0):
         yield
         return
 
+    _user_code_started = False
     try:
         with _client.start_as_current_observation(
             name=f"llm-{operation}",
@@ -280,9 +358,12 @@ def generation_span(*, model: str, operation: str, prompt_len: int = 0):
             model=model,
             metadata={"operation": operation, "prompt_chars": prompt_len},
         ):
+            _user_code_started = True
             yield
     except Exception as exc:  # noqa: BLE001
-        log.warning("[tracing] generation_span error: %s", exc)
+        if _user_code_started:
+            raise
+        log.warning("[tracing] generation_span setup error: %s", exc)
         yield
 
 
