@@ -5,17 +5,17 @@ Toggle:
 
 When disabled (default), all functions are no-ops — zero overhead, zero imports.
 
-Langfuse v3 trace model (SDK 3.6.x)
+Langfuse v3 trace model (SDK 4.x)
 ------------------------------------
 One Langfuse *trace* per HTTP turn, created via:
 
-    with _client.start_as_current_observation(name=..., as_type="chain"):
-        _client.update_current_trace(user_id=..., session_id=..., tags=..., ...)
-        yield  # route handler runs here
+    with propagate_attributes(user_id=..., session_id=..., trace_name=...):
+        with _client.start_as_current_observation(name=..., as_type="chain"):
+            yield  # route handler runs here
 
-`update_current_trace` sets the trace-level fields (user_id, session_id, tags, input,
-output) that appear in the Langfuse dashboard.  All traces sharing the same session_id
-are grouped together in the Sessions view automatically.
+`propagate_attributes` injects user_id, session_id, and tags into the OTel context.
+The span processor picks these up when creating the trace, so all traces sharing the
+same session_id are grouped in the Langfuse Sessions view automatically.
 
 Within turns that trigger an LLM call, `start_as_current_observation(as_type="generation")`
 adds a child generation span so you can see model, token usage, and latency.
@@ -110,13 +110,10 @@ def turn_trace(
 ):
     """Context manager: open a Langfuse trace for one HTTP turn.
 
-    Creates a root observation (as_type="chain") then immediately sets the
-    trace-level fields (user_id, session_id, tags, metadata) via
-    update_current_trace — these are what appear in the Langfuse Sessions view
-    and Traces dashboard.
-
-    All traces sharing the same session_id are grouped into one session in
-    Langfuse automatically.
+    Uses propagate_attributes (Langfuse 4.x SDK) to inject user_id, session_id,
+    and tags into the OTel context before creating the root observation span.
+    The span processor picks these up so all traces with the same session_id are
+    grouped in the Langfuse Sessions view.
 
     No-op when tracing is disabled — zero overhead, zero imports.
 
@@ -140,19 +137,20 @@ def turn_trace(
     _meta = {k: str(v) for k, v in metadata.items() if v is not None}
 
     try:
-        with _client.start_as_current_observation(
-            name=trace_name,
-            as_type="chain",
+        from langfuse import propagate_attributes
+        with propagate_attributes(
+            user_id=user_id,
+            session_id=session_id,
+            trace_name=trace_name,
+            tags=tags or [],
             metadata=_meta,
         ):
-            _client.update_current_trace(
+            with _client.start_as_current_observation(
                 name=trace_name,
-                user_id=user_id,
-                session_id=session_id,
-                tags=tags or [],
+                as_type="chain",
                 metadata=_meta,
-            )
-            yield
+            ):
+                yield
     except Exception as exc:  # noqa: BLE001
         log.warning("[tracing] turn_trace error: %s", exc)
         yield
@@ -171,7 +169,7 @@ def set_trace_io(
     if not _enabled or _client is None:
         return
     try:
-        _client.update_current_trace(input=input, output=output)
+        _client.set_current_trace_io(input=input, output=output)
     except Exception as exc:  # noqa: BLE001
         log.debug("[tracing] set_trace_io failed: %s", exc)
 
@@ -205,6 +203,7 @@ def record_session_end(
     if not _enabled or _client is None:
         return
     try:
+        from langfuse import propagate_attributes
         _path_str = " → ".join(node_path) if node_path else ""
         _tags = [channel, language, flow_id or "no_flow", outcome]
         _input = {
@@ -230,22 +229,21 @@ def record_session_end(
             "language": language,
         }
 
-        with _client.start_as_current_observation(
-            name="session-end",
-            as_type="chain",
-            input=_input,
-            output=_output,
+        with propagate_attributes(
+            user_id=user_id,
+            session_id=session_id,
+            trace_name="session-end",
+            tags=_tags,
             metadata=_meta,
         ):
-            _client.update_current_trace(
+            with _client.start_as_current_observation(
                 name="session-end",
-                user_id=user_id,
-                session_id=session_id,
-                tags=_tags,
+                as_type="chain",
                 input=_input,
                 output=_output,
                 metadata=_meta,
-            )
+            ):
+                pass
     except Exception as exc:  # noqa: BLE001
         log.debug("[tracing] record_session_end failed: %s", exc)
 
