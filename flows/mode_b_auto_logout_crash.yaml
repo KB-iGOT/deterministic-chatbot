@@ -22,7 +22,8 @@ version: 1
 metadata:
   category:         platform
   menu_label:       "📱 Auto logout / App crash"
-  menu_group:       "Account & Login"
+  menu_group:       "Application Crashing / Not Loading"
+  menu_group_order: 5
   menu_order:       3
   classification:   Incident
   default_portal:   Learner Portal

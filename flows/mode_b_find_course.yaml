@@ -38,7 +38,8 @@ version: 1
 metadata:
   category:         course
   menu_label:       "🔍 Can't find a course or event"
-  menu_group:       "Learning"
+  menu_group:       "Content Related Issue"
+  menu_group_order: 2
   menu_order:       5
   classification:   Service Request
   default_priority: P3

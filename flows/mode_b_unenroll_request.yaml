@@ -21,7 +21,8 @@ version: 1
 metadata:
   category:         course
   menu_label:       "🚫 Unenroll from a course/program/event"
-  menu_group:       "Learning"
+  menu_group:       "Content Related Issue"
+  menu_group_order: 2
   menu_order:       9
   classification:   Query
   default_priority: P4

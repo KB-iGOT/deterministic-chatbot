@@ -31,7 +31,8 @@ version: 1
 metadata:
   category:         platform
   menu_label:       "👏 Weekly clap not updated / reset"
-  menu_group:       "Reports & Data"
+  menu_group:       "Recognition & Engagement"
+  menu_group_order: 4
   menu_order:       9
   classification:   Incident
   default_portal:   Learner Portal

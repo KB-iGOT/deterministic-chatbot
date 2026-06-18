@@ -38,7 +38,8 @@ version: 2
 metadata:
   category:         profile
   menu_label:       "✅ Designation / Group not verified"
-  menu_group:       "Profile"
+  menu_group:       "Profile & User Management"
+  menu_group_order: 1
   menu_order:       6
   classification:   Service Request
   default_portal:   Learner Portal

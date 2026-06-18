@@ -297,7 +297,7 @@ class FlowCompiler:
     def get_menu_items(self) -> list[dict[str, Any]]:
         """Return menu items derived from loaded flow metadata.
 
-        Each item: ``{flow_id, menu_label, menu_group, menu_order}``.
+        Each item: ``{flow_id, menu_label, menu_group, menu_group_order, menu_order}``.
         Flows are excluded when any of the following apply:
         - No ``metadata.menu_label`` set
         - ``metadata.menu_hidden: true``   (hides from menu; API still accessible)
@@ -316,12 +316,33 @@ class FlowCompiler:
             if not meta.get("enabled", True):
                 continue
             items.append({
-                "flow_id":    flow_id,
-                "menu_label": label,
-                "menu_group": meta.get("menu_group", "General"),
-                "menu_order": int(meta.get("menu_order", 99)),
+                "flow_id":         flow_id,
+                "menu_label":      label,
+                "menu_group":      meta.get("menu_group", "General"),
+                "menu_group_order": int(meta.get("menu_group_order", 99)),
+                "menu_order":      int(meta.get("menu_order", 99)),
             })
         return sorted(items, key=lambda x: (x["menu_order"], x["flow_id"]))
+
+    def get_categories(self) -> list[str]:
+        """Return ordered distinct category names that have at least one visible flow.
+
+        Order is determined by the minimum ``menu_group_order`` across flows in
+        each category, so the order is fully driven by YAML metadata — no
+        hardcoded list in Python.
+        """
+        items = self.get_menu_items()
+        group_min_order: dict[str, int] = {}
+        for item in items:
+            grp = item["menu_group"]
+            gord = item["menu_group_order"]
+            if grp not in group_min_order or gord < group_min_order[grp]:
+                group_min_order[grp] = gord
+        return sorted(group_min_order, key=lambda g: (group_min_order[g], g))
+
+    def get_flows_for_category(self, category: str) -> list[dict[str, Any]]:
+        """Return visible menu items for a single category, sorted by menu_order."""
+        return [i for i in self.get_menu_items() if i["menu_group"] == category]
 
 
 def _collect_edge_targets(node: dict[str, Any]) -> set[str]:

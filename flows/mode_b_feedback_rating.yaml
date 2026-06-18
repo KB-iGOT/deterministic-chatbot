@@ -18,7 +18,8 @@ version: 1
 metadata:
   category:         course
   menu_label:       "📝 Feedback / Rating issue"
-  menu_group:       "Learning"
+  menu_group:       "Content Related Issue"
+  menu_group_order: 2
   menu_order:       5
   classification:   Query
   default_portal:   Learner Portal
