@@ -29,7 +29,8 @@ version: 1
 metadata:
   category:         course
   menu_label:       "📋 Training plan / APAR not visible"
-  menu_group:       "Learning"
+  menu_group:       "CA/APAR Issue"
+  menu_group_order: 3
   menu_order:       6
   classification:   Query
   default_portal:   Learner Portal

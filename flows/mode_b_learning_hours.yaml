@@ -33,7 +33,8 @@ metadata:
   default_priority: P3
   default_severity: Sev 3
   menu_label:       "🔄 Learning  Hours not Reflecting"
-  menu_group:       "Learning"
+  menu_group:       "Recognition & Engagement"
+  menu_group_order: 4
   menu_order:       12
   enabled:          true
 

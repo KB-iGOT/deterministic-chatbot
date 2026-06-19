@@ -24,7 +24,8 @@ version: 2
 metadata:
   category:         course
   menu_label:       "📂 Resource not opening"
-  menu_group:       "Learning"
+  menu_group:       "Content Related Issue"
+  menu_group_order: 2
   menu_order:       4
   classification:   Incident
   default_portal:   Learner Portal

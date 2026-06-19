@@ -72,6 +72,34 @@ def _menu_quick_replies(request: Request) -> list[QuickReply]:
     ]
 
 
+def _category_quick_replies(request: Request) -> list[QuickReply]:
+    """Build the top-level category menu from flow metadata.
+
+    Button id uses the ``__cat__`` prefix so submit_turn can distinguish a
+    category selection from a flow selection without a separate field.
+    Category names and ordering are fully driven by YAML (menu_group /
+    menu_group_order) — no hardcoded list here.
+    """
+    compiler = getattr(request.app.state, "compiler", None)
+    if compiler is None:
+        return []
+    return [
+        QuickReply(id=f"__cat__{cat}", label=cat)
+        for cat in compiler.get_categories()
+    ]
+
+
+def _flows_for_category_quick_replies(request: Request, category: str) -> list[QuickReply]:
+    """Build the sub-flow menu for a specific category."""
+    compiler = getattr(request.app.state, "compiler", None)
+    if compiler is None:
+        return []
+    return [
+        QuickReply(id=item["flow_id"], label=item["menu_label"])
+        for item in compiler.get_flows_for_category(category)
+    ]
+
+
 def _sys(request: Request, key: str, default: str) -> str:
     """Look up a system message by key; fall back to the built-in default."""
     msgs = getattr(request.app.state, "system_messages", {}) or {}
@@ -124,7 +152,8 @@ async def start_session(
         "channel": body.channel,
         "language": body.language,
         "flow_id": None,
-        "status": "selecting_topic",
+        "status": "selecting_category",
+        "selected_category": None,
         "ttl_minutes": ttl_minutes,
         "turn_count": 0,
         "node_path": [],
@@ -144,7 +173,7 @@ async def start_session(
         session_id, user_id_hash, body.channel, body.language, ttl_minutes,
     )
 
-    # Greeting + topic selection — text from system_messages.yaml, menu from flow metadata
+    # Greeting + category selection — text from system_messages.yaml, categories from flow metadata
     _sid_str = str(session_id)
     with tracing.turn_trace(
         user_id=user_id,
@@ -163,7 +192,7 @@ async def start_session(
                      "👋 Hi! I'm the **iGOT Karmayogi** support assistant.\n\nWhat can I help you with today?")
             ).model_dump(exclude_none=True),
             Activity.quick_replies(
-                choices=_menu_quick_replies(request)
+                choices=_category_quick_replies(request)
             ).model_dump(exclude_none=True),
         ]
 
@@ -172,12 +201,12 @@ async def start_session(
         activities = await _translate_activities(activities, body.language, translation_svc)
 
         # What the user effectively "sent": a new session open
-        _menu = _menu_quick_replies(request)
+        _cats = _category_quick_replies(request)
         tracing.set_span_io(
             input={"event": "session_opened", "channel": body.channel, "language": body.language},
             output={
-                "bot": "👋 Greeting shown + topic menu",
-                "menu_options": [qr.label for qr in _menu],
+                "bot": "👋 Greeting shown + category menu",
+                "category_options": [qr.label for qr in _cats],
             },
         )
 
@@ -223,6 +252,86 @@ async def submit_turn(
         english_text = await translation_svc.to_english(body.text, src=lang)
         body = body.model_copy(update={"text": english_text})
 
+    # ── Phase: category selection (top-level menu, before topic/flow selection) ─
+    if session["status"] == "selecting_category":
+        choice_id = body.choice_id or ""
+        compiler = getattr(request.app.state, "compiler", None)
+
+        _cat_prefix = "__cat__"
+        category = choice_id[len(_cat_prefix):] if choice_id.startswith(_cat_prefix) else ""
+        sub_flows = _flows_for_category_quick_replies(request, category) if category else []
+
+        if not sub_flows:
+            # Invalid selection → re-offer categories
+            log.info(
+                "[activity] event=category_invalid  session=%s  user=%s  choice=%r",
+                sid, session["user_id_hash"], choice_id,
+            )
+            activities = [
+                Activity.markdown(
+                    _sys(request, "unknown_topic",
+                         "🤔 I didn't catch that — please choose one of the options below.")
+                ).model_dump(exclude_none=True),
+                Activity.quick_replies(
+                    choices=_category_quick_replies(request)
+                ).model_dump(exclude_none=True),
+            ]
+            activities = await _translate_activities(activities, lang, translation_svc)
+            return TurnResponse(
+                session_id=session_id,
+                activities=activities,
+                status=FlowStatus.AWAITING_USER.value,
+                flow_id=None,
+                current_node=None,
+            )
+
+        # Valid category — show its flows and advance state
+        log.info(
+            "[activity] event=category_selected  session=%s  user=%s  category=%r",
+            sid, session["user_id_hash"], category,
+        )
+        session["selected_category"] = category
+        session["status"] = "selecting_topic"
+
+        _lf_tid_cat: str | None = None
+        _lf_oid_cat: str | None = None
+        with tracing.turn_trace(
+            user_id=user_id,
+            session_id=sid,
+            trace_name=f"category-selected",
+            tags=[session["channel"], session["language"]],
+            trace_id=session.get("_lf_trace_id"),
+            parent_observation_id=session.get("_lf_obs_id"),
+            category=category,
+            channel=session["channel"],
+        ):
+            _lf_tid_cat, _lf_oid_cat = tracing.get_current_span_ids()
+            tracing.set_span_io(
+                input={"user": f"Selected category: {category}"},
+                output={"bot": "Sub-flow menu shown", "flow_options": [qr.label for qr in sub_flows]},
+            )
+
+        if _lf_tid_cat:
+            session["_lf_trace_id"] = _lf_tid_cat
+        if _lf_oid_cat:
+            session["_lf_obs_id"] = _lf_oid_cat
+
+        activities = [
+            Activity.markdown(
+                _sys(request, "select_issue",
+                     "Please choose the specific issue you're facing:")
+            ).model_dump(exclude_none=True),
+            Activity.quick_replies(choices=sub_flows).model_dump(exclude_none=True),
+        ]
+        activities = await _translate_activities(activities, lang, translation_svc)
+        return TurnResponse(
+            session_id=session_id,
+            activities=activities,
+            status=FlowStatus.AWAITING_USER.value,
+            flow_id=None,
+            current_node=None,
+        )
+
     # ── Phase: topic selection (before any flow is started) ──────────────────
     if session["status"] == "selecting_topic":
         # choice_id IS the flow_id — no separate mapping table needed.
@@ -239,19 +348,24 @@ async def submit_turn(
             flow_id = choice_id
 
         if not flow_id:
-            # Unknown topic → re-offer the menu (re-read from metadata so it's always fresh)
+            # Unknown topic → re-offer the sub-menu for the already-chosen category
+            # (falls back to the full flat menu when category was never set)
             log.info(
                 "[activity] event=topic_invalid  session=%s  user=%s  choice=%r",
                 sid, session["user_id_hash"], choice_id,
+            )
+            _selected_cat = session.get("selected_category")
+            _fallback_choices = (
+                _flows_for_category_quick_replies(request, _selected_cat)
+                if _selected_cat
+                else _menu_quick_replies(request)
             )
             activities = [
                 Activity.markdown(
                     _sys(request, "unknown_topic",
                          "🤔 I didn't catch that — please choose one of the options below.")
                 ).model_dump(exclude_none=True),
-                Activity.quick_replies(
-                    choices=_menu_quick_replies(request)
-                ).model_dump(exclude_none=True),
+                Activity.quick_replies(choices=_fallback_choices).model_dump(exclude_none=True),
             ]
             activities = await _translate_activities(activities, lang, translation_svc)
             return TurnResponse(
