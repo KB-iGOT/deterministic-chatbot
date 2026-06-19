@@ -44,10 +44,28 @@ def _has(value: Any) -> bool:
     return bool(value)
 
 
+def _email_domain_valid(email: str | None, approved_domains: list | None) -> bool:
+    """Return True if the domain part of *email* is present in *approved_domains*.
+
+    Comparison is case-insensitive and both sides are stripped of whitespace to
+    handle dirty API data (e.g. trailing spaces in domain entries).
+    Returns False for any None / empty input.
+    """
+    if not email or not approved_domains:
+        return False
+    parts = str(email).strip().rsplit("@", 1)
+    if len(parts) != 2:
+        return False
+    user_domain = parts[1].strip().lower()
+    normalised = [d.strip().lower() for d in approved_domains if isinstance(d, str)]
+    return user_domain in normalised
+
+
 HELPERS = {
     "hours_since": _hours_since,
     "days_since": _days_since,
     "has": _has,
+    "email_domain_valid": _email_domain_valid,
     "len": len,
     "str": str,
     "int": int,

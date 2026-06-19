@@ -213,6 +213,11 @@ class ApiCallNode(NodeHandler):
                             value = transform_fn(value)
                 updates[dst_path] = value
 
+            # Clear any stale error from a previous api_call so that this
+            # node's on_success edge is taken correctly (not the on_error path
+            # left over from an earlier timeout/error in the same conversation).
+            updates["_last_api_error"] = ""
+
             return {
                 "current_node": cfg["id"],
                 "collected": {**state.collected, **updates},
@@ -317,12 +322,20 @@ def _render_value(value: Any, ctx: dict[str, Any], extra_vars: dict[str, Any] | 
     Uses `render_native` for string values so that collected fields containing
     lists or dicts (e.g. `incomplete_ids`) are passed as proper JSON types in
     request bodies rather than being coerced to their string representation.
+
+    Dict keys containing Jinja expressions (``{{ ... }}``) are also rendered,
+    enabling dynamic filter keys such as:
+        ``"{{ 'email' if ctx.collected.update_type == 'EMAIL' else 'phone' }}": "value"``
     """
     if isinstance(value, str):
         from app.engine.template import render_native
         return render_native(value, ctx, extra_vars=extra_vars)
     if isinstance(value, dict):
-        return {k: _render_value(v, ctx, extra_vars=extra_vars) for k, v in value.items()}
+        return {
+            render(k, ctx, extra_vars=extra_vars) if isinstance(k, str) and '{{' in k else k:
+            _render_value(v, ctx, extra_vars=extra_vars)
+            for k, v in value.items()
+        }
     if isinstance(value, list):
         return [_render_value(v, ctx, extra_vars=extra_vars) for v in value]
     return value
@@ -497,6 +510,54 @@ _ENROLLMENT_STATUS_MAP: dict[str, int] = {
     "Completed":    2,
     "completed":    2,
 }
+
+
+# ---------------------------------------------------------------------------
+# Enrollment count transforms — used by multiple_account flow to summarise
+# the courses list into simple integer counts for display.
+# ---------------------------------------------------------------------------
+
+def _count_courses_total(courses: Any) -> int:
+    """Return the total number of In-Progress + Completed courses.
+
+    Only counts courses with status 1 (In-Progress) or 2 (Completed) so that
+    total always equals in_progress + completed, regardless of what the API returns.
+    """
+    if not isinstance(courses, list):
+        return 0
+    count = 0
+    for course in courses:
+        if isinstance(course, dict):
+            status = _enrollment_status_to_int(course.get("status"))
+            if status in (1, 2):
+                count += 1
+    return count
+
+
+def _count_courses_inprogress(courses: Any) -> int:
+    """Count courses with status == 1 (In-Progress) from the enrollment list."""
+    if not isinstance(courses, list):
+        return 0
+    count = 0
+    for course in courses:
+        if isinstance(course, dict):
+            status = _enrollment_status_to_int(course.get("status"))
+            if status == 1:
+                count += 1
+    return count
+
+
+def _count_courses_completed(courses: Any) -> int:
+    """Count courses with status == 2 (Completed) from the enrollment list."""
+    if not isinstance(courses, list):
+        return 0
+    count = 0
+    for course in courses:
+        if isinstance(course, dict):
+            status = _enrollment_status_to_int(course.get("status"))
+            if status == 2:
+                count += 1
+    return count
 
 
 def _enrollment_status_to_int(status: Any) -> int:
@@ -746,18 +807,23 @@ def _build_user_eligibility_ctx(response: Any) -> dict:
     Input: the full $.response object from GET /api/user/private/v1/read/{user_id}
            (after the karmayogi adapter unwraps the top-level 'result' envelope).
 
-    Output dict keys match the criteriaKey names used in accessControl.userGroups:
+    Output dict keys match the criteriaKey names used in accessControl.userGroups,
+    plus additional keys used by the secureSettings metadata eligibility check:
 
-      criteriaKey      source field
-      -----------      ------------
-      group          → profileDetails.professionalDetails[].group          (list)
-      designation    → profileDetails.professionalDetails[].designation    (list)
-      rootOrgId      → rootOrgId                                           (scalar)
-      user / userid  → identifier (also userId)                            (scalar)
-      department     → profileDetails.employmentDetails.departmentName     (scalar)
-      cadre          → profileDetails.cadreDetails.cadreName               (scalar)
-      service        → profileDetails.cadreDetails.civilServiceName        (scalar)
-      batch          → profileDetails.cadreDetails.cadreBatch              (scalar, str)
+      criteriaKey          source field
+      -----------          ------------
+      group              → profileDetails.professionalDetails[].group          (list)
+      designation        → profileDetails.professionalDetails[].designation    (list)
+      rootOrgId          → rootOrgId                                           (scalar)
+      user / userid      → identifier (also userId)                            (scalar)
+      department         → profileDetails.employmentDetails.departmentName     (scalar)
+      cadre              → profileDetails.cadreDetails.cadreName               (scalar)
+      service            → profileDetails.cadreDetails.civilServiceName        (scalar)
+      batch              → profileDetails.cadreDetails.cadreBatch              (scalar, str)
+
+    Additional keys used by check_secure_settings_eligibility (moderated courses):
+      profile_status     → profileDetails.profileStatus                        (scalar, e.g. "VERIFIED")
+      ministry_or_state_id → profileDetails.ministryOrStateId                 (scalar, org/ministry ID)
     """
     if not isinstance(response, dict):
         return {}
@@ -787,16 +853,22 @@ def _build_user_eligibility_ctx(response: Any) -> dict:
     )
 
     return {
-        "group":       groups,
-        "designation": designations,
-        "rootOrgId":   response.get("rootOrgId"),
-        "user":        user_id,
+        "group":               groups,
+        "designation":         designations,
+        "rootOrgId":           response.get("rootOrgId"),
+        "user":                user_id,
         # 'userid' is an alias — stored separately so direct key lookup works
-        "userid":      user_id,
-        "department":  employment.get("departmentName"),
-        "cadre":       cadre.get("cadreName"),
-        "service":     cadre.get("civilServiceName"),
-        "batch":       batch_str,
+        "userid":              user_id,
+        "department":          employment.get("departmentName"),
+        "cadre":               cadre.get("cadreName"),
+        "service":             cadre.get("civilServiceName"),
+        "batch":               batch_str,
+        # Additional fields for moderated course secureSettings check
+        # profile_status: compared against secureSettings.isVerifiedKarmayogi
+        "profile_status":      profile_details.get("profileStatus"),
+        # ministry_or_state_id: the org/ministry ID — same value as rootOrgId on the
+        # Karmayogi platform; stored separately to match against secureSettings.organisation
+        "ministry_or_state_id": profile_details.get("ministryOrStateId") or response.get("rootOrgId"),
     }
 
 
@@ -866,6 +938,72 @@ def _check_user_eligibility(user_groups: Any, user_eligibility_ctx: Any) -> bool
     return False  # No group matched → not eligible
 
 
+def _check_secure_settings_eligibility(secure_settings: Any, user_eligibility_ctx: Any) -> bool:
+    """Return True if the user satisfies the moderated course secureSettings metadata criteria.
+
+    Called with:
+      secure_settings      – content[0].secureSettings from composite search response
+      user_eligibility_ctx – collected.user_eligibility_ctx (dict built by
+                             _build_user_eligibility_ctx from the User Read API response)
+
+    secureSettings structure (from composite search):
+      {
+        "isVerifiedKarmayogi": "Yes" | "No",  # if "Yes" → user profileStatus must be "VERIFIED"
+        "organisation": ["<rootOrgId>", ...],  # list of eligible org IDs
+        "version": 1
+      }
+
+    Logic
+    -----
+    - secure_settings is None / empty / not a dict  → not a moderated course  → True
+    - organisation list present and non-empty:
+        user's rootOrgId OR ministryOrStateId must appear in the list
+    - isVerifiedKarmayogi == "Yes":
+        user's profileDetails.profileStatus must equal "VERIFIED" (case-insensitive)
+    - ALL applicable checks must pass (AND logic across criteria)
+    """
+    if not secure_settings or not isinstance(secure_settings, dict):
+        return True  # No secureSettings → not a moderated course → eligible
+
+    ctx: dict = user_eligibility_ctx if isinstance(user_eligibility_ctx, dict) else {}
+    all_passed = True
+
+    # --- Organisation / Ministry check -------------------------------------------
+    # secureSettings.organisation is a list of rootOrgId strings that are eligible.
+    # The user matches if their rootOrgId OR ministryOrStateId appears in the list.
+    eligible_orgs: list = secure_settings.get("organisation") or []
+    if eligible_orgs:
+        user_root_org   = ctx.get("rootOrgId")
+        user_ministry   = ctx.get("ministry_or_state_id")
+        org_matched = (
+            (user_root_org  is not None and user_root_org  in eligible_orgs)
+            or
+            (user_ministry  is not None and user_ministry  in eligible_orgs)
+        )
+        if not org_matched:
+            log.debug(
+                "[check_secure_settings_eligibility] org check failed: "
+                "user rootOrgId=%r ministryOrStateId=%r not in %r",
+                user_root_org, user_ministry, eligible_orgs,
+            )
+            all_passed = False
+
+    # --- Verified Karmayogi check ------------------------------------------------
+    # If isVerifiedKarmayogi == "Yes", only users with profileStatus == "VERIFIED" can access.
+    is_verified_required = str(secure_settings.get("isVerifiedKarmayogi") or "").strip().lower()
+    if is_verified_required == "yes":
+        user_profile_status = str(ctx.get("profile_status") or "").strip().upper()
+        if user_profile_status != "VERIFIED":
+            log.debug(
+                "[check_secure_settings_eligibility] verified karmayogi check failed: "
+                "user profileStatus=%r (required VERIFIED)",
+                ctx.get("profile_status"),
+            )
+            all_passed = False
+
+    return all_passed
+
+
 # Registry of named transforms usable in YAML response_mapping `transform:` field.
 _TRANSFORMS: dict[str, Any] = {
     "extract_incomplete_ids":      _extract_incomplete_ids,
@@ -879,6 +1017,9 @@ _TRANSFORMS: dict[str, Any] = {
     "detect_scorm":                _detect_scorm,
     "unix_ms_to_iso":              _unix_ms_to_iso,
     "enrollment_status_to_int":    _enrollment_status_to_int,
+    "count_courses_total":         _count_courses_total,
+    "count_courses_inprogress":    _count_courses_inprogress,
+    "count_courses_completed":     _count_courses_completed,
     "extract_child_course_ids":    _extract_child_course_ids,
     # Weekly Clap — Insights API week date-range labels
     "week_label_w1": _week_label_w1,
@@ -892,8 +1033,12 @@ _TRANSFORMS: dict[str, Any] = {
     # Access control — two-step: build ctx from user profile, then check eligibility
     # Step 1: applied in _karmayogi_user.yaml on $.response  → collected.user_eligibility_ctx
     "build_user_eligibility_ctx": _build_user_eligibility_ctx,  # (response) → dict
-    # Step 2: applied in access settings nodes (requires transform_ctx_key: collected.user_eligibility_ctx)
+    # Step 2a: applied in access settings nodes (requires transform_ctx_key: collected.user_eligibility_ctx)
     "check_user_eligibility": _check_user_eligibility,  # (userGroups, user_eligibility_ctx) → bool
+    # Step 2b: applied on composite search secureSettings for moderated courses
+    # (requires transform_ctx_key: collected.user_eligibility_ctx)
+    # Checks organisation list + isVerifiedKarmayogi flag against user profile
+    "check_secure_settings_eligibility": _check_secure_settings_eligibility,  # (secureSettings, user_eligibility_ctx) → bool
 }
 
 

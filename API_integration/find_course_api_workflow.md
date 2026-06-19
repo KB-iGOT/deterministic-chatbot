@@ -13,17 +13,20 @@ PATH A — Marketplace / External Course
 
 PATH B — Course / Program
   STEP 1 → GET  /api/user/private/v1/read/{user_id}
-               ↓ Fetch user profile (rootOrgId, org channel) for MDO lookup context
+               ↓ Fetch user profile (rootOrgId, org channel, profileStatus) for
+                 MDO lookup context and eligibility evaluation
                ↓
   STEP 2 → POST /api/composite/v4/search
                ↓ Search all statuses (Live/Review/Draft/Retired)
+               ↓ Also extracts content[0].secureSettings for moderated course detection
                ↓
-           0 results           → retry loop (no ticket)
-           status = Retired    → inform user, close
-           status ≠ Live       → inform under review, close
-           1 or more results   → ↓
+           0 results                 → retry loop (no ticket)
+           status = Retired          → inform user, close
+           status ≠ Live             → inform under review, close
+           secureSettings present    → MODERATED COURSE PATH (Steps 3M below)
+           1 or more results         →
 
-  STEP 3 → GET  /api/accessSettings/read/{course_id}   (karmayogi — same portal base URL)
+  STEP 3 → GET  /api/accessSettings/read/{course_id}   (regular course path)
                ↓ Compare course userGroups criteria against user profile
                ↓
            no config / error         → course is public → show link, close
@@ -33,10 +36,26 @@ PATH B — Course / Program
   STEP 4 → POST /api/private/user/v1/search             (MDO admin lookup)
                ↓ Find MDO_ADMIN for user's rootOrgId
                ↓
-           MDO found           → show MDO contact, close
+           MDO found             → show MDO contact, close
            MDO not found / error → data_lookup: yp_lookup (local Excel)
-                                    YP found  → show YP contact, close
-                                    YP not found → ask user to connect with MDO or YP, close
+                                   YP found  → show YP contact, close
+                                   YP not found → ask user to connect with MDO or YP, close
+
+  MODERATED COURSE PATH (secureSettings detected in Step 2)
+  STEP 3M-A → [No HTTP call] check_secure_settings_eligibility transform
+                  Already evaluated during composite_search response_mapping.
+                  Checks: secureSettings.organisation vs user rootOrgId / ministryOrStateId
+                          secureSettings.isVerifiedKarmayogi vs user profileDetails.profileStatus
+                  ↓
+              metadata_eligible = False → STEP 4 MDO/YP escalation (skip Step 3M-B)
+              metadata_eligible = True  → ↓
+
+  STEP 3M-B → GET /api/accessSettings/read/{course_id}
+                  Same endpoint as regular course Step 3.
+                  ↓
+              no config / 404           → user eligible (metadata was only gate) → show course link
+              access eligible = True    → show course link, close
+              access eligible = False   → STEP 4 MDO/YP escalation
 
 PATH C — Event
   STEP 1 → POST /api/composite/v4/search
@@ -58,7 +77,8 @@ PATH C — Event
 
 ## PATH B — Step 1: User Profile Read
 
-> Fetches user profile to provide `rootOrgId` and `org_channel` for downstream MDO/YP lookups.
+> Fetches user profile to provide `rootOrgId`, `org_channel`, `profileStatus`, and `ministryOrStateId`
+> for downstream MDO/YP lookups and moderated course eligibility evaluation.
 
 **Endpoint:** `GET /api/user/private/v1/read/{user_id}`
 **Integration:** `karmayogi`
@@ -77,13 +97,21 @@ curl -X GET \
 | `result.response.firstName` | `collected.first_name` | Display name |
 | `result.response.rootOrgId` | `collected.root_org_id` | MDO admin search filter |
 | `result.response.channel` | `collected.org_channel` | YP lookup key |
-| `result.response` (full object) | `collected.user_eligibility_ctx` | Built by `build_user_eligibility_ctx` transform — flat dict keyed by access-settings `criteriaKey` names (group, designation, rootOrgId, user, department, cadre, service, batch). Passed as `transform_ctx_key` to `check_user_eligibility` in Step 3. |
+| `result.response` (full object) | `collected.user_eligibility_ctx` | Built by `build_user_eligibility_ctx` transform — flat dict keyed by access-settings `criteriaKey` names (group, designation, rootOrgId, user, department, cadre, service, batch) **plus** `profile_status` and `ministry_or_state_id` used for moderated course checks. |
+
+#### `user_eligibility_ctx` — Additional fields for moderated courses
+
+| key in ctx | Source field | Used by |
+|---|---|---|
+| `profile_status` | `profileDetails.profileStatus` | `check_secure_settings_eligibility` — compared against `isVerifiedKarmayogi` |
+| `ministry_or_state_id` | `profileDetails.ministryOrStateId` (fallback: `rootOrgId`) | `check_secure_settings_eligibility` — compared against `secureSettings.organisation` list |
 
 ---
 
 ## PATH B — Step 2: Composite Content Search (Course)
 
-> Keyword search across all course/program statuses.
+> Keyword search across all course/program statuses. Also extracts `secureSettings` to detect
+> moderated courses and computes metadata eligibility in a single response-mapping pass.
 
 **Endpoint:** `POST /api/composite/v4/search`
 **Integration:** `karmayogi`
@@ -114,6 +142,35 @@ curl -X POST \
 | `result.content[0].name` | `collected.course_name_found` | Display to user |
 | `result.content[0].status` | `collected.course_status` | Branch: Live / Retired / other |
 | `result.content[0].identifier` | `collected.course_id` | Passed to access settings API |
+| `result.content[0].secureSettings` | `collected.course_secure_settings` | Raw secureSettings dict; non-null = moderated course |
+| `result.content[0].secureSettings` | `collected.metadata_eligible` | `check_secure_settings_eligibility` transform result (True/False) |
+
+### secureSettings Structure (Moderated Course)
+
+```json
+{
+  "isVerifiedKarmayogi": "Yes" | "No",
+  "organisation": ["<rootOrgId-1>", "<rootOrgId-2>"],
+  "version": 1
+}
+```
+
+| Field | Logic |
+|---|---|
+| `organisation` | List of eligible org IDs. User's `rootOrgId` or `profileDetails.ministryOrStateId` must appear in this list. |
+| `isVerifiedKarmayogi` | If `"Yes"`, user's `profileDetails.profileStatus` must equal `"VERIFIED"`. If `"No"`, no verification check applied. |
+
+### Transform: `check_secure_settings_eligibility`
+
+Applied in the `composite_search` response_mapping (Gate 1 of moderated course eligibility).
+Called with `(secureSettings, user_eligibility_ctx)`:
+
+- `secureSettings` is `None` / not a dict → not moderated → `True` (skip moderated path)
+- `organisation` list non-empty: user's `rootOrgId` OR `ministry_or_state_id` must be in the list
+- `isVerifiedKarmayogi == "Yes"`: user's `profile_status` must equal `"VERIFIED"`
+- All applicable checks must pass (AND logic)
+
+Returns `True` (eligible) or `False` (not eligible).
 
 ### Decision After Step 2
 
@@ -122,12 +179,64 @@ curl -X POST \
 | `count == 0` or `content[0].name == None` | Course not found → ask user to retry |
 | `content[0].status == 'Retired'` | Course retired — inform user, close |
 | `content[0].status != 'Live'` | Course under review — inform user, close |
-| `count > 1` and `status == 'Live'` | Multiple results — access check on top result |
-| `count == 1` and `status == 'Live'` | Single result — proceed to access settings |
+| `secureSettings != None` | **Moderated course** → go to Gate 1 eligibility check |
+| `count > 1` and `status == 'Live'` (non-moderated) | Multiple results — access check on top result |
+| `count == 1` and `status == 'Live'` (non-moderated) | Single result — proceed to access settings |
 
 ---
 
-## PATH B — Step 3: Access Settings Read (Course)
+## PATH B — Step 3M: Moderated Course Eligibility (Dual-Gate)
+
+> Applies only when `result.content[0].secureSettings` is non-null.
+> Two independent gates must both pass. Evaluation order: Gate 1 (metadata) → Gate 2 (Access Settings).
+
+### Gate 1 — Metadata Eligibility (secureSettings, no HTTP call)
+
+Evaluated inside the `composite_search` response_mapping via `check_secure_settings_eligibility` transform.
+No separate API call. Result stored as `collected.metadata_eligible`.
+
+| Check | Source (course) | Source (user ctx) | Pass condition |
+|---|---|---|---|
+| Organisation | `secureSettings.organisation` (list of rootOrgIds) | `user_eligibility_ctx.rootOrgId` or `user_eligibility_ctx.ministry_or_state_id` | User's org ID appears in the list |
+| Verified Karmayogi | `secureSettings.isVerifiedKarmayogi` | `user_eligibility_ctx.profile_status` | If `"Yes"`, user's `profileStatus` must be `"VERIFIED"` |
+
+**Gate 1 outcome:**
+- `metadata_eligible = False` → skip Gate 2, go directly to MDO/YP escalation
+- `metadata_eligible = True` → proceed to Gate 2
+
+### Gate 2 — Access Settings API (Step 3M-B)
+
+**Endpoint:** `GET /api/accessSettings/read/{course_id}`
+**Integration:** `karmayogi`
+
+Same endpoint and `check_user_eligibility` transform as the regular course Step 3.
+Result stored as `collected.moderated_access_eligible` (separate key, does not overwrite regular path).
+
+| Condition | Outcome |
+|---|---|
+| API returns 404 / error | No access config — metadata was the only gate; user is eligible → show moderated course link |
+| `moderated_access_eligible == True` | Both gates passed → show moderated course link |
+| `moderated_access_eligible == False` | Second gate failed → MDO/YP escalation |
+
+### Messaging — SOP §12 (Eligible)
+
+> "Upon checking, we found that you are eligible for the requested moderated course."
+> Course Name + Hyperlink
+> "Kindly use the above link to access and enroll in the course."
+
+### Messaging — SOP §13 (Not Eligible)
+
+Same MDO/YP escalation as the regular course ineligibility path:
+
+> "Upon checking, we found that the course access criteria does not match your current profile attributes.
+> We request you to connect with the concerned MDO/YP for further assistance."
+
+Then fetches MDO admin via `POST /api/private/user/v1/search` (same as regular Step 4).
+Fallback to YP/AM lookup if MDO not found.
+
+---
+
+## PATH B — Step 3: Access Settings Read (Regular Course)
 
 > Checks whether the course has access restrictions. Compares course `userGroups` criteria against the user's profile to determine eligibility.
 

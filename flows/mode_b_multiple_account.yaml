@@ -1,0 +1,621 @@
+# =============================================================================
+# MODE B — DETERMINISTIC + LLM TICKET TAIL
+# =============================================================================
+# Flow: Multiple Accounts — Email ID / Mobile Number Update (UC-10)
+#
+# SOP: Multiple Accounts — Email / Mobile Number Update
+#
+# Triggered when a user:
+#   (a) Tries to update their Email ID or Mobile Number
+#   (b) Receives an error during the update
+#   (c) Attempts to update using an already-registered identifier
+#
+# High-level branching:
+#   STEP 1  → Collect identifier (email or mobile) from user
+#
+#   STEP 2  → [Email only] GET /api/user/v1/email/approvedDomains
+#               domain NOT valid → fetch MDO leader → share contact → close
+#               domain valid     → proceed to Step 3
+#
+#   STEP 3  → POST /api/private/user/v1/search  (check if identifier already registered)
+#               NOT registered  → guide user through self-service OTP path
+#                   │              (View Profile → Other Details → Edit → OTP)
+#                   └── OTP not received → fetch MDO / YP contact → close
+#               ALREADY registered → fetch conflict account details → decision tree
+#
+#   STEP 4  → [Conflict path] POST /api/course/private/v4/user/enrollment/list/{conflict_user_id}
+#               Case A — User says NO   → close politely
+#               Case B — User wants merge → inform not possible → close
+#               Case C — User confirms YES →
+#                   Fetch current account enrollments
+#                   Show impact summary + email confirmation
+#                   Final YES  → raise Zoho support ticket
+#                   Final NO   → restart from STEP 1
+#
+# ⚠️  OTP generation / verification is NOT performed by the support workflow.
+#      The user must complete OTP steps through their own profile page.
+#
+# APIs used:
+#   GET  /api/user/v1/email/approvedDomains
+#   GET  /api/user/private/v1/read/{user_id}
+#   POST /api/private/user/v1/search           (registration check + MDO_LEADER lookup)
+#   POST /api/course/private/v4/user/enrollment/list/{user_id}   (enrollment counts)
+# =============================================================================
+
+flow_id: MULTIPLE_ACCOUNT
+flow_type: deterministic_with_llm_fallback
+version: 2
+
+metadata:
+  category:         account
+  menu_label:       "👥 Email / Mobile already registered"
+  menu_group:       "Account & Login"
+  menu_order:       3
+  classification:   Service Request
+  default_portal:   Learner Portal
+  default_priority: P3
+  default_severity: Sev 3
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "email already registered"
+    - "mobile already registered"
+    - "email id already exists"
+    - "mobile number already exists"
+    - "unable to update email"
+    - "error updating mobile"
+    - "update email error"
+    - "update mobile error"
+    - "duplicate account email"
+    - "another account with same email"
+    - "email conflict"
+    - "mobile conflict"
+    - "multiple account issue"
+
+entry_node: ask_identifier_type
+
+imports:
+  - _terminal
+  - _yp_lookup
+  - fragment: _zoho_ticket
+    with:
+      cf_category:     account
+      cf_sub_category: multiple_account_email_mobile_conflict
+      cf_flow_id:      MULTIPLE_ACCOUNT
+
+nodes:
+
+  # ===========================================================================
+  # STEP 1 — Collect the identifier type the user wants to update
+  # ===========================================================================
+  - id: ask_identifier_type
+    type: message
+    prompt:
+      text: |
+        I can help you with updating your Email ID or Mobile Number.
+
+        Are you trying to update your **Email ID** or **Mobile Number**?
+    quick_replies:
+      - { id: EMAIL,  label: "📧 Email ID" }
+      - { id: MOBILE, label: "📱 Mobile Number" }
+    disable_input: true
+    on_reply:
+      save_to: collected.update_type
+      EMAIL:  collect_new_email
+      MOBILE: collect_new_mobile
+
+  # ---------------------------------------------------------------------------
+  # Collect email
+  # ---------------------------------------------------------------------------
+  - id: collect_new_email
+    type: collect
+    prompt:
+      text: "Please share the **Email ID** you are trying to update to:"
+    field:
+      name: collected.new_identifier
+      type: email
+      validation:
+        pattern:   "^[\\w.+\\-]+@[\\w\\-]+\\.[a-z]{2,}(\\.[a-z]{2,})?$"
+        error_msg: "That doesn't look like a valid email address. Please try again."
+    next: validate_email_domain
+
+  # ---------------------------------------------------------------------------
+  # Collect mobile
+  # ---------------------------------------------------------------------------
+  - id: collect_new_mobile
+    type: collect
+    prompt:
+      text: "Please share the **Mobile Number** you are trying to update to:"
+    field:
+      name: collected.new_identifier
+      type: text
+      validation:
+        pattern:   "^[6-9][0-9]{9}$"
+        error_msg: "Please enter a valid 10-digit Indian mobile number (without country code)."
+    next: check_registration
+
+  # ===========================================================================
+  # STEP 2 — Email domain validation (email path only)
+  # ===========================================================================
+  - id: validate_email_domain
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/v1/email/approvedDomains"
+    response_mapping:
+      - { from: "$.domains", to: collected.approved_domains }
+    on_success: branch_domain_check
+    on_error:
+      # Cannot verify domain — treat as valid and continue
+      any: check_registration
+    timeout_ms: 5000
+
+  - id: branch_domain_check
+    type: branch
+    rules:
+      # If the approved_domains list is empty / null, treat domain as invalid
+      - { if: "ctx.collected.approved_domains == None or len(ctx.collected.approved_domains) == 0",
+          then: domain_invalid_fetch_user_profile }
+      # Domain check: the engine evaluates email_domain_in_list(new_identifier, approved_domains)
+      # Pragmatic: we check list presence; if not matched, invalid path is reached by engine
+      - { if: "email_domain_valid(ctx.collected.new_identifier, ctx.collected.approved_domains) == False",
+          then: domain_invalid_fetch_user_profile }
+    default: check_registration
+
+  # ---------------------------------------------------------------------------
+  # Domain NOT valid — fetch user profile to get rootOrgId → MDO lookup
+  # ---------------------------------------------------------------------------
+  - id: domain_invalid_fetch_user_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.response.rootOrgId", to: collected.root_org_id }
+      - { from: "$.response.channel",   to: collected.org_channel }
+    on_success: domain_invalid_lookup_mdo
+    on_error:
+      any: domain_invalid_no_mdo
+    timeout_ms: 5000
+
+  - id: domain_invalid_lookup_mdo
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            channel: "{{ ctx.collected.org_channel }}"
+            organisations.roles: ["MDO_LEADER"]
+            status: 1
+          limit: 1
+    response_mapping:
+      - { from: "$.response.count",                                                    to: collected.mdo_leader_count }
+      - { from: "$.response.content[0].profileDetails.personalDetails.firstname",      to: collected.mdo_leader_name }
+      - { from: "$.response.content[0].profileDetails.personalDetails.surname",        to: collected.mdo_leader_surname }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail",   to: collected.mdo_leader_email }
+      - { from: "$.response.content[0].firstName",                                     to: collected.mdo_leader_name_fallback }
+      - { from: "$.response.content[0].email",                                         to: collected.mdo_leader_email_fallback }
+    on_success: branch_domain_invalid_mdo_found
+    on_error:
+      any: lookup_yp_contact
+    timeout_ms: 5000
+
+  - id: branch_domain_invalid_mdo_found
+    type: branch
+    rules:
+      - { if: "ctx.collected.mdo_leader_count != None and ctx.collected.mdo_leader_count > 0",
+          then: domain_invalid_show_mdo }
+    default: lookup_yp_contact
+
+  - id: domain_invalid_show_mdo
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        The Email ID **{{ ctx.collected.new_identifier }}** cannot be updated because its domain is **not whitelisted** on the iGOT Karmayogi platform.
+
+        Kindly contact your **MDO Leader** for further clarification and to request domain addition:
+
+        👤 **{{ ctx.collected.mdo_leader_name or ctx.collected.mdo_leader_name_fallback }} {{ ctx.collected.mdo_leader_surname or '' }}**
+        📧 {{ ctx.collected.mdo_leader_email or ctx.collected.mdo_leader_email_fallback }}
+
+  # ---------------------------------------------------------------------------
+  # _yp_lookup fragment nodes — this fragment provides lookup_yp_contact node
+  # After lookup: yp_found_result (success) or yp_not_found (error)
+  # ---------------------------------------------------------------------------
+
+  - id: yp_found_result
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        The Email ID **{{ ctx.collected.new_identifier }}** cannot be updated because its domain is **not whitelisted** on the iGOT Karmayogi platform.
+
+        Please contact your assigned **Young Professional (YP)** for further assistance:
+
+        👤 **{{ ctx.collected.yp_name }}**
+        📧 {{ ctx.collected.yp_email }}
+        📞 {{ ctx.collected.yp_mobile }}
+
+  - id: yp_not_found
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        The Email ID **{{ ctx.collected.new_identifier }}** cannot be updated because its domain is **not whitelisted** on the iGOT Karmayogi platform.
+
+        Kindly contact the **Young Professional (YP)** assigned to your state/department/organisation for further clarification.
+
+  - id: domain_invalid_no_mdo
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        The Email ID **{{ ctx.collected.new_identifier }}** cannot be updated because its domain is **not whitelisted** on the iGOT Karmayogi platform.
+
+        Kindly contact your **MDO Leader** or the **Young Professional (YP)** assigned to your organisation for further assistance.
+
+  # ===========================================================================
+  # STEP 3 — Check if the identifier is already registered
+  # ===========================================================================
+  - id: check_registration
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            # For email: filter key is "email"; for mobile: "mobile"
+            "{{ 'email' if ctx.collected.update_type == 'EMAIL' else 'mobile' }}": "{{ ctx.collected.new_identifier }}"
+    response_mapping:
+      - { from: "$.response.count",                                               to: collected.conflict_count }
+      - { from: "$.response.content[0].id",                                      to: collected.conflict_user_id }
+      - { from: "$.response.content[0].channel",                                 to: collected.conflict_org_name }
+      - { from: "$.response.content[0].rootOrgId",                               to: collected.conflict_root_org_id }
+    on_success: branch_registration
+    on_error:
+      any: registration_check_error
+    timeout_ms: 15000
+
+  - id: registration_check_error
+    type: message
+    prompt:
+      text: |
+        ⚠️ We were unable to verify whether the **{{ ctx.collected.new_identifier }}** is already registered due to a temporary issue.
+
+        Please try again in a moment.
+    quick_replies:
+      - { id: retry, label: "🔄 Try again" }
+    disable_input: true
+    on_reply:
+      retry: check_registration
+
+  - id: branch_registration
+    type: branch
+    rules:
+      - { if: "ctx.collected.conflict_count != None and ctx.collected.conflict_count > 0",
+          then: fetch_conflict_enrollments }
+    default: guide_self_service_update
+
+  # ===========================================================================
+  # 3.1 — Identifier NOT registered → guide self-service update
+  # ===========================================================================
+  - id: guide_self_service_update
+    type: message
+    prompt:
+      text: |
+        The **{{ ctx.collected.new_identifier }}** is not registered to any other account on the platform.
+
+        Kindly follow the below steps to update your {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }}:
+
+        1. Go to **View Profile**
+        2. Open **Other Details**
+        3. Click the ✏️ **Edit (Pen) Icon** next to the {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} field
+        4. Enter the new {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }}
+        5. Click **Request OTP**
+        6. Enter the OTP received
+        7. Verify the OTP
+        8. Click **Save Changes**
+
+        Your {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} will be updated successfully after OTP verification.
+    quick_replies:
+      - { id: done,    label: "✅ Updated successfully" }
+      - { id: no_otp,  label: "❌ Did not receive OTP" }
+      - { id: error,   label: "⚠️ Still getting an error" }
+    disable_input: true
+    on_reply:
+      done:   self_served_end
+      no_otp: otp_not_received_fetch_profile
+      error:  guide_self_service_update
+
+  # ---------------------------------------------------------------------------
+  # 3.1.1 — User did not receive the OTP
+  # Fetch user profile → MDO leader → YP fallback
+  # ---------------------------------------------------------------------------
+  - id: otp_not_received_fetch_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.response.rootOrgId", to: collected.root_org_id }
+      - { from: "$.response.channel",   to: collected.org_channel }
+    on_success: otp_not_received_lookup_mdo
+    on_error:
+      any: otp_no_mdo_fallback
+    timeout_ms: 5000
+
+  - id: otp_not_received_lookup_mdo
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            channel: "{{ ctx.collected.org_channel }}"
+            organisations.roles: ["MDO_LEADER"]
+            status: 1
+          limit: 1
+    response_mapping:
+      - { from: "$.response.count",                                                    to: collected.mdo_leader_count }
+      - { from: "$.response.content[0].profileDetails.personalDetails.firstname",      to: collected.mdo_leader_name }
+      - { from: "$.response.content[0].profileDetails.personalDetails.surname",        to: collected.mdo_leader_surname }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail",   to: collected.mdo_leader_email }
+      - { from: "$.response.content[0].firstName",                                     to: collected.mdo_leader_name_fallback }
+      - { from: "$.response.content[0].email",                                         to: collected.mdo_leader_email_fallback }
+    on_success: branch_otp_mdo_found
+    on_error:
+      any: otp_yp_data_lookup
+    timeout_ms: 5000
+
+  - id: branch_otp_mdo_found
+    type: branch
+    rules:
+      - { if: "ctx.collected.mdo_leader_count != None and ctx.collected.mdo_leader_count > 0",
+          then: otp_show_mdo_contact }
+    default: otp_yp_data_lookup
+
+  - id: otp_show_mdo_contact
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        If you are not receiving the OTP, kindly connect with the below contact for further assistance:
+
+        👤 **{{ ctx.collected.mdo_leader_name or ctx.collected.mdo_leader_name_fallback }} {{ ctx.collected.mdo_leader_surname or '' }}**
+        📧 {{ ctx.collected.mdo_leader_email or ctx.collected.mdo_leader_email_fallback }}
+
+  # Inline YP lookup scoped to the OTP-not-received sub-flow.
+  # Named otp_yp_data_lookup to avoid collision with lookup_yp_contact
+  # injected by the _yp_lookup fragment (which is used by domain_invalid path).
+  - id: otp_yp_data_lookup
+    type: data_lookup
+    service: yp_lookup
+    key: "{{ ctx.collected.org_channel }}"
+    response_mapping:
+      - { from: name,     to: collected.yp_name }
+      - { from: email,    to: collected.yp_email }
+      - { from: mobile,   to: collected.yp_mobile }
+      - { from: cc_email, to: collected.yp_cc_email }
+    on_success: otp_show_yp_contact
+    on_error:
+      any: otp_no_mdo_fallback
+
+  - id: otp_show_yp_contact
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        If you are not receiving the OTP, kindly connect with the below contact for further assistance:
+
+        👤 **{{ ctx.collected.yp_name }}**
+        📧 {{ ctx.collected.yp_email }}
+        📞 {{ ctx.collected.yp_mobile }}
+
+  - id: otp_no_mdo_fallback
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        If you are not receiving the OTP, kindly contact the **Young Professional (YP)** or **MDO Leader** assigned to your organisation for further assistance.
+
+  # ===========================================================================
+  # STEP 4 — Identifier ALREADY registered → fetch conflict account enrollments
+  # ===========================================================================
+  - id: fetch_conflict_enrollments
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/course/private/v4/user/enrollment/list/{{ ctx.collected.conflict_user_id }}"
+      body:
+        request:
+          retiredCoursesEnabled: true
+    response_mapping:
+      - { from: "$.userCourseEnrolmentInfo.coursesInProgress", to: collected.conflict_inprogress }
+      - { from: "$.userCourseEnrolmentInfo.certificatesIssued", to: collected.conflict_completed }
+    on_success: show_conflict_details
+    on_error:
+      # If enrollment fetch fails (e.g. cross-user permission), show what we know
+      any: show_conflict_details
+    timeout_ms: 8000
+
+  # ---------------------------------------------------------------------------
+  # Step 4.2 — Inform user about the conflict account details
+  # ---------------------------------------------------------------------------
+  - id: show_conflict_details
+    type: message
+    prompt:
+      text: |
+        ⚠️ The {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} **{{ ctx.collected.new_identifier }}** is already registered with another account.
+
+        **Details of the registered account:**
+        🏢 **Organisation:** {{ ctx.collected.conflict_org_name or "Unknown" }}
+        📚 **Total Enrollments:** {{ (ctx.collected.conflict_inprogress or 0) + (ctx.collected.conflict_completed or 0) }}
+        🔄 **In Progress:** {{ ctx.collected.conflict_inprogress or "—" }}
+        ✅ **Completed:** {{ ctx.collected.conflict_completed or "—" }}
+
+        Would you like to proceed?
+    quick_replies:
+      - { id: no,       label: "❌ No, don't proceed" }
+      - { id: merge,    label: "🔗 Can we merge both accounts?" }
+      - { id: proceed,  label: "⚠️ Yes, I want to proceed" }
+    disable_input: true
+    on_reply:
+      save_to: collected.conflict_decision
+      no:      case_a_no_proceed
+      merge:   case_b_merge_not_possible
+      proceed: case_c_fetch_profile
+
+  # ---------------------------------------------------------------------------
+  # Case A — User says NO
+  # ---------------------------------------------------------------------------
+  - id: case_a_no_proceed
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        Understood. No changes have been made to your account.
+
+        Please feel free to reach out if you require any further assistance.
+
+  # ---------------------------------------------------------------------------
+  # Case B — User requests account merge (not supported)
+  # ---------------------------------------------------------------------------
+  - id: case_b_merge_not_possible
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        Unfortunately, **account merging is currently not supported** on the iGOT Karmayogi platform.
+
+        Please feel free to reach out if you require any further assistance.
+
+  # ---------------------------------------------------------------------------
+  # Case C — User confirms they want to proceed
+  # Step 4.3a — Fetch current user's profile to get their current email / phone
+  # ---------------------------------------------------------------------------
+  - id: case_c_fetch_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.response.profileDetails.personalDetails.primaryEmail", to: collected.current_email }
+      - { from: "$.response.profileDetails.personalDetails.mobile",       to: collected.current_phone }
+    on_success: case_c_fetch_current_enrollments
+    on_error:
+      any: case_c_fetch_current_enrollments
+    timeout_ms: 5000
+
+  # Step 4.3b — Fetch current account enrollments to show impact
+  - id: case_c_fetch_current_enrollments
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/course/private/v4/user/enrollment/list/{{ ctx.user_id_hash }}"
+      body:
+        request:
+          retiredCoursesEnabled: true
+    response_mapping:
+      - { from: "$.userCourseEnrolmentInfo.coursesInProgress", to: collected.current_inprogress }
+      - { from: "$.userCourseEnrolmentInfo.certificatesIssued", to: collected.current_completed }
+    on_success: case_c_show_impact
+    on_error:
+      any: case_c_show_impact
+    timeout_ms: 8000
+
+  # Step 4.3 — Inform user about impact of proceeding
+  - id: case_c_show_impact
+    type: message
+    prompt:
+      text: |
+        ⚠️ Please review the following before confirming:
+
+        **Your current account enrollments:**
+        📚 **Total Enrollments:** {{ (ctx.collected.current_inprogress or 0) + (ctx.collected.current_completed or 0) }}
+        🔄 **In Progress:** {{ ctx.collected.current_inprogress or "—" }}
+        ✅ **Completed:** {{ ctx.collected.current_completed or "—" }}
+
+        **Impact if you proceed:**
+        - The account currently associated with **{{ ctx.collected.new_identifier }}** will be **deactivated**.
+        - Access to that account will **no longer be available**.
+
+        Kindly review the below details and confirm whether they are correct:
+
+        📧 **Current {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }}:** {{ (ctx.collected.current_email or "(your registered identifier)") if ctx.collected.update_type == 'EMAIL' else (ctx.collected.current_phone or "(your registered identifier)") }}
+        📧 **{{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} to be Updated:** {{ ctx.collected.new_identifier }}
+
+        Please confirm whether you would like us to proceed with this change.
+    quick_replies:
+      - { id: yes, label: "✅ Yes, proceed" }
+      - { id: no,  label: "❌ No, start over" }
+    disable_input: true
+    on_reply:
+      save_to: collected.final_confirmation
+      yes: raise_support_ticket
+      no:  restart_flow
+
+  # Step 4.6 — User says NO at final confirmation → restart from Step 1
+  - id: restart_flow
+    type: message
+    prompt:
+      text: |
+        No problem. Let's start over.
+
+        Please share the **Email ID or Mobile Number** you wish to update.
+    next: ask_identifier_type
+
+  # ===========================================================================
+  # Step 4.5 — Raise Zoho support ticket (after final YES confirmation)
+  # ===========================================================================
+  - id: raise_support_ticket
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user has confirmed they want to update their {{ ctx.collected.update_type or 'Email/Mobile' }} to an identifier already registered to another account.
+        Generate a Zoho support ticket for L2 manual processing.
+
+        Subject: "Multiple Account Conflict — {{ ctx.collected.update_type }} Update Request"
+        Description: Include:
+          - User ID (ctx.user_id_hash)
+          - Current identifier (ctx.collected.current_identifier if available)
+          - New identifier to be updated (ctx.collected.new_identifier)
+          - Conflict account organisation (ctx.collected.conflict_org_name)
+          - Conflict account enrollment stats: in_progress={{ ctx.collected.conflict_inprogress }}, completed={{ ctx.collected.conflict_completed }}, total={{ (ctx.collected.conflict_inprogress or 0) + (ctx.collected.conflict_completed or 0) }}
+          - Current account enrollment stats: in_progress={{ ctx.collected.current_inprogress }}, completed={{ ctx.collected.current_completed }}, total={{ (ctx.collected.current_inprogress or 0) + (ctx.collected.current_completed or 0) }}
+          - User confirmation: YES (user explicitly confirmed proceeding with deactivation)
+          - Validation status: identifier verified as already registered via /api/private/user/v1/search
+          - Action required: Deactivate the conflicting account and update the user's identifier.
+        This is a P3 ticket requiring manual L2 account deactivation. Do NOT auto-apply any changes.
+      priority_override: P3
+    on_complete: confirm_ticket
+
+  # ===========================================================================
+  # Terminal nodes
+  # ===========================================================================
+  # Note: confirm_ticket → ticket_confirmation → ticket_raised_end are injected
+  # by the _zoho_ticket fragment and provide the standard ticket confirmation
+  # message and outcome. No additional end node is needed here.
+  - id: self_served_end
+    type: end
+    outcome: self_served

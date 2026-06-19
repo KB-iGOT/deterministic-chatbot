@@ -88,7 +88,7 @@ nodes:
     type: branch
     rules:
       - { if: "ctx.collected.sub_scenario == 'C1'", then: c1_pick_course }
-      - { if: "ctx.collected.sub_scenario == 'C3'", then: c3_pick_course }
+      - { if: "ctx.collected.sub_scenario == 'C3'", then: c3_fetch_user_profile }
     default: resolution_generic
 
   # ===========================================================================
@@ -287,39 +287,7 @@ nodes:
   # C3: Incorrect Name on Certificate (UC-02)
   # ===========================================================================
 
-  - id: c3_pick_course
-    type: collect
-    prompt:
-      text:  "Which course has the incorrect name on the certificate?"
-      voice: "Which course are you referring to?"
-    field:
-      name: collected.c3_course_id
-      type: select
-    dynamic_options:
-      source: api
-      integration: karmayogi
-      request:
-        method: POST
-        url: "/api/course/private/v4/user/enrollment/list/{{ ctx.user_id_hash }}"
-        body:
-          request:
-            retiredCoursesEnabled: true
-            status: ["In-Progress", "Completed"]
-      response_mapping:
-        list_path:       "$.courses"
-        id_field:        courseId
-        label_field:     courseName
-        sub_label_field: completionPercentage
-        extra_fields:
-          - { from: courseName,           to: collected.c3_course_name }
-          - { from: completionPercentage, to: collected.c3_completion_pct }
-          - { from: issuedCertificates,   to: collected.c3_issued_certificates }
-      search:     { enabled: true, placeholder: "Search your enrolled courses..." }
-      pagination: { enabled: true, page_size: 10 }
-      cache_ttl:  300
-    next: c3_fetch_user_profile
-
-  # Step 1a — Profile Read: fetch current name
+  # Step 1.1 — Fetch User Details
   - id: c3_fetch_user_profile
     type: api_call
     integration: karmayogi
@@ -331,179 +299,105 @@ nodes:
       - { from: "$.response.lastName",                                  to: collected.c3_last_name }
       - { from: "$.response.profileDetails.personalDetails.firstname",  to: collected.c3_pd_firstname }
       - { from: "$.response.profileDetails.personalDetails.surname",    to: collected.c3_pd_surname }
-    on_success: c3_branch_course_status
+    on_success: c3_confirm_name
     on_error:
       any: resolution_generic
     timeout_ms: 5000
 
-  # c3_check_enrollment removed — all fields already captured by c3_pick_course extra_fields
-
-  - id: c3_branch_course_status
-    type: branch
-    rules:
-      - { if: "ctx.collected.c3_course_name == None or ctx.collected.c3_course_name == ''",
-          then: c3_course_not_found }
-      - { if: "ctx.collected.c3_completion_pct != 100",
-          then: c3_enrollment_not_completed }
-    default: c3_inform_current_name
-
-  - id: c3_course_not_found
-    type: message
-    prompt:
-      text: "I couldn't find that course in your enrolment. Please pick again."
-    next: c3_pick_course
-
-  - id: c3_enrollment_not_completed
-    type: message
-    prompt:
-      text: "Your course **{{ ctx.collected.c3_course_name }}** shows {{ ctx.collected.c3_completion_pct }}% completion. Certificates are issued only after 100% completion. Please complete the course first."
-    next: satisfied
-
-  # Show current name and ask if user wants to change it
-  - id: c3_inform_current_name
+  # Step 1.2 - Confirm User's Name
+  - id: c3_confirm_name
     type: message
     prompt:
       text: |
-        Your certificate for **{{ ctx.collected.c3_course_name }}** was generated with the name:
+        Upon checking, we found that your current profile name is:
 
-        **{{ ctx.collected.c3_first_name or ctx.collected.c3_pd_firstname }} {{ ctx.collected.c3_last_name or ctx.collected.c3_pd_surname }}**
+        Name: **{{ ctx.collected.c3_first_name or ctx.collected.c3_pd_firstname }} {{ ctx.collected.c3_last_name or ctx.collected.c3_pd_surname }}**
 
-        Would you like to update this name?
+        Kindly confirm whether the above name is correct.
     quick_replies:
-      - { id: yes, label: "✅ Yes, update the name" }
-      - { id: no,  label: "❌ No, this is correct" }
+      - { id: yes, label: "✅ Yes, it is correct" }
+      - { id: no,  label: "❌ No, it is incorrect" }
     disable_input: true
     on_reply:
-      save_to: collected.c3_confirm_change
-      next: c3_branch_confirm_change
+      save_to: collected.c3_is_name_correct
+      next: c3_branch_is_name_correct
 
-  - id: c3_branch_confirm_change
+  - id: c3_branch_is_name_correct
     type: branch
     rules:
-      - { if: "ctx.collected.c3_confirm_change == 'yes'", then: c3_collect_new_firstname }
-    default: c3_no_change_end
+      - { if: "ctx.collected.c3_is_name_correct == 'yes'", then: c3_name_correct }
+    default: c3_name_incorrect
 
-  # Collect new first name then last name
-  - id: c3_collect_new_firstname
-    type: collect
-    prompt:
-      text: "Please enter your correct **First Name** (as per government ID):"
-    field:
-      name: collected.c3_new_first_name
-      type: text
-    next: c3_collect_new_lastname
-
-  - id: c3_collect_new_lastname
-    type: collect
-    prompt:
-      text: "Please enter your correct **Last Name** (as per government ID):"
-    field:
-      name: collected.c3_new_last_name
-      type: text
-    next: c3_confirm_name_change
-
-  - id: c3_confirm_name_change
-    type: message
-    prompt:
-      text: |
-        Change certificate name from:
-        **{{ ctx.collected.c3_first_name or ctx.collected.c3_pd_firstname }} {{ ctx.collected.c3_last_name or ctx.collected.c3_pd_surname }}**
-
-        to:
-        **{{ ctx.collected.c3_new_first_name }} {{ ctx.collected.c3_new_last_name }}**
-
-        Shall we proceed?
-    quick_replies:
-      - { id: yes, label: "✅ Yes, confirm change" }
-      - { id: no,  label: "❌ Re-enter name" }
-    disable_input: true
-    on_reply:
-      save_to: collected.c3_name_confirmed
-      next: c3_branch_name_confirmed
-
-  - id: c3_branch_name_confirmed
-    type: branch
-    rules:
-      - { if: "ctx.collected.c3_name_confirmed == 'yes'", then: c3_update_profile }
-    default: c3_collect_new_firstname
-
-  # Step 2 — Update name via Karmayogi profile update API
-  - id: c3_update_profile
-    type: api_call
-    integration: karmayogi
-    request:
-      method: PATCH
-      url: "/api/user/private/v1/update"
-      body:
-        request:
-          userId:    "{{ ctx.user_id_hash }}"
-          firstName: "{{ ctx.collected.c3_new_first_name }}"
-          lastName:  "{{ ctx.collected.c3_new_last_name }}"
-          profileDetails:
-            personalDetails:
-              firstname: "{{ ctx.collected.c3_new_first_name }}"
-              surname:   "{{ ctx.collected.c3_new_last_name }}"
-    response_mapping: []
-    on_success: c3_name_updated_confirmation
-    on_error:
-      any: c3_update_failed
-    timeout_ms: 8000
-
-  - id: c3_name_updated_confirmation
-    type: message
-    prompt:
-      text: |
-        ✅ Your name has been updated to **{{ ctx.collected.c3_new_first_name }} {{ ctx.collected.c3_new_last_name }}**.
-
-        **To re-download the certificate with the corrected name:**
-
-        1. Go to **Profile** → **My Learning** → **Courses / Events**
-        2. Navigate to the **Completed** tab
-        3. Find and open **{{ ctx.collected.c3_course_name }}**
-        4. Click **View Certificate** → **Download**
-        5. Choose the required format
-    next: c3_resolution_check
-
-  - id: c3_update_failed
-    type: message
-    prompt:
-      text: "⚠️ We couldn't update your name due to a technical issue. I'll raise a support ticket so our team can assist you."
-    next: c3_auto_ticket
-
-  - id: c3_resolution_check
-    type: message
-    prompt:
-      text: "Was the name correction successful and is your certificate now available?"
-    quick_replies:
-      - { id: yes, label: "✅ Yes, resolved" }
-      - { id: no,  label: "❌ No, still facing issue" }
-    disable_input: true
-    on_reply:
-      yes: satisfied
-      no:  c3_auto_ticket
-
-  - id: c3_auto_ticket
-    type: transfer_llm
-    auto_raise: true
-    llm_context:
-      include_messages:  true
-      include_collected: true
-      include_flow_meta: true
-    llm_directives:
-      objective: |
-        The user has a name correction issue on their course certificate.
-        Generate a Zoho support ticket.
-        Subject: "Incorrect Name on Certificate — <course_name>"
-        Description: include course name, current name on certificate (c3_first_name + c3_last_name),
-        requested new name (c3_new_first_name + c3_new_last_name), whether API update was attempted.
-      priority_override: P4
-    on_complete: confirm_ticket
-
-  - id: c3_no_change_end
+  # Step 2 - Name is Correct
+  - id: c3_name_correct
     type: end
     outcome: self_served
     prompt:
-      text: "No problem! Your certificate name remains unchanged. Have a great day! 🙏"
+      text: |
+        As your profile name is correct, kindly re-download the certificate by following the steps below.
+
+        **Steps to Re-download the Certificate:**
+        1. Log in to your iGOT Karmayogi account.
+        2. Go to **Profile**.
+        3. Open the **Certificates** section.
+        4. Locate the required certificate.
+        5. Click on **Download Certificate**.
+        6. Verify whether the downloaded certificate displays the correct name.
+
+  # Step 3 - Name is Incorrect
+  - id: c3_name_incorrect
+    type: message
+    prompt:
+      text: |
+        The name displayed on the certificate is generated based on the name available in your profile.
+
+        Would you like to update your profile name?
+    quick_replies:
+      - { id: yes, label: "✅ Yes" }
+      - { id: no,  label: "❌ No" }
+    disable_input: true
+    on_reply:
+      save_to: collected.c3_wants_to_update
+      next: c3_branch_update_profile
+
+  - id: c3_branch_update_profile
+    type: branch
+    rules:
+      - { if: "ctx.collected.c3_wants_to_update == 'yes'", then: c3_guide_update_profile }
+    default: c3_no_update
+
+  # Step 3.2 - Confirms Yes
+  - id: c3_guide_update_profile
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        Please follow the below steps to update your profile name:
+
+        1. Log in to your iGOT Karmayogi account.
+        2. Go to **Profile**.
+        3. Click on **Edit Profile**.
+        4. Update the **Name** field with the correct details.
+        5. Save the changes.
+
+        Once the profile has been updated successfully:
+        1. Go to **Profile**.
+        2. Open the **Certificates** section.
+        3. Locate the required certificate.
+        4. Click on **Download Certificate**.
+        5. Verify whether the updated name is reflected in the downloaded certificate.
+
+  # Step 3.3 - Confirms No
+  - id: c3_no_update
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        No problem.
+
+        If you decide to update your profile name in the future, you can follow the above steps and re-download the certificate.
+
+        Please feel free to reach out if you require any further assistance.
 
   # ===========================================================================
   # Generic resolution (catch-all for unexpected paths)

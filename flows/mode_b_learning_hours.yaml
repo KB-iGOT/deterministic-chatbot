@@ -1,0 +1,780 @@
+# =============================================================================
+# MODE B — DETERMINISTIC
+# =============================================================================
+# Flow: Learning Progress Not Reflecting in External Systems
+#
+# SOP: "Learning Progress / Learning Not Reflecting in eHRMS, Shiksha Path, Sparrow"
+#
+# Covers:
+#   1. eHRMS (implemented)
+#      1.1  Call User Feed API → check eHRMS ID + External System Name
+#      1.2  Both available       → redirect to eHRMS support → collect Name/Email/eHRMS ID → close
+#      1.3  eHRMS ID missing     → MDO lookup → share MDO contact + 24h note → close
+#      1.4  Ext. System Name missing → MDO lookup → share MDO contact + 24h note → close
+#
+#   2. Shiksha Path  (implemented — static guidance, no API)
+#   3. SPARROW/APAR  (implemented)
+#
+# APIs used:
+#   GET  /api/user/private/v1/read/{user_id}   (eHRMS ID at profileDetails.additionalProperties.externalSystemId)
+#   POST /api/private/user/v1/search            (via _mdo_admin_lookup — MDO admin details)
+#
+# Field note: 'externalSystem' is the assumed key for External System Name under
+#   additionalProperties. Verify against live API before deploying.
+# =============================================================================
+
+flow_id: LEARNING_HOURS
+flow_type: deterministic
+version: 2
+
+metadata:
+  category:         platform
+  classification:   Service Request
+  default_priority: P3
+  default_severity: Sev 3
+  menu_label:       "🔄 Learning  Hours not Reflecting"
+  menu_group:       "Learning"
+  menu_order:       12
+  enabled:          true
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "learning not reflecting in eHRMS"
+    - "progress not showing in eHRMS"
+    - "eHRMS not updated"
+    - "learning not reflecting in Shiksha Path"
+    - "SPARROW learning records not updated"
+    - "APAR training not updated"
+    - "external portal not reflecting training"
+    - "eHRMS ID missing"
+    - "external system name not updated"
+    - "learning progress not syncing"
+    - "iGOT learning not showing in external portal"
+    - "learning hours not reflecting"
+
+entry_node: ask_external_system_issue
+
+imports:
+  - _terminal
+  - fragment: _mdo_admin_lookup
+  - fragment: _yp_lookup
+
+nodes:
+
+  # ===========================================================================
+  # 1. Entry — identify which external system
+  # ===========================================================================
+  - id: ask_external_system_issue
+    type: message
+    prompt:
+      text: "Which external portal is not reflecting your learning progress?"
+    quick_replies:
+      - { id: EHRMS,        label: "🏛️ eHRMS" }
+      - { id: SHIKSHA_PATH, label: "📖 Shiksha Path" }
+      - { id: SPARROW,      label: "📋 SPARROW / APAR" }
+    disable_input: true
+    on_reply:
+      save_to: collected.external_system
+      EHRMS:        fetch_user_feed
+      SHIKSHA_PATH: shiksha_path_info
+      SPARROW:      sp_fetch_user_profile
+
+  - id: coming_soon
+    type: end
+    outcome: ended
+    prompt:
+      text: "Support for this portal is coming soon. Please check back later."
+
+  # ===========================================================================
+  # SECTION 2 — Shiksha Path (static guidance, no API)
+  # ===========================================================================
+  - id: shiksha_path_info
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        **Shiksha Path** is managed by the **Directorate of Training, CBDT**.
+
+        Karmayogi Bharat and DoPT do not manage or operate the Shiksha Path portal.
+
+        Kindly coordinate directly with the **Directorate of Training / CBDT team** for any Shiksha Path-related issues.
+
+        **Support Contact**
+        **Email ID:** aed4.training@incometax.gov.in
+
+        We hope your concern gets resolved soon. Thank you for reaching out! 🙏
+
+  # ===========================================================================
+  # SECTION 1 — eHRMS
+  # ===========================================================================
+
+  # Step 1.1 — User Feed API: fetch eHRMS ID, External System Name, rootOrgId
+  # API: GET /api/user/private/v1/read/{user_id}
+  # Confirmed path (from live UAT inspection):
+  #   eHRMS ID      → $.response.profileDetails.additionalProperties.externalSystemId
+  #   Ext Sys Name  → $.response.profileDetails.additionalProperties.externalSystem
+  #   (search API does not return profileDetails — read API required)
+  # ===========================================================================
+  # Step 1.1 — Search API: fetch eHRMS ID and External System Name
+  # API: POST /api/private/user/v1/search
+  # eHRMS fields are available directly in the search response
+  # ===========================================================================
+  - id: fetch_user_feed
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            userId: "{{ ctx.user_id_hash }}"
+          limit: 1
+    response_mapping:
+      - { from: "$.response.count",                                                                    to: collected.ehrms_user_count }
+      - { from: "$.response.content[0].rootOrgId",                                                    to: collected.root_org_id }
+      - { from: "$.response.content[0].channel",                                                      to: collected.org_channel }
+      - { from: "$.response.content[0].profileDetails.additionalProperties.externalSystemId",         to: collected.ehrms_id }
+      - { from: "$.response.content[0].profileDetails.additionalProperties.externalSystem",           to: collected.ext_system_name }
+    on_success: branch_ehrms_user_found
+    on_error:
+      any: fetch_user_feed_error
+    timeout_ms: 8000
+
+  # Guard: if user not found in search or rootOrgId missing, show error
+  - id: branch_ehrms_user_found
+    type: branch
+    rules:
+      - if: >
+          ctx.collected.ehrms_user_count == 0 or
+          ctx.collected.root_org_id == None or
+          ctx.collected.root_org_id == ""
+        then: fetch_user_feed_error
+    default: branch_on_ehrms_fields
+
+  - id: fetch_user_feed_error
+    type: message
+    prompt:
+      text: |
+        We were unable to retrieve your profile details at this moment.
+        Please try again after some time. If the issue persists, write to **support@igotkarmayogi.gov.in**.
+    next: satisfied
+
+  # ===========================================================================
+  # Step 1.2 / 1.3 / 1.4 — Branch on eHRMS field availability
+  # ===========================================================================
+  - id: branch_on_ehrms_fields
+    type: branch
+    rules:
+      # Step 1.2 — Both eHRMS ID and External System Name present
+      - if: >
+          ctx.collected.ehrms_id != None and ctx.collected.ehrms_id != "" and
+          ctx.collected.ext_system_name != None and ctx.collected.ext_system_name != ""
+        then: ehrms_both_available
+      # Step 1.4 — eHRMS ID present but External System Name missing
+      - if: "ctx.collected.ehrms_id != None and ctx.collected.ehrms_id != ''"
+        then: lookup_mdo_admin
+    # Step 1.3 — Default: eHRMS ID missing
+    default: lookup_mdo_admin
+
+  # ===========================================================================
+  # Step 1.2 — Both fields available → redirect to eHRMS support
+  # ===========================================================================
+  - id: ehrms_both_available
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that your **eHRMS ID** and **External System Name** are available in the system.
+
+        As the required mapping details are already present from our end, we request you to connect with the **respective eHRMS support team** for further investigation.
+
+        Kindly share your details with the eHRMS support team when reaching out:
+    next: collect_user_details_for_ehrms
+
+  - id: collect_user_details_for_ehrms
+    type: collect
+    prompts:
+      - { field: collected.user_full_name, text: "Please enter your **full name**:",  type: text }
+      - { field: collected.user_email,     text: "Please enter your **email ID**:",   type: email }
+      - { field: collected.user_ehrms_id,  text: "Please enter your **eHRMS ID**:",   type: text }
+    next: ehrms_support_referral_end
+
+  - id: ehrms_support_referral_end
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        Thank you for sharing the details.
+
+        Please contact the **eHRMS support team** with the above information for further assistance. They will investigate why the learning progress is not reflecting in your eHRMS account.
+
+  # ===========================================================================
+  # MDO lookup — injected from _shared/_mdo_admin_lookup.yaml
+  # lookup_mdo_admin → on_success: mdo_found_result | on_error: mdo_api_error
+  # ===========================================================================
+
+  # mdo_found_result — required target for _mdo_admin_lookup on_success
+  # Routes by external_system: SPARROW MDO path first, then eHRMS paths
+  - id: mdo_found_result
+    type: branch
+    rules:
+      # SPARROW: MDO found → show no APAR assignment + MDO details (Step 4.3)
+      - if: >
+          ctx.collected.external_system == 'SPARROW' and
+          ctx.collected.mdo_admin_count > 0
+        then: sp_no_apar_mdo_found
+      # SPARROW: no MDO → try YP/AM lookup (Step 4.4)
+      - if: "ctx.collected.external_system == 'SPARROW'"
+        then: lookup_yp_contact
+      # eHRMS: MDO found + eHRMS ID missing → Step 1.3
+      - if: >
+          ctx.collected.mdo_admin_count > 0 and
+          (ctx.collected.ehrms_id == None or ctx.collected.ehrms_id == "")
+        then: mdo_info_for_ehrms_id_missing
+      # eHRMS: MDO found + External System Name missing → Step 1.4
+      - if: "ctx.collected.mdo_admin_count > 0"
+        then: mdo_info_for_ext_system_missing
+    default: mdo_not_found_fallback
+
+  # Step 1.3 — eHRMS ID not available
+  - id: mdo_info_for_ehrms_id_missing
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that your **eHRMS ID** is not available in the system.
+
+        The eHRMS ID cannot be updated by individual users. It must be updated by the **MDO of your organization**.
+
+        Kindly connect with the below MDO and request them to update your eHRMS ID:
+
+        **Organization:** {{ ctx.collected.org_channel | default('—') }}
+        **MDO Name:** {{ ctx.collected.mdo_admin_name | default('—') }}
+        **MDO Email ID:** {{ ctx.collected.mdo_admin_email | default('—') }}
+
+        > ℹ️ Once the eHRMS ID is updated, it may take up to **24 hours** for the learning progress to reflect in eHRMS.
+    next: satisfied
+
+  # Step 1.4 — eHRMS ID present but External System Name missing
+  - id: mdo_info_for_ext_system_missing
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that your **eHRMS ID** is available; however, the **External System Name** is not updated in the system.
+
+        The External System Name is mandatory for synchronization with eHRMS and can only be updated by the **MDO / Administrator**.
+
+        Kindly connect with the below MDO and request them to update the External System Name:
+
+        **Organization:** {{ ctx.collected.org_channel | default('—') }}
+        **MDO Name:** {{ ctx.collected.mdo_admin_name | default('—') }}
+        **MDO Email ID:** {{ ctx.collected.mdo_admin_email | default('—') }}
+
+        > ℹ️ Once the External System Name is updated, it may take up to **24 hours** for the learning progress to reflect in eHRMS.
+    next: satisfied
+
+  # No MDO found in the organization (generic — used by eHRMS and SPARROW paths)
+  - id: mdo_not_found_fallback
+    type: message
+    prompt:
+      text: |
+        Upon checking, we could not find an MDO Admin mapped to your organization (**{{ ctx.collected.org_channel | default('your organization') }}**).
+
+        Please write to **support@igotkarmayogi.gov.in** with your name, organization name, and a description of your issue. Our support team will assist you further.
+    next: satisfied
+
+  # MDO API error
+  - id: mdo_api_error
+    type: message
+    prompt:
+      text: |
+        We encountered an issue while fetching MDO details for your organization.
+        Please try again later or write to **support@igotkarmayogi.gov.in** for assistance.
+    next: satisfied
+
+  # YP/AM lookup nodes — required by _yp_lookup fragment
+  - id: yp_found_result
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that no APAR/CAP is currently assigned to your profile.
+
+        Kindly connect with the below YP/AM for further assistance:
+
+        **Name:** {{ ctx.collected.yp_name | default('—') }}
+        **Email ID:** {{ ctx.collected.yp_email | default('—') }}
+        {%- if ctx.collected.yp_mobile %}
+        **Contact Number:** {{ ctx.collected.yp_mobile }}
+        {%- endif %}
+
+        > ℹ️ Only APAR-assigned and successfully completed courses/assessments are reflected in SPARROW/APAR.
+    next: satisfied
+
+  - id: yp_not_found
+    type: message
+    prompt:
+      text: |
+        Upon checking, we could not find the YP/AM contact for your organization.
+
+        Please write to **support@igotkarmayogi.gov.in** with your name, organization name, and SPARROW-related issue for further assistance.
+    next: satisfied
+
+  # ===========================================================================
+  # SECTION 3 — SPARROW / APAR
+  # ===========================================================================
+
+  # Step 3.1 — Fetch user profile via User Search API
+  # Gets: fetched_user_id, rootOrgId, org_channel, org_name, profile_status, email
+  # ===========================================================================
+  - id: sp_fetch_user_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            userId: "{{ ctx.user_id_hash }}"
+          limit: 1
+    response_mapping:
+      - { from: "$.response.count",                                          to: collected.sp_user_count }
+      - { from: "$.response.content[0].id",                                  to: collected.fetched_user_id }
+      - { from: "$.response.content[0].rootOrgId",                           to: collected.root_org_id }
+      - { from: "$.response.content[0].channel",                             to: collected.org_channel }
+      - { from: "$.response.content[0].organisations[0].orgName",            to: collected.org_name }
+      - { from: "$.response.content[0].profileDetails.profileStatus",        to: collected.profile_status }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail", to: collected.user_primary_email }
+    on_success: sp_branch_on_user
+    on_error:
+      any: sp_api_error
+    timeout_ms: 8000
+
+  # Step 3.2 — Branch: user found + org mapping check
+  - id: sp_branch_on_user
+    type: branch
+    rules:
+      - { if: "ctx.collected.sp_user_count == 0 or ctx.collected.fetched_user_id == None",
+          then: sp_user_not_found }
+      - if: >
+          (ctx.collected.org_channel or '').lower() in ('igot',)
+          or (ctx.collected.org_name or '').lower() in ('igot',)
+          or 'prarambh' in (ctx.collected.org_name or '').lower()
+        then: sp_wrong_org_message
+    default: sp_fetch_full_profile
+
+  - id: sp_user_not_found
+    type: message
+    prompt:
+      text: |
+        We were unable to find your profile details in the system. Please contact **support@igotkarmayogi.gov.in** for further assistance.
+    next: satisfied
+
+  # Step 3.3 — User mapped to iGOT / Karmayogi Prarambh Trainee
+  - id: sp_wrong_org_message
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that your profile is currently mapped to **{{ ctx.collected.org_name | default('iGOT / Karmayogi Prarambh Trainee') }}**.
+
+        APAR courses and training plans are assigned only after a user is mapped to their correct department/organization. As your profile is currently not mapped to the correct organization, no APAR courses or training plans can be assigned at this stage.
+
+        Kindly raise a **Transfer Request** to move your profile to the appropriate organization.
+    next: sp_guide_transfer_request
+
+  - id: sp_guide_transfer_request
+    type: resolution
+    prompt:
+      text: "Follow the steps below to raise a Transfer Request:"
+    steps:
+      - "Log in to **iGOT Karmayogi**."
+      - "Click on the **Profile Icon** (top-right corner) → **View Profile**."
+      - "Select **Make Transfer Request**."
+      - "Select the **Correct Organization Name** from the dropdown."
+      - "Choose your **Group** and **Designation** (if applicable)."
+      - "Ensure all details are accurate and click **Submit**."
+      - "Your request will be sent to the concerned MDO Admin for approval."
+      - "Once approved, please recheck the APAR / Training Plan section on your profile."
+    next: satisfied
+
+  # Step 3.4 — Fetch full profile (org, designation, group, AIS details, verified status)
+  # API: GET /api/user/private/v1/read/{userId}
+  - id: sp_fetch_full_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.collected.fetched_user_id }}"
+    response_mapping:
+      - { from: "$.response.channel",                                            to: collected.org_channel }
+      - { from: "$.response.organisations[0].orgName",                           to: collected.org_name }
+      - { from: "$.response.profileDetails.verifiedKarmayogi",                   to: collected.profile_verified }
+      - { from: "$.response.profileDetails.professionalDetails[0].designation",  to: collected.user_designation }
+      - { from: "$.response.profileDetails.professionalDetails[0].group",        to: collected.user_group }
+      - { from: "$.response.profileDetails.cadreDetails",                        to: collected.cadre_details }
+      - { from: "$.response.profileDetails.serviceDetails",                      to: collected.service_details }
+      - { from: "$.response.profileDetails.batch",                               to: collected.batch_details }
+      - { from: "$.response.profileDetails.centralDeputation",                   to: collected.central_deputation }
+    on_success: sp_branch_profile_status
+    on_error:
+      any: sp_api_error
+    timeout_ms: 8000
+
+  # Branch: verified profile → Step 4 | unverified → Step 6
+  - id: sp_branch_profile_status
+    type: branch
+    rules:
+      - if: >
+          (ctx.collected.profile_status or '').upper() == 'VERIFIED'
+          or str(ctx.collected.profile_verified).lower() == 'true'
+        then: sp_show_profile_details
+    default: sp_show_not_verified
+
+  # ===========================================================================
+  # Step 4 — Verified Profile Flow
+  # ===========================================================================
+
+  # Step 4.1 — Confirm profile details
+  - id: sp_show_profile_details
+    type: message
+    prompt:
+      text: |
+        As checked, your profile is currently verified with the following details:
+
+        - **Organization:** {{ ctx.collected.org_name | default(ctx.collected.org_channel) | default('—') }}
+        - **Designation:** {{ ctx.collected.user_designation | default('—') }}
+        - **Group:** {{ ctx.collected.user_group | default('—') }}
+
+        Kindly confirm whether these details are correct.
+    quick_replies:
+      - { id: YES, label: "✅ Yes, details are correct" }
+      - { id: NO,  label: "❌ No, details are incorrect" }
+    disable_input: true
+    on_reply:
+      YES: sp_fetch_assigned_courses
+      NO:  sp_ask_incorrect_detail
+
+  # Step 5.1 — Incorrect details: identify which one
+  - id: sp_ask_incorrect_detail
+    type: message
+    prompt:
+      text: "Kindly confirm which of the following details are incorrect:"
+    quick_replies:
+      - { id: ORG,   label: "🏢 Organization / Department" }
+      - { id: DESIG, label: "📋 Designation" }
+      - { id: GROUP, label: "👥 Group or other details" }
+    disable_input: true
+    on_reply:
+      ORG:   sp_guide_org_update
+      DESIG: sp_guide_designation_update
+      GROUP: sp_guide_profile_update
+
+  - id: sp_guide_org_update
+    type: resolution
+    prompt:
+      text: "To correct your organization mapping, please raise a **Transfer Request**:"
+    steps:
+      - "Log in to **iGOT Karmayogi** → **View Profile** → **Make Transfer Request**."
+      - "Select the correct organization, group, and designation."
+      - "Click **Submit** — the request goes to MDO Admin for approval."
+      - "Once approved, recheck the APAR/Training Plan section."
+    next: sp_profile_update_closure
+
+  - id: sp_guide_designation_update
+    type: resolution
+    prompt:
+      text: "Follow the steps below to update your **Designation**:"
+    steps:
+      - "Log in to **iGOT Karmayogi** → **View Profile**."
+      - "Navigate to **Primary Details** → click the ✏️ **Edit** icon."
+      - "Update the correct **Designation** and click **Send for Approval**."
+      - "Once the MDO Admin approves, recheck the APAR section."
+    next: sp_profile_update_closure
+
+  - id: sp_guide_profile_update
+    type: resolution
+    prompt:
+      text: "Follow the steps below to update your **Group / other profile details**:"
+    steps:
+      - "Log in to **iGOT Karmayogi** → **View Profile**."
+      - "Navigate to **Primary Details** → click the ✏️ **Edit** icon."
+      - "Update the correct **Group** and any other required details."
+      - "Click **Send for Approval** — the MDO Admin will review the request."
+      - "Once approved, recheck the APAR section."
+    next: sp_profile_update_closure
+
+  - id: sp_profile_update_closure
+    type: message
+    prompt:
+      text: |
+        Kindly update the required profile details and recheck the APAR courses/training plans after the updates are completed.
+
+        Thank you for reaching out! 🙏
+    next: satisfied
+
+  # Step 4.2a — Assigned Courses API: check if any courses are assigned to the user
+  - id: sp_fetch_assigned_courses
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/supportportal/admin/user/v2/assignedcourses/{{ ctx.collected.fetched_user_id }}"
+    response_mapping:
+      - { from: "$.result.content", to: collected.assigned_courses }
+    on_success: sp_branch_assigned_courses
+    on_error:
+      any: lookup_mdo_admin
+    timeout_ms: 8000
+
+  # Branch: courses assigned → proceed to APAR check; empty → MDO lookup (Step 4.3)
+  - id: sp_branch_assigned_courses
+    type: branch
+    rules:
+      - if: >
+          ctx.collected.assigned_courses != None and
+          len(ctx.collected.assigned_courses) > 0
+        then: sp_fetch_cbp_plan
+    default: lookup_mdo_admin
+
+  # Step 4.2b — Verify APAR/CAP assignment (CBP Plan API)
+  - id: sp_fetch_cbp_plan
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/supportportal/cbplan/v2/admin/user/list/{{ ctx.collected.fetched_user_id }}"
+      headers:
+        x-authenticated-user-orgid: igot
+    response_mapping:
+      - { from: "$.content", to: collected.all_courses }
+      - { from: "$.count",   to: collected.cbp_total_count }
+    on_success: sp_branch_apar_assigned
+    on_error:
+      any: lookup_mdo_admin
+    timeout_ms: 8000
+
+  # Step 4.3 / 4.5 — Branch on APAR/CAP assignment
+  - id: sp_branch_apar_assigned
+    type: branch
+    rules:
+      - { if: "ctx.collected.cbp_total_count != None and ctx.collected.cbp_total_count > 0",
+          then: sp_fetch_enrollment }
+    # Step 4.3 — No assignment → MDO lookup
+    default: lookup_mdo_admin
+
+  # Step 4.5 — APAR/CAP Assigned — check enrollment for course completion
+  - id: sp_fetch_enrollment
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/course/private/v4/user/enrollment/list/{{ ctx.collected.fetched_user_id }}"
+      body:
+        request:
+          retiredCoursesEnabled: true
+          status: ["Completed"]
+    response_mapping:
+      - { from: "$.courses", to: collected.sp_completed_courses }
+    on_success: sp_branch_cap_completion
+    on_error:
+      any: sp_branch_cap_completion
+    timeout_ms: 8000
+
+  # Branch: any APAR course completed with 100% → check time elapsed
+  # Otherwise → CAP not passed, guide reattempt (Step 4.5.1)
+  - id: sp_branch_cap_completion
+    type: branch
+    rules:
+      - if: >
+          len([1 for c in (ctx.collected.sp_completed_courses or [])
+               if (c.get('completionPercentage') or 0) == 100]) > 0
+        then: sp_ask_time_elapsed
+    default: sp_cap_guidance
+
+  # Step 4.5.1 — CAP assessment not passed
+  - id: sp_cap_guidance
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        Upon checking, we found that your APAR courses have been assigned; however, the **CAP assessment** has not yet been passed.
+
+        Kindly reattempt and successfully pass the **CAP assessment**. Reflection in SPARROW/APAR occurs only after successful completion of the required courses and assessment.
+
+        Thank you for reaching out! 🙏
+
+  # Step 4.5.2 / 4.5.3 — Completion found: ask if 24 hours have passed
+  - id: sp_ask_time_elapsed
+    type: message
+    prompt:
+      text: |
+        We can see that course completion data is reflecting in our system.
+
+        Has it been more than **24 hours** since you completed the course/assessment?
+    quick_replies:
+      - { id: NO,  label: "⏳ No, within 24 hours" }
+      - { id: YES, label: "⌛ Yes, more than 24 hours" }
+    disable_input: true
+    on_reply:
+      NO:  sp_data_reflecting
+      YES: sp_check_email_match
+
+  # Step 4.5.2 — Within 24 hours
+  - id: sp_data_reflecting
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        It may take up to **24 hours** for the completion data to reflect in SPARROW.
+
+        Kindly check again after 24 hours. Thank you for your patience! 🙏
+
+  # Step 4.5.3 — More than 24 hours: check email match
+  - id: sp_check_email_match
+    type: message
+    prompt:
+      text: |
+        Kindly confirm: is the **email ID registered on SPARROW** the same as your **iGOT email ID**?
+    quick_replies:
+      - { id: YES, label: "✅ Yes, same email ID" }
+      - { id: NO,  label: "❌ No, different email ID" }
+    disable_input: true
+    on_reply:
+      YES: sp_email_match_info
+      NO:  sp_email_no_match_info
+
+  # Step 4.5.3 — Email IDs match → SPARROW support
+  - id: sp_email_match_info
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        Since both email IDs are the same and the data is still not reflecting after 24 hours, kindly contact the **SPARROW support team** directly:
+
+        **SPARROW Support Email:** support-sparrow@gov.in
+
+        Please share your iGOT user ID and course details with them for further investigation. Thank you! 🙏
+
+  # Step 4.5.3 — Email IDs do not match → reference video
+  - id: sp_email_no_match_info
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        Since the email IDs are different, the iGOT training data may not be automatically linked to your SPARROW account.
+
+        Kindly refer to the video guide below for instructions on how to fetch iGOT training data into SPARROW APAR:
+
+        📹 **Reference Video:** [How to Fetch iGOT Training Data into SPARROW APAR_V8.mp4](https://tarento-my.sharepoint.com/personal/soniya_chugh_tarento_com/_layouts/15/stream.aspx?id=%2Fpersonal%2Fsoniya%5Fchugh%5Ftarento%5Fcom%2FDocuments%2FMicrosoft%20Teams%20Chat%20Files%2FHow%20to%20Fetch%20iGOT%20Training%20Data%20into%20SPARROW%20APAR%5FV8%201%2Emp4&referrer=StreamWebApp%2EWeb&referrerScenario=AddressBarCopied%2Eview%2E4cd905b0%2Da0b7%2D40cc%2Dbc5b%2D7818d1639509&ga=1)
+
+        Please follow the steps in the video to link your iGOT training records with your SPARROW account. Thank you! 🙏
+
+  # Step 4.3 — APAR/CAP not assigned + MDO found → show MDO details
+  - id: sp_no_apar_mdo_found
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that **no APAR/CAP is currently assigned** to your profile.
+
+        Training plans and APAR courses are assigned by the concerned authority. Kindly connect with the below MDO for further assistance:
+
+        **Organization:** {{ ctx.collected.org_channel | default('—') }}
+        **MDO Name:** {{ ctx.collected.mdo_admin_name | default('—') }}
+        **MDO Email ID:** {{ ctx.collected.mdo_admin_email | default('—') }}
+
+        > ℹ️ Only APAR-assigned and successfully completed courses/assessments are reflected in SPARROW/APAR.
+    next: satisfied
+
+  # ===========================================================================
+  # Step 6 — Profile Not Verified Flow
+  # ===========================================================================
+
+  - id: sp_show_not_verified
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that your profile is currently **not verified** on iGOT Karmayogi.
+
+        APAR training plans are assigned only after your profile is verified. Let me check a few more details to assist you further.
+    next: sp_ask_all_india_services
+
+  # Step 6.1 — All India Services eligibility check
+  - id: sp_ask_all_india_services
+    type: message
+    prompt:
+      text: |
+        Kindly confirm whether you belong to any of the **All India Services**:
+
+        - IAS
+        - IPS
+        - IFS
+    quick_replies:
+      - { id: YES, label: "🏛️ Yes, All India Services" }
+      - { id: NO,  label: "🏢 No, I don't" }
+    disable_input: true
+    on_reply:
+      YES: sp_check_ais_details
+      NO:  sp_guide_profile_verification
+
+  # Step 6.2 — Check cadre / service / batch / central deputation details
+  - id: sp_check_ais_details
+    type: branch
+    rules:
+      - if: >
+          ctx.collected.cadre_details == None or
+          ctx.collected.service_details == None or
+          ctx.collected.batch_details == None or
+          ctx.collected.central_deputation == None
+        then: sp_missing_service_details
+    default: lookup_mdo_admin
+
+  # Step 6.2 — Missing AIS details
+  - id: sp_missing_service_details
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        We found that some mandatory service-related details are either missing or incomplete in your profile:
+
+        - Cadre Details
+        - Service Details
+        - Batch Information
+        - Central Deputation Details
+
+        Kindly update the required details in your profile. Once updated successfully, the APAR plans may reflect in your account within approximately **2–3 hours**.
+
+        Thank you for reaching out! 🙏
+
+  # Step 6.3 — Not AIS: guide profile verification
+  - id: sp_guide_profile_verification
+    type: resolution
+    prompt:
+      text: |
+        As your profile is currently not verified, kindly complete the **profile verification process** by following the steps below:
+    steps:
+      - "Log in to **iGOT Karmayogi** → **View Profile**."
+      - "Navigate to **Primary Details** → click the ✏️ **Edit** icon."
+      - "Update the correct **Group**, **Designation**, and **Ministry / Department**."
+      - "Click **Send for Approval** to submit the changes."
+      - "The request will be sent to your **MDO Admin** for approval."
+      - "Your profile will be verified once the MDO Admin approves the request."
+    next: sp_guide_profile_verification_closure
+
+  - id: sp_guide_profile_verification_closure
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        Once the profile is successfully verified, the APAR courses and training plans may reflect in your account.
+
+        Kindly recheck the APAR section after the profile verification is completed. Thank you! 🙏
+
+  # Generic API error for SPARROW path
+  - id: sp_api_error
+    type: message
+    prompt:
+      text: |
+        We encountered a technical issue while fetching your profile details.
+        Please try again later or contact **support@igotkarmayogi.gov.in** for assistance.
+    next: satisfied

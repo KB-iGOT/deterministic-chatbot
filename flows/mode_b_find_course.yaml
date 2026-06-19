@@ -25,7 +25,7 @@
 #   [GAP-2] Multiple-results eligibility loop (SOP §10): only the top result is
 #           fully processed; user can retry with a refined name.
 #   [GAP-3] Course/event hyperlink URL pattern not confirmed by API team.
-#           Placeholder: https://portal.karmayogibharat.net/app/toc/{id}/overview
+#           Placeholder: https://portal.uat.karmayogibharat.net/app/toc/{id}/overview
 #   [GAP-4] RESOLVED: Access Settings API userGroups criteria are now compared against
 #           the user's profileDetails.professionalDetails via the check_user_eligibility
 #           transform (criteriaKey "group", "designation", etc. matched field-by-field).
@@ -172,6 +172,8 @@ nodes:
   # STEP 4.2 — Composite Content Search
   # POST /api/composite/v4/search
   # Searches all statuses so DRAFT/REVIEW/RETIRED results surface with correct status message.
+  # Also extracts secureSettings to detect moderated courses and evaluate metadata eligibility
+  # in a single pass (avoids a separate round-trip later).
   - id: composite_search
     type: api_call
     integration: karmayogi
@@ -188,10 +190,19 @@ nodes:
             createdOn: "desc"
           limit: 10
     response_mapping:
-      - { from: "$.count",                 to: collected.composite_count }
-      - { from: "$.content[0].name",       to: collected.course_name_found }
-      - { from: "$.content[0].status",     to: collected.course_status }
-      - { from: "$.content[0].identifier", to: collected.course_id }
+      - { from: "$.count",                    to: collected.composite_count }
+      - { from: "$.content[0].name",          to: collected.course_name_found }
+      - { from: "$.content[0].status",        to: collected.course_status }
+      - { from: "$.content[0].identifier",    to: collected.course_id }
+      # Moderated course: capture raw secureSettings for display/debug
+      - { from: "$.content[0].secureSettings", to: collected.course_secure_settings }
+      # Evaluate metadata eligibility immediately using the transform.
+      # Result (True/False) stored as collected.metadata_eligible.
+      # transform_ctx_key passes collected.user_eligibility_ctx built by _karmayogi_user.
+      - { from: "$.content[0].secureSettings",
+          to: collected.metadata_eligible,
+          transform: check_secure_settings_eligibility,
+          transform_ctx_key: collected.user_eligibility_ctx }
     on_success: branch_composite_results
     on_error:
       any: search_api_error
@@ -209,13 +220,98 @@ nodes:
       # STEP 9 — Course is DRAFT, REVIEW, or any other non-Live status
       - { if: "ctx.collected.course_status != 'Live'",
           then: show_course_unavailable }
-      # STEP 10 — Multiple results found (count > 1); still process top result for access
+      # STEP 11 — Moderated course detected (secureSettings present in search result)
+      #            Route to dual-gate eligibility sub-path before showing the link
+      - { if: "ctx.collected.course_secure_settings != None",
+          then: branch_moderated_meta }
+      # STEP 10 — Multiple non-moderated results; access check on top result
       - { if: "ctx.collected.composite_count > 1",
           then: fetch_access_settings_multi }
     default: fetch_access_settings
 
   # ===========================================================================
-  # STEP 6 / STEP 7 — Access Settings check for single Live result
+  # STEP 11 — Moderated course eligibility — GATE 1: Metadata (secureSettings)
+  # ===========================================================================
+  # metadata_eligible was already computed by composite_search using the
+  # check_secure_settings_eligibility transform on content[0].secureSettings.
+  # This branch simply routes on the pre-computed result.
+  - id: branch_moderated_meta
+    type: branch
+    rules:
+      # STEP 11.1.3 — Metadata eligibility failed → not eligible → escalate directly to MDO lookup
+      # (show_mdo_contact / yp_found_result already carry the full SOP §13 message)
+      - { if: "ctx.collected.metadata_eligible == False", then: lookup_mdo_admin }
+    default: fetch_access_settings_moderated
+
+  # ===========================================================================
+  # STEP 11.1.2 — Moderated course eligibility — GATE 2: Access Settings API
+  # GET /api/accessSettings/read/{course_id}
+  # Same endpoint as regular courses but uses a separate collected key so we
+  # do not overwrite access_control_eligible used by the regular path.
+  # ===========================================================================
+  - id: fetch_access_settings_moderated
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/accessSettings/read/{{ ctx.collected.course_id }}"
+      headers:
+        wid: "{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.accessControl.userGroups",
+          to: collected.moderated_access_eligible,
+          transform: check_user_eligibility,
+          transform_ctx_key: collected.user_eligibility_ctx }
+    on_success: branch_moderated_access
+    on_error:
+      # 404 / no config → Access Settings not configured; metadata check already passed
+      # SOP §14 Note: treat as publicly accessible → eligible (metadata was the only gate)
+      not_found: show_moderated_course_eligible
+      any:       show_moderated_course_eligible
+    timeout_ms: 5000
+
+  # STEP 11.1.3 — Final eligibility decision for moderated course
+  - id: branch_moderated_access
+    type: branch
+    rules:
+      # Access Settings criteria present but user does NOT match → not eligible → escalate
+      # Route directly to MDO lookup; show_mdo_contact carries the full SOP §13 message
+      - { if: "ctx.collected.moderated_access_eligible == False",
+          then: lookup_mdo_admin }
+    default: show_moderated_course_eligible
+
+  # ===========================================================================
+  # STEP 12 — User IS eligible for the moderated course
+  # SOP §12.1 — Share course details and hyperlink
+  # ===========================================================================
+  - id: show_moderated_course_eligible
+    type: resolution
+    prompt:
+      text: |
+        Upon checking, we found that you are eligible for the requested moderated course.
+
+        📘 **Course Name:** [{{ ctx.collected.course_name_found }}](https://portal.karmayogibharat.net/app/toc/{{ ctx.collected.course_id }}/overview)
+
+        Kindly use the above link to access and enroll in the course.
+    steps: []
+    follow_up:
+      text: "Is there anything else I can help you with?"
+      quick_replies:
+        - { id: done, label: "✅ No, thank you" }
+    on_reply:
+      done: satisfied
+
+  # ===========================================================================
+  # STEP 13 — User is NOT eligible for the moderated course
+  # SOP §13.1 — Fetch MDO details; §13.2 — fallback to YP/AM
+  # Both branch_moderated_meta and branch_moderated_access route directly to
+  # lookup_mdo_admin. The downstream show_mdo_contact / yp_found_result nodes
+  # already carry the full SOP §13 messaging — no intermediate message needed.
+  # (Removed moderated_not_eligible_fetch_mdo — it duplicated the eligibility message.)
+  # ===========================================================================
+
+  # ===========================================================================
+  # STEP 6 / STEP 7 — Access Settings check for single Live NON-moderated result
   # GET /api/accessSettings/read/{course_id}  (karmayogi — same portal base URL)
   # Response: result.accessControl.userGroups[].userGroupCriteriaList[]
   # Eligibility: user's profile fields compared against each criterion
@@ -255,7 +351,7 @@ nodes:
       text: |
         Upon checking, we found the requested course on the platform.
 
-        📘 **Course Name:** [{{ ctx.collected.course_name_found }}](https://portal.karmayogibharat.net/app/toc/{{ ctx.collected.course_id }}/overview)
+        📘 **Course Name:** [{{ ctx.collected.course_name_found }}](https://portal.uat.karmayogibharat.net/app/toc/{{ ctx.collected.course_id }}/overview)
 
         Kindly use the above link to navigate to the course and proceed with enrollment.
     steps: []
@@ -306,7 +402,7 @@ nodes:
 
         Kindly refer to the eligible course below and proceed with enrollment:
 
-        📘 **Course Name:** [{{ ctx.collected.course_name_found }}](https://portal.karmayogibharat.net/app/toc/{{ ctx.collected.course_id }}/overview)
+        📘 **Course Name:** [{{ ctx.collected.course_name_found }}](https://portal.uat.karmayogibharat.net/app/toc/{{ ctx.collected.course_id }}/overview)
 
         If this is not the course you are looking for, please search again with a more specific name.
     steps: []
@@ -570,7 +666,7 @@ nodes:
       text: |
         Upon checking, we found the requested event on the platform.
 
-        📅 **Event Name:** [{{ ctx.collected.event_name_found }}](https://portal.karmayogibharat.net/app/toc/{{ ctx.collected.event_id }}/overview)
+        📅 **Event Name:** [{{ ctx.collected.event_name_found }}](https://portal.uat.karmayogibharat.net/app/toc/{{ ctx.collected.event_id }}/overview)
 
         Kindly use the above link to access the event and proceed accordingly.
     steps: []
