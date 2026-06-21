@@ -59,7 +59,7 @@ PATH B — Course / Program
 
 PATH C — Event
   STEP 1 → POST /api/composite/v4/search
-               ↓ Search primaryCategory=Event, all statuses
+               ↓ Search contentType=Event, all statuses
                ↓
            0 results           → retry loop (no ticket)
            status = Retired    → inform user, close
@@ -375,7 +375,7 @@ curl -X POST \
     "request": {
       "query": "<user_event_name>",
       "filters": {
-        "primaryCategory": ["Event"],
+        "contentType": ["Event"],
         "status": ["Live", "Review", "Draft", "Retired"]
       },
       "sort_by": { "createdOn": "desc" },
@@ -389,9 +389,9 @@ curl -X POST \
 | Field | Stored As | Used For |
 |---|---|---|
 | `result.count` | `collected.event_search_count` | 0 → not found |
-| `result.content[0].name` | `collected.event_name_found` | Display to user |
-| `result.content[0].status` | `collected.event_status` | Branch: Live / Retired / other |
-| `result.content[0].identifier` | `collected.event_id` | Passed to access settings API |
+| `result.Event[0].name` | `collected.event_name_found` | Display to user |
+| `result.Event[0].status` | `collected.event_status` | Branch: Live / Retired / other |
+| `result.Event[0].identifier` | `collected.event_id` | Passed to access settings API |
 
 ---
 

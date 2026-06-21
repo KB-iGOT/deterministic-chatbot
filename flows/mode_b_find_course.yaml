@@ -290,7 +290,7 @@ nodes:
       text: |
         Upon checking, we found that you are eligible for the requested moderated course.
 
-        📘 **Course Name:** [{{ ctx.collected.course_name_found }}](https://portal.karmayogibharat.net/app/toc/{{ ctx.collected.course_id }}/overview)
+        📘 **Course Name:** [{{ ctx.collected.course_name_found }}]({{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.course_id }}/overview)
 
         Kindly use the above link to access and enroll in the course.
     steps: []
@@ -351,7 +351,7 @@ nodes:
       text: |
         Upon checking, we found the requested course on the platform.
 
-        📘 **Course Name:** [{{ ctx.collected.course_name_found }}](https://portal.uat.karmayogibharat.net/app/toc/{{ ctx.collected.course_id }}/overview)
+        📘 **Course Name:** [{{ ctx.collected.course_name_found }}]({{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.course_id }}/overview)
 
         Kindly use the above link to navigate to the course and proceed with enrollment.
     steps: []
@@ -402,7 +402,7 @@ nodes:
 
         Kindly refer to the eligible course below and proceed with enrollment:
 
-        📘 **Course Name:** [{{ ctx.collected.course_name_found }}](https://portal.uat.karmayogibharat.net/app/toc/{{ ctx.collected.course_id }}/overview)
+        📘 **Course Name:** [{{ ctx.collected.course_name_found }}]({{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.course_id }}/overview)
 
         If this is not the course you are looking for, please search again with a more specific name.
     steps: []
@@ -598,16 +598,16 @@ nodes:
         request:
           query: "{{ ctx.collected.event_name }}"
           filters:
-            primaryCategory: ["Event"]
+            contentType: ["Event"]
             status: ["Live", "Review", "Draft", "Retired"]
           sort_by:
             createdOn: "desc"
-          limit: 10
+          limit: 50
     response_mapping:
       - { from: "$.count",                 to: collected.event_search_count }
-      - { from: "$.content[0].name",       to: collected.event_name_found }
-      - { from: "$.content[0].status",     to: collected.event_status }
-      - { from: "$.content[0].identifier", to: collected.event_id }
+      - { from: "$.Event[0].name",       to: collected.event_name_found }
+      - { from: "$.Event[0].status",     to: collected.event_status }
+      - { from: "$.Event[0].identifier", to: collected.event_id }
     on_success: branch_event_results
     on_error:
       any: event_search_error
@@ -666,7 +666,7 @@ nodes:
       text: |
         Upon checking, we found the requested event on the platform.
 
-        📅 **Event Name:** [{{ ctx.collected.event_name_found }}](https://portal.uat.karmayogibharat.net/app/toc/{{ ctx.collected.event_id }}/overview)
+        📅 **Event Name:** [{{ ctx.collected.event_name_found }}]({{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/event-hub/home/{{ ctx.collected.event_id }})
 
         Kindly use the above link to access the event and proceed accordingly.
     steps: []

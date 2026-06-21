@@ -67,6 +67,14 @@ _native_env.filters["default"] = _default_filter
 _native_env.filters["to_yaml"] = _to_yaml_filter
 
 
+def _get_global_env() -> dict[str, str]:
+    from app.config import settings
+    return {
+        "KARMAYOGI_PORTAL_BASE_URL": settings.karmayogi_portal_base_url.rstrip("/"),
+        "ZOHO_DEPARTMENT_ID": settings.zoho_department_id,
+    }
+
+
 def render(
     template_string: str,
     ctx: dict[str, Any],
@@ -82,7 +90,13 @@ def render(
     Always returns a string — use ``render_native`` when you need native Python types.
     """
     template = _env.from_string(template_string)
-    extra = {k: _DotDict(v) if isinstance(v, dict) else v for k, v in (extra_vars or {}).items()}
+    extra = {"env": _DotDict(_get_global_env())}
+    if extra_vars:
+        for k, v in extra_vars.items():
+            if k == "env" and isinstance(v, dict):
+                extra["env"]._data.update(v)
+            else:
+                extra[k] = _DotDict(v) if isinstance(v, dict) else v
     return template.render(ctx=_DotDict(ctx), **extra)
 
 
@@ -99,7 +113,13 @@ def render_native(
     Accepts same ``extra_vars`` as ``render``.
     """
     template = _native_env.from_string(template_string)
-    extra = {k: _DotDict(v) if isinstance(v, dict) else v for k, v in (extra_vars or {}).items()}
+    extra = {"env": _DotDict(_get_global_env())}
+    if extra_vars:
+        for k, v in extra_vars.items():
+            if k == "env" and isinstance(v, dict):
+                extra["env"]._data.update(v)
+            else:
+                extra[k] = _DotDict(v) if isinstance(v, dict) else v
     return template.render(ctx=_DotDict(ctx), **extra)
 
 

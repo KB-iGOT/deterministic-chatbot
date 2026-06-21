@@ -193,16 +193,7 @@ nodes:
       - "Go to **Profile** → **My Learning** → **Events** tab"
       - "Locate the event and check whether it shows as **Completed**"
       - "If still showing In-Progress, please wait up to **24 hours** for the system to sync and update your progress"
-    follow_up:
-      text: "Has your event progress been updated?"
-      quick_replies:
-        - { id: YES,     label: "✅ Yes, progress updated" }
-        - { id: NO,      label: "❌ No, still not updating" }
-        - { id: PENDING, label: "🕐 I'll check and come back" }
-    on_reply:
-      YES:     progress_updated_end
-      NO:      progress_collect_email
-      PENDING: progress_pending_end
+    next: satisfied
 
 
 
@@ -445,11 +436,11 @@ nodes:
       text: |
         Upon checking, we found some **technical issues** affecting one or more resources under the selected **Course / Program / Event**.
 
-        We can raise a support ticket for further investigation.
+        We can escalate this to the engineering team for further investigation.
 
         Kindly confirm whether you would like us to proceed.
     quick_replies:
-      - { id: yes, label: "✅ Yes, please raise a ticket" }
+      - { id: yes, label: "✅ Yes, please proceed" }
       - { id: no,  label: "❌ No, thank you" }
     disable_input: true
     on_reply:
@@ -464,11 +455,11 @@ nodes:
         Understood. Please feel free to reach out if you require any further assistance.
     next: satisfied
 
-  # Collect email before raising ticket for technical issue
+  # Collect email before recording technical issue
   - id: technical_issue_collect_email
     type: collect
     prompt:
-      text: "Please enter your **registered email address** so we can raise the support ticket:"
+      text: "Please enter your **registered email address** so we can associate this issue with your profile:"
     field:
       name: collected.user_email
       type: email
@@ -477,34 +468,22 @@ nodes:
         error_msg: "That doesn't look like a valid email. Please try again."
     next: technical_issue_auto_ticket
 
-  # Raise ticket + update Engineering Excel for technical issue
+  # Update Engineering DB for technical issue
   - id: technical_issue_auto_ticket
-    type: transfer_llm
-    auto_raise: true
-    llm_context:
-      include_messages:  true
-      include_collected: true
-      include_flow_meta: true
-    llm_directives:
-      objective: |
-        A technical issue has been detected for this user's course/program/event progress.
-        Enrollment API status = 1 and Admin Content State API status = 2 for one or more resources.
-        Generate a Zoho support ticket AND update the Engineering Excel with:
-          - User ID: {{ ctx.user_id_hash }}
-          - Program / Course / Event DO_ID: {{ ctx.collected.course_id }}
-          - Content DO_ID: {{ ctx.collected.content_do_id }}
-        Subject: "Technical Issue – Progress Not Updating — <course_name>"
-        Description: include user_id, course_name, course_id, content_do_id,
-          admin_content_states mismatch details, and user_email.
-      engineering_excel_update:
-        user_id:        "{{ ctx.user_id_hash }}"
-        do_id:          "{{ ctx.collected.course_id }}"
-        content_do_id:  "{{ ctx.collected.content_do_id }}"
-      priority_override: P3
-    on_complete: confirm_ticket
-    # NOTE: confirm_ticket is provided by the imported _zoho_ticket fragment.
-    # It POSTs to Zoho Desk → maps $.ticketNumber → collected.ticket_id
-    # → routes to ticket_confirmation which displays: "✅ Ticket #XXXXX raised."
+    type: engineering_ticket
+    user_id:       "{{ ctx.user_id_hash }}"
+    course_do_id:  "{{ ctx.collected.course_id }}"
+    content_do_id: "{{ ctx.collected.content_do_id }}"
+    on_success: technical_issue_ticket_confirm
+
+  - id: technical_issue_ticket_confirm
+    type: message
+    prompt:
+      text: |
+        Thank you for confirming.
+
+        We have recorded the issue and shared it with the engineering team for further investigation.
+    next: satisfied
 
   # ===========================================================================
   # STEP 7 — No Technical Issue Found
@@ -745,34 +724,24 @@ nodes:
 
         This resource is in **SCORM format**.
 
-        Kindly follow the below instructions carefully:
+        Advise the user to follow the below instructions carefully:
 
         - Complete the resource in **one continuous session**.
         - **Do not increase the playback speed** while viewing the content.
         - Complete **at least 60% of the total duration** of the resource.
         - **Do not switch browser tabs or move to another application** while the SCORM resource is playing, as doing so may interrupt progress tracking and prevent completion from being recorded.
-        - After completing the resource, click the **Next** button.
-
-        Progress will be updated only after the above steps are completed successfully.
+        - After completing the resource, click on the **Next** button.
+        - Progress will be updated only after the above steps are completed successfully.
     steps:
-      - "Go to **Profile**."
-      - "Open **My Learning**."
-      - "Navigate to **In Progress**."
-      - "Select the relevant **Course / Program / Event**."
-      - "Click **Resume**."
-      - "Expand each module using the **“+” icon**."
-      - "Check for content items that **do not have a blue tick mark**."
-      - "Complete all pending resources until every item displays a **blue tick**."
-    follow_up:
-      text: "Has your issue been resolved? Please let us know if you need any further assistance."
-      quick_replies:
-        - { id: YES,     label: "✅ Yes, progress updated" }
-        - { id: NO,      label: "❌ No, still not updating" }
-        - { id: PENDING, label: "🕐 I'll try and come back" }
-    on_reply:
-      YES:     progress_updated_end
-      NO:      progress_collect_email
-      PENDING: progress_pending_end
+        - "Go to **Profile**."
+        - "Open **My Learning**."
+        - "Navigate to **In Progress**."
+        - "Select the relevant **Course / Program / Event**."
+        - "Click **Resume**."
+        - "Expand each module using the **“+” icon**."
+        - "Check for content items that **do not have a blue tick mark**."
+        - "Complete all pending resources until every item displays a **blue tick**."
+    next: satisfied
 
   # ===========================================================================
   # STEP 10 — Non-SCORM Resource Flow
@@ -784,36 +753,25 @@ nodes:
     type: resolution
     prompt:
       text: |
-        We found that the following resource(s) under **{{ ctx.collected.course_name }}** are still **incomplete**:
+        We found that the resource **“{{ ctx.collected.incomplete_resource_names }}”** is still incomplete.
 
-        {{ ctx.collected.incomplete_resource_names }}
-
-        Kindly revisit and complete the pending resource(s).
+        Kindly revisit and complete the resource.
     steps:
-      - "Go to **Profile**."
-      - "Open **My Learning**."
-      - "Navigate to **In Progress**."
-      - "Select the relevant **Course / Program / Event**."
-      - "Click **Resume**."
-      - "Expand each module using the **“+” icon**."
-      - "Check for content items that **do not have a blue tick mark**."
-      - "Complete all pending resources until every item displays a **blue tick**."
-    follow_up:
-      text: "Has your issue been resolved? Please let us know if you need any further assistance."
-      quick_replies:
-        - { id: YES,     label: "✅ Yes, progress updated" }
-        - { id: NO,      label: "❌ No, still not updating" }
-        - { id: PENDING, label: "🕐 I'll try and come back" }
-    on_reply:
-      YES:     progress_updated_end
-      NO:      progress_collect_email
-      PENDING: progress_pending_end
+        - "Go to **Profile**."
+        - "Open **My Learning**."
+        - "Navigate to **In Progress**."
+        - "Select the relevant **Course / Program / Event**."
+        - "Click **Resume**."
+        - "Expand each module using the **“+” icon**."
+        - "Check for content items that **do not have a blue tick mark**."
+        - "Complete all pending resources until every item displays a **blue tick**."
+    next: satisfied
 
   # ===========================================================================
   # STEP 11 — Assessment Flow
   # ===========================================================================
   - id: resolution_assessment_guidance
-    type: resolution
+    type: message
     prompt:
       text: |
         We found that all learning resources have been completed successfully.
@@ -821,27 +779,6 @@ nodes:
         However, the assessment is still pending.
 
         Kindly complete the assessment to achieve 100% completion.
-    steps:
-      - "Go to **Profile** → **My Learning** → **In Progress**"
-      - "Open **{{ ctx.collected.course_name }}** → click **Resume**"
-      - "Expand each module using the **+ icon** and locate the pending assessment"
-      - "Complete the assessment — all modules must show a **blue tick** for 100% completion"
-    follow_up:
-      text: "Were you able to complete the assessment?"
-      quick_replies:
-        - { id: YES,     label: "✅ Yes, completed successfully" }
-        - { id: NO,      label: "❌ No, facing an issue" }
-        - { id: PENDING, label: "🕐 I'll try and come back" }
-    on_reply:
-      YES:     progress_updated_end
-      NO:      assessment_issue_check
-      PENDING: progress_pending_end
-
-  # Ask what kind of issue the user faces with the assessment (Section 11.3)
-  - id: assessment_issue_check
-    type: message
-    prompt:
-      text: "I'm sorry to hear that. Could you tell me more about the issue you're facing with the assessment?"
     quick_replies:
       - { id: mobile,         label: "Unable to complete the assessment from Mobile." }
       - { id: limit_exceeded, label: "Assessment Limit Exceeded." }
@@ -1086,11 +1023,11 @@ nodes:
       text: |
         Upon revalidation, we found some **technical issues** affecting your progress for **{{ ctx.collected.course_name }}**.
 
-        We can raise a support ticket for further investigation.
+        We can escalate this to the engineering team for further investigation.
 
         Kindly confirm whether you would like us to proceed.
     quick_replies:
-      - { id: yes, label: "✅ Yes, please raise a ticket" }
+      - { id: yes, label: "✅ Yes, please proceed" }
       - { id: no,  label: "❌ No, thank you" }
     disable_input: true
     on_reply:
@@ -1121,61 +1058,6 @@ nodes:
         We apologise for the inconvenience. Please feel free to reach out if you require any further assistance.
     next: satisfied
 
-  # ===========================================================================
-  # Post-resolution check
-  # ===========================================================================
-  - id: progress_resolution_check
-    type: message
-    prompt:
-      text: "Did this resolve your course progress issue?"
-    quick_replies:
-      - { id: yes, label: "✅ Yes, resolved" }
-      - { id: no,  label: "❌ No, still facing issue" }
-    disable_input: true
-    on_reply:
-      yes: satisfied
-      no:  progress_collect_email
-
-  # ===========================================================================
-  # Escalation — collect email then auto-generate ticket
-  # ===========================================================================
-  - id: progress_collect_email
-    type: collect
-    prompt:
-      text: "I'll raise a support ticket for you. Please enter your **registered email address**:"
-    field:
-      name: collected.user_email
-      type: email
-      validation:
-        pattern:   "^[\\w.+-]+@[\\w-]+\\.[a-z]{2,}$"
-        error_msg: "That doesn't look like a valid email. Please try again."
-    next: progress_auto_ticket
-
-  - id: progress_auto_ticket
-    type: transfer_llm
-    auto_raise: true
-    llm_context:
-      include_messages:  true
-      include_collected: true
-      include_flow_meta: true
-    llm_directives:
-      objective: |
-        The user has a course/program/event progress issue that was not resolved through self-service.
-        Generate a Zoho support ticket AND update the Engineering Excel with:
-          - User ID: {{ ctx.user_id_hash }}
-          - Program / Course / Event DO_ID: {{ ctx.collected.course_id }}
-          - Content DO_ID: {{ ctx.collected.content_do_id }}
-        Subject: "Course Progress Issue — <course_name>"
-        Description: include course_name, course_id, completion_pct,
-          incomplete_resource_names, has_scorm_resources, all_resources_assessment,
-          admin_content_states mismatch details (if any), and user_email.
-        Summary of resolution steps attempted.
-      engineering_excel_update:
-        user_id:        "{{ ctx.user_id_hash }}"
-        do_id:          "{{ ctx.collected.course_id }}"
-        content_do_id:  "{{ ctx.collected.content_do_id }}"
-      priority_override: P3
-    on_complete: confirm_ticket
 
   # Generic API error fallback — transient errors only; no ticket escalation here.
   # The user can retry by selecting a different content or restarting the flow.
@@ -1186,32 +1068,4 @@ nodes:
         I'm having trouble fetching your details right now. This is usually a temporary issue.
 
         Please **try again in a few minutes** by starting this flow again.
-    next: satisfied
-
-
-  # ===========================================================================
-  # Section 14 — Closure
-  # ===========================================================================
-  - id: progress_updated_end
-    type: message
-    prompt:
-      text: |
-        That's great! 🎉
-
-        Please remember: the course must be **100% complete** for the certificate to be generated automatically.
-
-        Once all mandatory resources are completed successfully, the certificate will be generated.
-
-        Please feel free to reach out if you require any further assistance.
-    next: satisfied
-
-  - id: progress_pending_end
-    type: message
-    prompt:
-      text: |
-        No problem! Please complete the pending resource(s) at your convenience.
-
-        **Important:** Kindly complete all pending resources to achieve **100% completion**. Once all mandatory resources are completed successfully, the certificate will be generated automatically.
-
-        If the issue persists, please start a new session and choose **Course / Program / Event progress issue**.
     next: satisfied

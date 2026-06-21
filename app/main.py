@@ -118,6 +118,16 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
     app.state.sessions: dict[str, dict] = {}  # in-memory session metadata
     app.state.session_store = session_store   # Redis-backed; None when Redis unavailable
 
+    # Engineering tickets DB setup
+    engineering_db = None
+    try:
+        from app.services.engineering_db import EngineeringDBService
+        engineering_db = EngineeringDBService(settings.postgres_url)
+        await engineering_db.setup()
+        services["engineering_db"] = engineering_db
+    except Exception as e:
+        print(f"⚠️  EngineeringDBService unavailable ({e})")
+
     # Dev UI banner — printed after all startup tasks so the port is known.
     if settings.igot_env in ("dev", "staging"):
         _port = os.environ.get("PORT", "8000")
@@ -132,6 +142,8 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
         await _pg_cm.__aexit__(None, None, None)
     if _redis_client is not None:
         await _redis_client.aclose()
+    if engineering_db is not None:
+        await engineering_db.aclose()
 
 
 app = FastAPI(
