@@ -61,11 +61,28 @@ def _email_domain_valid(email: str | None, approved_domains: list | None) -> boo
     return user_domain in normalised
 
 
+def _compare_enrollment_vs_admin_state_helper(
+    lang_content_status: Any,
+    admin_content_states: Any,
+) -> bool:
+    """Thin wrapper so branch expressions can call compare_enrollment_vs_admin_state().
+
+    Delegates to the canonical implementation in api_call_node.py to avoid
+    duplicating the cross-comparison logic.
+    """
+    from app.engine.nodes.api_call_node import _compare_enrollment_vs_admin_state
+    return _compare_enrollment_vs_admin_state(lang_content_status, admin_content_states)
+
+
 HELPERS = {
     "hours_since": _hours_since,
     "days_since": _days_since,
     "has": _has,
     "email_domain_valid": _email_domain_valid,
+    # Admin Content State vs Enrollment API cross-comparison
+    # Used in branch rules: compare_enrollment_vs_admin_state(lang_content_status, admin_content_states)
+    # Returns True if any leaf resource has enrollment status=1 (In-Progress) AND admin status=2 (Completed)
+    "compare_enrollment_vs_admin_state": _compare_enrollment_vs_admin_state_helper,
     "len": len,
     "str": str,
     "int": int,

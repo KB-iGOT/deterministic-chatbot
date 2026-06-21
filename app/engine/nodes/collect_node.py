@@ -346,7 +346,13 @@ async def _resolve_dynamic_options(
                     "[picker extras] item=%s  field=%s  raw=%r  stored=%r",
                     item_id, src_key, raw.get(src_key), value,
                 )
-                item_extras[dst_key] = value
+                # Only write when the resolved value is non-None.
+                # This allows multiple `from` sources to target the same `to`
+                # field (e.g. `batchId` at top-level AND `batches[0].batchId`
+                # as a fallback) without clobbering a previously-set valid
+                # value with None when the secondary source is absent.
+                if value is not None:
+                    item_extras[dst_key] = value
             extras_map[str(item_id)] = item_extras
 
     return items, extras_map

@@ -385,6 +385,25 @@ def _extract_completed_ids(lang_content_status: Any) -> list[str]:
     return list(ids)
 
 
+def _extract_batch_id(batches: Any) -> str | None:
+    """Extract batchId from the first element of a Karmayogi batches[] array.
+
+    In-progress courses served by the enrollment list API return batchId
+    nested inside a `batches` array rather than at the top-level of the
+    course object.  This transform handles that case so the picker can
+    populate `collected.batch_id` for all course states.
+
+    batches shape: [{"batchId": "...", "name": "...", ...}, ...]
+    Returns the batchId string from batches[0], or None if unavailable.
+    """
+    if not isinstance(batches, list) or len(batches) == 0:
+        return None
+    first = batches[0]
+    if not isinstance(first, dict):
+        return None
+    return first.get("batchId")
+
+
 def _diff_leaf_nodes(leaf_nodes: Any, completed_ids: Any) -> list[str]:
     """Return leaf node IDs that are not yet completed.
 
@@ -451,18 +470,45 @@ def _extract_scorm_duration_minutes(content_list: Any) -> float:
 
 
 def _detect_assessment_only(content_list: Any) -> bool:
-    """Return True if every item in the content list has primaryCategory == 'Course Assessment'.
+    """Return True if every item in the content list has an assessment primaryCategory.
 
     Used to route to the assessment guidance path only when ALL pending resources
     are assessments (i.e. all learning resources are already completed).
-    content_list is the full $.content[*] array (list of dicts).
+    content_list is the full $.content[*] array (list of dicts) from the
+    composite search API (/api/composite/v4/search) response.
+
+    Actual primaryCategory values from /api/composite/v4/search:
+      'Course Assessment' — assessment / quiz resource           → Assessment Flow (SOP 8.1.2)
+      'Course'            — regular course content resource      → check mimeType  (SOP 8.1.1)
+                           (video/mp4, PDF, SCORM, etc.)
+
+    Returns True only when EVERY item in the list is an assessment.
+    Case-insensitive to handle minor API variance across environments.
     """
     if not isinstance(content_list, list) or not content_list:
         return False
+    _ASSESSMENT_CATEGORIES = {"course assessment", "assessment"}
     return all(
-        isinstance(item, dict) and item.get("primaryCategory") == "Course Assessment"
+        isinstance(item, dict)
+        and str(item.get("primaryCategory") or "").lower().strip() in _ASSESSMENT_CATEGORIES
         for item in content_list
     )
+
+
+def _calculate_remaining_attempts(result: Any) -> int:
+    """Calculate remaining assessment attempts: allowed - made.
+
+    If the result is missing or parsing fails, defaults to 0 (limit exceeded).
+    """
+    if not isinstance(result, dict):
+        return 0
+    allowed = result.get("attemptsAllowed", 0)
+    made = result.get("attemptsMade", 0)
+    try:
+        remaining = int(allowed) - int(made)
+        return remaining if remaining > 0 else 0
+    except (ValueError, TypeError):
+        return 0
 
 
 def _duration_to_minutes(duration: Any) -> float:
@@ -1026,15 +1072,210 @@ def _has_issued_certificates(issued_certificates: Any) -> bool:
     return bool(issued_certificates)
 
 
+def _extract_consumption_records(records: Any) -> list[dict]:
+    """Normalise consumptionRecords from Admin Content State API into a clean list.
+
+    Admin Content State API response shape:
+        result.consumptionRecords[
+            {
+                "contentid": "do_xxx",
+                "language":  "english",
+                "status":    2,          # 0 = not started, 1 = in-progress, 2 = completed
+                "completionpercentage": 100.0,
+                ...other fields...
+            },
+            ...
+        ]
+
+    Returns a list of dicts with exactly three keys: contentid, language, status.
+    Unknown / malformed items are silently skipped.
+    """
+    if not isinstance(records, list):
+        return []
+    out = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        contentid = rec.get("contentid") or rec.get("contentId")
+        language  = rec.get("language", "")
+        status    = rec.get("status")
+        if contentid is None or status is None:
+            continue
+        out.append({
+            "contentid": str(contentid),
+            "language":  str(language).lower(),
+            "status":    int(status),
+        })
+    return out
+
+
+def _append_consumption_records(new_records: Any, existing_records: Any) -> list[dict]:
+    """Append new consumption records to an existing list without overwriting earlier results.
+
+    Used in the Program child-course loop (``api_admin_content_state_loop``) where
+    Admin Content State API is called once per child Course DO_ID. Each call produces
+    a separate set of consumption records; this transform merges them all into a single
+    ``collected.admin_content_states`` list before running the technical-issue comparison.
+
+    new_records      — raw ``consumptionRecords[*]`` from the current API response.
+    existing_records — current value of ``collected.admin_content_states`` passed via
+                       ``transform_ctx_key: collected.admin_content_states`` in YAML.
+                       None / empty list on the first loop iteration.
+    """
+    new = _extract_consumption_records(new_records)
+    existing = existing_records if isinstance(existing_records, list) else []
+    return existing + new
+
+
+def _compare_enrollment_vs_admin_state(
+    lang_content_status: Any,
+    admin_content_states: Any,
+) -> bool:
+    """Detect a technical issue by cross-referencing Enrollment and Admin Content State data.
+
+    INPUTS
+    ------
+    lang_content_status  — raw ``langContentStatus`` object captured from the Enrollment
+                           API's dynamic picker (stored as ``collected.lang_content_status``).
+                           Shape: { "<language>": { "<do_id>": <status_int>, ... }, ... }
+                           where status 1 = In-Progress, 2 = Completed.
+
+    admin_content_states — list produced by the ``extract_consumption_records`` transform
+                           applied to the Admin Content State API response.
+                           Each element: { "contentid": str, "language": str, "status": int }
+                           where status 2 = completed on the backend.
+
+    LOGIC
+    -----
+    For every (language, do_id) pair in langContentStatus:
+      - If enrollment status == 1 (In-Progress) AND
+        the Admin Content State API shows status == 2 (completed on server)
+        → TECHNICAL ISSUE detected → return True immediately.
+
+    A mismatch of this kind means:
+      "The backend/server has recorded the resource as completed, but the
+       portal still shows it as In-Progress for the learner."
+
+    Returns False when:
+      - Either input is missing / malformed.
+      - No mismatch is found after checking all resources.
+    """
+    if not isinstance(lang_content_status, dict) or not isinstance(admin_content_states, list):
+        log.debug(
+            "[compare_enrollment_vs_admin_state] invalid inputs — "
+            "lang_content_status type=%s, admin_content_states type=%s",
+            type(lang_content_status).__name__,
+            type(admin_content_states).__name__,
+        )
+        return False
+
+    # Build a lookup: (contentid_lower, language_lower) → admin_status
+    admin_lookup: dict[tuple[str, str], int] = {}
+    for rec in admin_content_states:
+        if isinstance(rec, dict):
+            cid  = str(rec.get("contentid", "")).lower()
+            lang = str(rec.get("language", "")).lower()
+            st   = rec.get("status")
+            if cid and st is not None:
+                admin_lookup[(cid, lang)] = int(st)
+
+    # Iterate over langContentStatus and compare per-resource
+    for lang, resources in lang_content_status.items():
+        if not isinstance(resources, dict):
+            continue
+        lang_lower = str(lang).lower()
+        for do_id, enroll_status in resources.items():
+            # Only check resources that are still In-Progress from the learner's view
+            if int(enroll_status) != 1:
+                continue
+            do_id_lower = str(do_id).lower()
+            # Look up admin status — try language-specific first, then without language
+            admin_status = admin_lookup.get((do_id_lower, lang_lower))
+            if admin_status is None:
+                # Fallback: match on contentid alone (language field may differ)
+                admin_status = next(
+                    (v for (cid, _), v in admin_lookup.items() if cid == do_id_lower),
+                    None,
+                )
+            if admin_status == 2:
+                log.info(
+                    "[compare_enrollment_vs_admin_state] MISMATCH — "
+                    "do_id=%s lang=%s enroll_status=1 admin_status=2 → technical issue",
+                    do_id, lang,
+                )
+                return True
+
+    log.debug(
+        "[compare_enrollment_vs_admin_state] no technical issue found — "
+        "checked %d enrollment resource(s) against %d admin record(s)",
+        sum(len(v) for v in lang_content_status.values() if isinstance(v, dict)),
+        len(admin_content_states),
+    )
+    return False
+
+
+def _filter_by_incomplete_ids(content_list: Any, incomplete_ids: Any) -> list:
+    """Filter a composite-search content list to only items whose identifier
+    appears in ``incomplete_ids``.
+
+    Used when the composite search is executed against the course DO_ID (which
+    returns ALL resources — complete and incomplete alike) so that SCORM/assessment
+    detection only considers the resources the user has not yet finished.
+
+    If ``incomplete_ids`` is empty or missing the full list is returned unchanged
+    so callers always receive a usable list.
+    """
+    if not isinstance(content_list, list):
+        return []
+    id_set = set(incomplete_ids) if isinstance(incomplete_ids, list) and incomplete_ids else None
+    if id_set is None:
+        return content_list
+    return [item for item in content_list if isinstance(item, dict) and item.get("identifier") in id_set]
+
+
+def _detect_scorm_filtered(content_list: Any, incomplete_ids: Any) -> bool:
+    """detect_scorm applied only to the incomplete subset of a course content list."""
+    filtered = _filter_by_incomplete_ids(content_list, incomplete_ids)
+    return _detect_scorm([item.get("mimeType") for item in filtered])
+
+
+def _extract_all_names_filtered(content_list: Any, incomplete_ids: Any) -> str:
+    """extract_all_names applied only to the incomplete subset of a course content list."""
+    filtered = _filter_by_incomplete_ids(content_list, incomplete_ids)
+    return _extract_all_names([item.get("name") for item in filtered])
+
+
+def _extract_scorm_resource_name_filtered(content_list: Any, incomplete_ids: Any) -> str:
+    """extract_scorm_resource_name applied only to the incomplete subset of a course content list."""
+    filtered = _filter_by_incomplete_ids(content_list, incomplete_ids)
+    return _extract_scorm_resource_name(filtered)
+
+
+def _extract_scorm_duration_filtered(content_list: Any, incomplete_ids: Any) -> float:
+    """extract_scorm_duration_minutes applied only to the incomplete subset of a course content list."""
+    filtered = _filter_by_incomplete_ids(content_list, incomplete_ids)
+    return _extract_scorm_duration_minutes(filtered)
+
+
+def _detect_assessment_only_filtered(content_list: Any, incomplete_ids: Any) -> bool:
+    """detect_assessment_only applied only to the incomplete subset of a course content list."""
+    filtered = _filter_by_incomplete_ids(content_list, incomplete_ids)
+    return _detect_assessment_only(filtered)
+
+
 # Registry of named transforms usable in YAML response_mapping `transform:` field.
 _TRANSFORMS: dict[str, Any] = {
     "extract_incomplete_ids":      _extract_incomplete_ids,
     "extract_completed_ids":           _extract_completed_ids,
+    # Extracts batchId from batches[0] for in-progress courses where batchId
+    # is nested inside the batches[] array instead of at the course root level.
+    "extract_batch_id":            _extract_batch_id,
     "diff_leaf_nodes":                 _diff_leaf_nodes,
     "extract_all_names":               _extract_all_names,
     "extract_scorm_resource_name":     _extract_scorm_resource_name,
     "extract_scorm_duration_minutes":  _extract_scorm_duration_minutes,
     "detect_assessment_only":          _detect_assessment_only,
+    "calculate_remaining_attempts":    _calculate_remaining_attempts,
     "duration_to_minutes":            _duration_to_minutes,
     "detect_scorm":                _detect_scorm,
     "unix_ms_to_iso":              _unix_ms_to_iso,
@@ -1047,11 +1288,30 @@ _TRANSFORMS: dict[str, Any] = {
     # True  = non-empty list (certificate generated)
     # False = null / empty list (not yet generated)
     "has_issued_certificates":     _has_issued_certificates,
+    # Admin Content State API — consumption record normalisation
+    # Converts result.consumptionRecords[*] → list of {contentid, language, status}
+    "extract_consumption_records":       _extract_consumption_records,
+    # Admin Content State API — loop accumulator for multi-course Programs
+    # Appends new records to existing collected.admin_content_states list.
+    # Requires transform_ctx_key: collected.admin_content_states in YAML.
+    "append_consumption_records":        _append_consumption_records,
+    # Admin Content State API vs Enrollment API cross-comparison
+    # Detects technical issues: enrollment In-Progress + admin Completed
+    # Note: This transform is called directly in branch rule expressions via
+    #       compare_enrollment_vs_admin_state() rather than as a response_mapping transform.
+    "compare_enrollment_vs_admin_state": _compare_enrollment_vs_admin_state,
     # Weekly Clap — Insights API week date-range labels
     "week_label_w1": _week_label_w1,
     "week_label_w2": _week_label_w2,
     "week_label_w3": _week_label_w3,
     "week_label_w4": _week_label_w4,
+    # Composite search filtered transforms — query by course DO_ID, filter to incomplete subset
+    # All five require transform_ctx_key: collected.incomplete_ids in YAML.
+    "detect_scorm_filtered":                  _detect_scorm_filtered,
+    "extract_all_names_filtered":             _extract_all_names_filtered,
+    "extract_scorm_resource_name_filtered":   _extract_scorm_resource_name_filtered,
+    "extract_scorm_duration_filtered":        _extract_scorm_duration_filtered,
+    "detect_assessment_only_filtered":        _detect_assessment_only_filtered,
     # Karma Points — context-aware transforms (require transform_ctx_key in YAML)
     "kp_status_by_id":   _kp_status_by_id,   # (kp_list, course_id) → dict
     "kp_monthly_rank":   _kp_monthly_rank,   # (kp_list, course_id) → int

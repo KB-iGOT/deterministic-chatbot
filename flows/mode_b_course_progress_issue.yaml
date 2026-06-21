@@ -22,7 +22,7 @@
 #   GET  /api/content/v1/hierarchy/{program_id}
 #   GET  /api/content/v1/read/{course_id}
 #   POST /api/content/v1/search
-#   POST /api/admin/content/v1/state          (Admin Content State API)
+#   POST /api/admin/content/state/read          (Admin Content State API)
 #   GET  /api/assessment/v1/attempts/{user_id}/{content_id}  (Assessment Limit API)
 # =============================================================================
 
@@ -118,15 +118,30 @@ nodes:
           - { from: completionPercentage, to: collected.completion_pct }
           - { from: langContentStatus,    to: collected.completed_ids,        transform: extract_completed_ids }
           - { from: langContentStatus,    to: collected.incomplete_ids,       transform: extract_incomplete_ids }
+          - { from: langContentStatus,    to: collected.lang_content_status }
           - { from: status,               to: collected.enrollment_status,    transform: enrollment_status_to_int }
           - { from: completedOn,          to: collected.completed_on_iso,     transform: unix_ms_to_iso }
           - { from: issuedCertificates,   to: collected.issued_certificates }
+          # Derive the boolean used by branch_on_certificate_issued directly from
+          # the picker response — avoids a redundant second Enrollment API call.
+          - { from: issuedCertificates,   to: collected.certificate_issued,   transform: has_issued_certificates }
+          # batchId resolution: completed courses often return it at the top level;
+          # in-progress courses nest it inside batches[0].batchId.
+          # Both mappings target the same field; the collect_node only writes
+          # non-None values, so whichever source resolves first wins and the
+          # other is silently ignored when it returns None.
           - { from: batchId,              to: collected.batch_id }
+          - { from: batches,              to: collected.batch_id,              transform: extract_batch_id }
           - { from: primaryCategory,      to: collected.primary_category }
+          # contentId is needed by the ticket-raise node (content_do_id field).
+          - { from: contentId,            to: collected.content_do_id }
       search:     { enabled: true, placeholder: "Search your enrolled courses and programs..." }
       pagination: { enabled: true, page_size: 10 }
       cache_ttl:  300
-    next: api_enrollment_check
+    # Skip api_enrollment_check — all required fields are already captured above.
+    # api_enrollment_check used $.result.enrollments[0] which is the wrong response
+    # path; the API actually returns data under $.courses[*] (matching list_path above).
+    next: branch_on_certificate_issued
 
 
   # ---------------------------------------------------------------------------
@@ -193,7 +208,12 @@ nodes:
 
   # ===========================================================================
   # STEP 2 — Validate Certificate Generation Status
-  # Call Enrollment API → validate certificateIssued field
+  # NOTE: api_enrollment_check below is DEPRECATED and no longer reachable.
+  # pick_course_from_list now routes directly to branch_on_certificate_issued
+  # because all fields are already captured via extra_fields in the picker.
+  # The old api_enrollment_check used $.result.enrollments[0] which was the
+  # wrong JSON path — the API returns data under $.courses[*].
+  # This node is retained only for reference; it will never be executed.
   # ===========================================================================
   - id: api_enrollment_check
     type: api_call
@@ -251,7 +271,9 @@ nodes:
       method: GET
       url: "/api/content/v1/read/{{ ctx.collected.course_id }}"
     response_mapping:
-      - { from: "$.result.content.primaryCategory", to: collected.primary_category }
+      # KarmayogiService unwraps the result envelope: returns data["result"] directly.
+      # Correct path is $.content.primaryCategory, NOT $.result.content.primaryCategory.
+      - { from: "$.content.primaryCategory", to: collected.primary_category }
     on_success: branch_on_content_type
     on_error:
       any: resolution_generic_error
@@ -268,68 +290,160 @@ nodes:
     default: api_admin_content_state
 
   # Fetch child Course DO_IDs for Programs via Hierarchy Read API
+  # API: GET /api/private/content/v3/hierarchy/{program_id}?mode=edit
+  # Using v3 private endpoint with mode=edit to retrieve full child course structure.
   - id: api_fetch_program_hierarchy
     type: api_call
     integration: karmayogi
     request:
       method: GET
-      url: "/api/content/v1/hierarchy/{{ ctx.collected.course_id }}"
+      url: "/api/private/content/v3/hierarchy/{{ ctx.collected.course_id }}?mode=edit"
     response_mapping:
       - { from: "$.content.children[*].identifier",
           to:   collected.child_course_ids,
           transform: extract_all_identifiers }
-    on_success: api_admin_content_state
+    on_success: api_admin_content_state_loop
     on_error:
       any: resolution_generic_error
     timeout_ms: 8000
 
   # ===========================================================================
+  # STEP 4 (Program path) — Admin Content State loop across ALL child courses
+  #
+  # Programs have multiple child Course DO_IDs. The Admin Content State API
+  # only accepts one courseId per call. We loop through every child course using
+  # increment_and_branch so that ALL child-course consumption records are
+  # accumulated into collected.admin_content_states before the technical-issue
+  # comparison runs.
+  #
+  # Loop mechanics:
+  #   ctx.counters.child_loop_idx starts at 0 (unset counter default).
+  #   api_admin_content_state_loop calls with child_course_ids[child_loop_idx].
+  #   loop_child_course increments the counter, then:
+  #     - if child_loop_idx < len(child_course_ids) → loop back
+  #     - else                                       → branch_on_technical_issue
+  #
+  # Transform: append_consumption_records accumulates records across iterations
+  # (requires transform_ctx_key: collected.admin_content_states).
+  # ===========================================================================
+  - id: api_admin_content_state_loop
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/admin/content/state/read"
+      body:
+        request:
+          userId:   "{{ ctx.user_id_hash }}"
+          courseId: "{{ ctx.collected.child_course_ids[ctx.counters.child_loop_idx] }}"
+          batchId:  "{{ ctx.collected.batch_id }}"
+    response_mapping:
+      - { from: "$.consumptionRecords[*]",
+          to:   collected.admin_content_states,
+          transform: append_consumption_records,
+          transform_ctx_key: collected.admin_content_states }
+    on_success: loop_child_course
+    on_error:
+      # Skip on error (e.g. missing batchId for one child course) and still
+      # advance the loop counter so remaining child courses are checked.
+      any: loop_child_course
+    timeout_ms: 8000
+
+  - id: loop_child_course
+    type: increment_and_branch
+    counter: child_loop_idx
+    rules:
+      - { if: "ctx.counters.child_loop_idx < len(ctx.collected.child_course_ids)",
+          then: api_admin_content_state_loop }
+    default: branch_on_technical_issue
+
+  # ===========================================================================
   # STEP 4 — Call Admin Content State API
   # Must always be called using Course DO_ID(s).
-  # For Programs → use child_course_ids from hierarchy.
-  # For Course / Event → use course_id directly.
+  # For Programs → handled above by api_admin_content_state_loop + loop_child_course.
+  # For Course / Event → use course_id directly (this node).
+  #
+  # API: POST /api/admin/content/state/read
+  # Request body fields:
+  #   userId   — the learner's user ID
+  #   courseId — the Course DO_ID (singular; not the Program DO_ID)
+  #   batchId  — the batch ID captured from the Enrollment API
+  #
+  # Response (after KarmayogiService unwraps the result envelope):
+  #   consumptionRecords[*] each record contains:
+  #   contentid — leaf resource DO_ID
+  #   language  — content language (e.g. "english")
+  #   status    — 0 = not started, 1 = in-progress, 2 = completed
   # ===========================================================================
   - id: api_admin_content_state
     type: api_call
     integration: karmayogi
     request:
       method: POST
-      url: "/api/admin/content/v1/state"
+      url: "/api/admin/content/state/read"
       body:
         request:
-          userId:    "{{ ctx.user_id_hash }}"
-          courseIds: "{{ ctx.collected.child_course_ids | default([ctx.collected.course_id]) }}"
+          userId:   "{{ ctx.user_id_hash }}"
+          # Inline if-else instead of [0]|default(): Jinja2 NativeEnvironment
+          # converts ""[0] (from _DotDict's missing-key fallback) into an
+          # Undefined object that | default() does not catch, causing
+          # TypeError: Object of type Undefined is not JSON serializable.
+          # The inline if-else tests truthiness first ("" is falsy, a
+          # non-empty list is truthy) and never evaluates [0] on a missing list.
+          courseId: "{{ ctx.collected.child_course_ids[0] if ctx.collected.child_course_ids else ctx.collected.course_id }}"
+          batchId:  "{{ ctx.collected.batch_id }}"
     response_mapping:
-      - { from: "$.result.contentList[*]",
+      # KarmayogiService unwraps result → correct path is $.consumptionRecords[*]
+      - { from: "$.consumptionRecords[*]",
           to:   collected.admin_content_states,
-          transform: extract_content_state_list }
+          transform: extract_consumption_records }
     on_success: branch_on_technical_issue
     on_error:
-      any: resolution_generic_error
+      # batchId may be null/undefined for in-progress courses that haven't been
+      # assigned to a batch yet — fall through to the next documented step rather
+      # than dead-ending the conversation.
+      any: api_read_course_content
     timeout_ms: 8000
 
   # ===========================================================================
   # STEP 5 — Check for Technical Issues
-  # Enrollment API status=1 AND Admin Content State API status=2
-  # for the same resource → technical issue
+  #
+  # Cross-reference logic:
+  #   Enrollment API  → langContentStatus.<language>.<do_id> : status_value
+  #                     status 1 = In-Progress, 2 = Completed
+  #   Admin Content State API → consumptionRecords[].contentid + .language + .status
+  #                             status 2 = completed on backend
+  #
+  # A TECHNICAL ISSUE exists when, for a given leaf DO_ID:
+  #   - Enrollment langContentStatus shows status = 1  (In-Progress for the learner)
+  #   - Admin Content State shows    status = 2  (completed on the server)
+  #   meaning the backend has recorded completion but the portal hasn't reflected it.
+  #
+  # Transform: compare_enrollment_vs_admin_state
+  #   Inputs:
+  #     ctx.collected.lang_content_status  — raw langContentStatus object from Enrollment API
+  #                                          e.g. { "english": { "do_xxx": 1, "do_yyy": 2 } }
+  #     ctx.collected.admin_content_states — list from consumptionRecords
+  #                                          e.g. [{ contentid, language, status }, ...]
+  #   Returns: True if any resource has enrollment_status=1 AND admin_status=2
   # ===========================================================================
   - id: branch_on_technical_issue
     type: branch
     rules:
-      - { if: "has_technical_issue(ctx.collected.admin_content_states, ctx.collected.enrollment_status)",
+      - { if: "compare_enrollment_vs_admin_state(ctx.collected.lang_content_status, ctx.collected.admin_content_states) == True",
           then: confirm_technical_issue }
       - { if: "ctx.collected.completion_pct == 100",
           then: branch_certificate_not_generated }
     default: api_read_course_content
 
   # ===========================================================================
-  # STEP 6 — Technical Issue Found → Obtain User Confirmation
+  # STEP 6 — Technical Issue Found → Obtain User Confirmation (SOP 6.1.1)
   # ===========================================================================
   - id: confirm_technical_issue
     type: message
     prompt:
       text: |
-        Upon checking, we found some **technical issues** affecting one or more resources under the selected **{{ ctx.collected.course_name }}**.
+        Upon checking, we found some **technical issues** affecting one or more resources under the selected **Course / Program / Event**.
 
         We can raise a support ticket for further investigation.
 
@@ -342,7 +456,7 @@ nodes:
       yes: technical_issue_collect_email
       no:  technical_issue_declined
 
-  # User declined — close politely
+  # User declined — close the conversation politely (SOP 6.3)
   - id: technical_issue_declined
     type: message
     prompt:
@@ -388,10 +502,15 @@ nodes:
         content_do_id:  "{{ ctx.collected.content_do_id }}"
       priority_override: P3
     on_complete: confirm_ticket
+    # NOTE: confirm_ticket is provided by the imported _zoho_ticket fragment.
+    # It POSTs to Zoho Desk → maps $.ticketNumber → collected.ticket_id
+    # → routes to ticket_confirmation which displays: "✅ Ticket #XXXXX raised."
 
   # ===========================================================================
-  # STEP 7 — No Technical Issue: Identify Pending Resources
-  # Cross-check leaf nodes from content/read API
+  # STEP 7 — No Technical Issue Found
+  # 7.1 Identify the pending resource(s)
+  # 7.2 Proceed to determine the resource type (SCORM / Non-SCORM / Assessment)
+  # Cross-check leaf nodes using content/read API against completed_ids
   # ===========================================================================
   - id: api_read_course_content
     type: api_call
@@ -400,6 +519,10 @@ nodes:
       method: GET
       url: "/api/content/v1/read/{{ ctx.collected.course_id }}"
     response_mapping:
+      # Path is $.content.leafNodes — KarmayogiService DOES unwrap the result
+      # envelope (returns data["result"] directly), so $.result.* paths are
+      # WRONG. The unwrapped response shape is: {"content": {"leafNodes": [...]}}
+      # hence $.content.leafNodes is the correct path after unwrapping.
       - { from: "$.content.leafNodes",
           to:   collected.incomplete_ids,
           transform: diff_leaf_nodes,
@@ -429,6 +552,9 @@ nodes:
     next: api_enrollment_revalidate
 
   # Revalidate: re-call Enrollment API (Step 2 repeated)
+  # langContentStatus is re-fetched here so that branch_revalidate_technical_issue
+  # compares FRESH enrollment status against fresh Admin Content State status
+  # (SOP Section 12.1 — "Compare the Enrollment API status with the Admin Content State API status").
   - id: api_enrollment_revalidate
     type: api_call
     integration: karmayogi
@@ -440,12 +566,16 @@ nodes:
           filters:
             courseId: "{{ ctx.collected.course_id }}"
           fields: ["id", "courseId", "contentId", "status", "completionPercentage",
-                   "issuedCertificates", "contentType", "primaryCategory"]
+                   "issuedCertificates", "contentType", "primaryCategory",
+                   "langContentStatus"]
     response_mapping:
-      - { from: "$.result.enrollments[0].issuedCertificates", to: collected.certificate_issued,
+      - { from: "$.courses[0].issuedCertificates", to: collected.certificate_issued,
           transform: has_issued_certificates }
-      - { from: "$.result.enrollments[0].completionPercentage", to: collected.completion_pct }
-      - { from: "$.result.enrollments[0].status",            to: collected.enrollment_status }
+      - { from: "$.courses[0].completionPercentage", to: collected.completion_pct }
+      - { from: "$.courses[0].status",            to: collected.enrollment_status }
+      # Refresh langContentStatus so the revalidation comparison uses up-to-date
+      # enrollment-side resource statuses (required by SOP 12.1).
+      - { from: "$.courses[0].langContentStatus", to: collected.lang_content_status }
     on_success: branch_revalidate_certificate
     on_error:
       any: resolution_generic_error
@@ -464,28 +594,40 @@ nodes:
     integration: karmayogi
     request:
       method: POST
-      url: "/api/admin/content/v1/state"
+      url: "/api/admin/content/state/read"
       body:
         request:
-          userId:    "{{ ctx.user_id_hash }}"
-          courseIds: "{{ ctx.collected.child_course_ids | default([ctx.collected.course_id]) }}"
+          userId:   "{{ ctx.user_id_hash }}"
+          # Same inline if-else fix as api_admin_content_state — see comment there.
+          courseId: "{{ ctx.collected.child_course_ids[0] if ctx.collected.child_course_ids else ctx.collected.course_id }}"
+          batchId:  "{{ ctx.collected.batch_id }}"
     response_mapping:
-      - { from: "$.result.contentList[*]",
+      # KarmayogiService unwraps result → correct path is $.consumptionRecords[*]
+      - { from: "$.consumptionRecords[*]",
           to:   collected.admin_content_states,
-          transform: extract_content_state_list }
+          transform: extract_consumption_records }
     on_success: branch_revalidate_technical_issue
     on_error:
-      any: resolution_generic_error
+      # Same fallback as the primary api_admin_content_state — if batchId is
+      # unavailable during revalidation, skip the technical-issue cross-check
+      # and proceed directly to internal escalation (SOP 12.3).
+      any: resolution_escalate_internally
     timeout_ms: 8000
 
+  # SOP 12.2 — If a technical issue is identified during revalidation → Section 6
+  # (enrollment status ≠ Admin Content State status for one or more resources)
+  # SOP 12.3 — If no technical issue is identified → escalate internally
+  # Both comparisons now use FRESH langContentStatus fetched by api_enrollment_revalidate.
   - id: branch_revalidate_technical_issue
     type: branch
     rules:
-      - { if: "has_technical_issue(ctx.collected.admin_content_states, ctx.collected.enrollment_status)",
+      - { if: "compare_enrollment_vs_admin_state(ctx.collected.lang_content_status, ctx.collected.admin_content_states) == True",
           then: confirm_technical_issue }
     default: resolution_escalate_internally
 
-  # No technical issue on revalidation → escalate internally
+  # SOP 12.3 — No technical issue identified on revalidation → escalate internally
+  # (all resources show as completed on both Enrollment API and Admin Content State API
+  #  but certificate has still not been generated — escalate to the support team)
   - id: resolution_escalate_internally
     type: message
     prompt:
@@ -500,7 +642,21 @@ nodes:
     next: satisfied
 
   # ===========================================================================
-  # STEP 8 — Identify Resource Type: SCORM / Non-SCORM / Assessment
+  # STEP 8 — Identify Resource Type (SOP 8.1)
+  #
+  # 8.1 Content Search by incomplete resource IDs.
+  #     POST /api/content/v1/search
+  #     filters.identifier = incomplete_ids[] — the API returns ONLY the pending
+  #     resources (identified in Step 7 via the leaf-node diff). No client-side
+  #     filtering is required; non-filtered transforms are used directly.
+  #     KarmayogiService unwraps {result:{...}} → content accessible at $.content[*]
+  #
+  # Routing decision (priority order):
+  #   Priority 1: all incomplete resources have primaryCategory "Course Assessment"
+  #               → Assessment guidance
+  #   Priority 2: any incomplete resource has mimeType "application/vnd.ekstep.html-archive"
+  #               → SCORM guidance
+  #   Priority 3: default → Standard guidance
   # ===========================================================================
   - id: api_fetch_resource_metadata
     type: api_call
@@ -511,25 +667,61 @@ nodes:
       body:
         request:
           filters:
+            # Query directly by incomplete resource IDs (from Step 7 leaf-node diff).
+            # The API returns metadata only for the pending resources; no client-side
+            # filtering against incomplete_ids is needed.
             identifier: "{{ ctx.collected.incomplete_ids }}"
+            # Explicitly include all statuses so that resources in Draft / Review /
+            # Retired state (common for leaf nodes the user has never opened) are
+            # returned. Without this filter the API defaults to Live-only and the
+            # content array comes back empty → blank resource name in the message.
+            status:
+              - "Live"
+              - "Review"
+              - "Draft"
+              - "Retired"
           isSecureSettingsDisabled: true
           sort_by:
             createdOn: "desc"
-          fields: ["identifier", "name", "mimeType", "status", "duration",
-                   "primaryCategory"]
-          facets: ["status"]
+          fields:
+            - "identifier"
+            - "name"
+            - "mimeType"
+            - "status"
+            - "duration"
+            - "primaryCategory"
+          facets:
+            - "status"
           limit: 1000
     response_mapping:
-      - { from: "$.content[*].name",    to: collected.incomplete_resource_names,   transform: extract_all_names }
-      - { from: "$.content[*].mimeType", to: collected.has_scorm_resources,         transform: detect_scorm }
-      - { from: "$.content[*]",          to: collected.scorm_resource_name,         transform: extract_scorm_resource_name }
-      - { from: "$.content[*]",          to: collected.scorm_resource_duration_min, transform: extract_scorm_duration_minutes }
-      - { from: "$.content[*]",          to: collected.all_resources_assessment,    transform: detect_assessment_only }
+      # Priority 1 — Check if ALL pending resources are Course Assessments
+      - { from: "$.content[*]", to: collected.all_resources_assessment,
+          transform: detect_assessment_only }
+      # Priority 2 — Check if any resource has SCORM mimeType
+      - { from: "$.content[*].mimeType", to: collected.has_scorm_resources,
+          transform: detect_scorm }
+      # Surface incomplete resource names for display in resolution messages
+      - { from: "$.content[*].name", to: collected.incomplete_resource_names,
+          transform: extract_all_names }
+      # SCORM-specific: first SCORM resource name + duration (minutes)
+      - { from: "$.content[*]", to: collected.scorm_resource_name,
+          transform: extract_scorm_resource_name }
+      - { from: "$.content[*]", to: collected.scorm_resource_duration_min,
+          transform: extract_scorm_duration_minutes }
     on_success: branch_on_resource_type
     on_error:
       any: resolution_generic_error
     timeout_ms: 8000
 
+
+  # ===========================================================================
+  # STEP 8.1 — Branch on Resource Type
+  #
+  # Decision order (per SOP 8.1):
+  #   1. primaryCategory = "Course Assessment" (8.1.2) → resolution_assessment_guidance
+  #   2. primaryCategory = "Course" + mimeType = "application/vnd.ekstep.html-archive" (8.1.1) → resolution_scorm_guidance
+  #   3. primaryCategory = "Course" + other mimeType (8.1.1) → resolution_non_scorm_guidance
+  # ===========================================================================
   - id: branch_on_resource_type
     type: branch
     rules:
@@ -537,33 +729,40 @@ nodes:
       - { if: "ctx.collected.has_scorm_resources == true",      then: resolution_scorm_guidance }
     default: resolution_non_scorm_guidance
 
+
   # ===========================================================================
   # STEP 9 — SCORM Resource Flow
+  #
+  # 9.1.1 Share the pending resource details (exact SOP wording)
+  # 9.2   SCORM-specific completion instructions
+  # 9.3   Navigation steps to locate and complete the pending resource
   # ===========================================================================
   - id: resolution_scorm_guidance
     type: resolution
     prompt:
       text: |
-        We found that the resource **"{{ ctx.collected.scorm_resource_name }}"** is still **In Progress** or **Not Started**.
+        We found that the resource **“{{ ctx.collected.scorm_resource_name }}”** is still **In Progress / Not Started**.
 
-        This resource is in **SCORM format**. Please follow the instructions below carefully:
+        This resource is in **SCORM format**.
+
+        Kindly follow the below instructions carefully:
 
         - Complete the resource in **one continuous session**.
         - **Do not increase the playback speed** while viewing the content.
         - Complete **at least 60% of the total duration** of the resource.
-        - **Do not switch browser tabs or move to another application** while the SCORM resource is playing, as this may interrupt progress tracking and prevent completion from being recorded.
+        - **Do not switch browser tabs or move to another application** while the SCORM resource is playing, as doing so may interrupt progress tracking and prevent completion from being recorded.
         - After completing the resource, click the **Next** button.
 
         Progress will be updated only after the above steps are completed successfully.
     steps:
-      - "Go to **Profile**"
-      - "Click on **My Learning**"
-      - "Open the **In Progress** section"
-      - "Locate and select **{{ ctx.collected.course_name }}**"
-      - "Click **Resume**"
-      - "Expand each module using the **+ icon**"
-      - "Check for content items **without a blue tick mark**"
-      - "Complete all pending resources until every item displays a **blue tick**"
+      - "Go to **Profile**."
+      - "Open **My Learning**."
+      - "Navigate to **In Progress**."
+      - "Select the relevant **Course / Program / Event**."
+      - "Click **Resume**."
+      - "Expand each module using the **“+” icon**."
+      - "Check for content items that **do not have a blue tick mark**."
+      - "Complete all pending resources until every item displays a **blue tick**."
     follow_up:
       text: "Has your issue been resolved? Please let us know if you need any further assistance."
       quick_replies:
@@ -577,6 +776,9 @@ nodes:
 
   # ===========================================================================
   # STEP 10 — Non-SCORM Resource Flow
+  #
+  # 10.1.1 Messaging: resource is still incomplete — revisit and complete
+  # 10.2   Same navigation steps as Section 9.3
   # ===========================================================================
   - id: resolution_non_scorm_guidance
     type: resolution
@@ -586,13 +788,16 @@ nodes:
 
         {{ ctx.collected.incomplete_resource_names }}
 
-        Kindly revisit and complete the above resource(s).
+        Kindly revisit and complete the pending resource(s).
     steps:
-      - "Go to **Profile** → **My Learning** → **In Progress**"
-      - "Locate **{{ ctx.collected.course_name }}** and click **Resume**"
-      - "Expand each module using the **+ icon**"
-      - "Check for content items **without a blue tick mark**"
-      - "Complete all pending resources until every item displays a **blue tick**"
+      - "Go to **Profile**."
+      - "Open **My Learning**."
+      - "Navigate to **In Progress**."
+      - "Select the relevant **Course / Program / Event**."
+      - "Click **Resume**."
+      - "Expand each module using the **“+” icon**."
+      - "Check for content items that **do not have a blue tick mark**."
+      - "Complete all pending resources until every item displays a **blue tick**."
     follow_up:
       text: "Has your issue been resolved? Please let us know if you need any further assistance."
       quick_replies:
@@ -611,11 +816,11 @@ nodes:
     type: resolution
     prompt:
       text: |
-        We found that all learning resources under **{{ ctx.collected.course_name }}** have been completed successfully.
+        We found that all learning resources have been completed successfully.
 
-        However, the **assessment** is still pending.
+        However, the assessment is still pending.
 
-        Kindly complete the assessment to achieve **100% completion**.
+        Kindly complete the assessment to achieve 100% completion.
     steps:
       - "Go to **Profile** → **My Learning** → **In Progress**"
       - "Open **{{ ctx.collected.course_name }}** → click **Resume**"
@@ -638,9 +843,9 @@ nodes:
     prompt:
       text: "I'm sorry to hear that. Could you tell me more about the issue you're facing with the assessment?"
     quick_replies:
-      - { id: mobile,         label: "📱 Unable to complete from Mobile" }
-      - { id: limit_exceeded, label: "🚫 Assessment Limit Exceeded" }
-      - { id: other_error,    label: "⚠️ Any Other Error" }
+      - { id: mobile,         label: "Unable to complete the assessment from Mobile." }
+      - { id: limit_exceeded, label: "Assessment Limit Exceeded." }
+      - { id: other_error,    label: "Any Other Error." }
     disable_input: true
     on_reply:
       mobile:         assessment_mobile_guidance
@@ -649,20 +854,20 @@ nodes:
 
   # Section 11.4 — Mobile guidance
   - id: assessment_mobile_guidance
-    type: message
+    type: resolution
     prompt:
       text: |
-        Kindly try completing the assessment through the **web portal** by following the steps below:
-
-        1. Open **Google Chrome** or any web browser.
-        2. Search for **iGOT Karmayogi**.
-        3. Open the **iGOT Karmayogi Portal**.
-        4. From the browser menu, enable **Desktop Site**.
-        5. Log in using your credentials.
-        6. Navigate to **My Learning**.
-        7. Open the relevant **Course / Program / Event**.
-        8. Click **Resume**.
-        9. Open the assessment and complete it.
+        Kindly try completing the assessment through the web portal by following the below steps.
+    steps:
+      - "Open Google Chrome or any web browser."
+      - "Search for iGOT Karmayogi."
+      - "Open the iGOT Karmayogi Portal."
+      - "From the browser menu, enable Desktop Site."
+      - "Log in using your credentials."
+      - "Navigate to My Learning."
+      - "Open the relevant Course / Program / Event."
+      - "Click Resume."
+      - "Open the assessment and complete it."
     next: satisfied
 
   # Section 11.5 — Assessment Limit Exceeded: call Assessment Limit API
@@ -671,11 +876,11 @@ nodes:
     integration: karmayogi
     request:
       method: GET
-      url: "/api/assessment/v1/attempts/{{ ctx.user_id_hash }}/{{ ctx.collected.content_do_id }}"
+      url: "/api/admin/assesment/retake/count?assessmentIdentifier={{ ctx.collected.content_do_id }}&userId={{ ctx.user_id_hash }}&editMode=false"
     response_mapping:
-      - { from: "$.result.remainingAttempts", to: collected.remaining_attempts }
-      - { from: "$.result.maxAttempts",       to: collected.max_attempts }
-      - { from: "$.result.usedAttempts",      to: collected.used_attempts }
+      - { from: "$.result",                 to: collected.remaining_attempts, transform: calculate_remaining_attempts }
+      - { from: "$.result.attemptsAllowed", to: collected.max_attempts }
+      - { from: "$.result.attemptsMade",    to: collected.used_attempts }
     on_success: branch_on_assessment_attempts
     on_error:
       any: resolution_generic_error
@@ -686,16 +891,53 @@ nodes:
     rules:
       - { if: "ctx.collected.remaining_attempts > 0",
           then: resolution_attempts_available }
-    default: progress_collect_email   # Limit actually exceeded → raise ticket
+    default: assessment_limit_collect_email   # Limit actually exceeded → raise ticket
 
   # Attempts still available → inform user
   - id: resolution_attempts_available
     type: message
     prompt:
       text: |
-        Upon verification, you still have **{{ ctx.collected.remaining_attempts }} attempt(s)** remaining.
+        Upon verification, you still have {{ ctx.collected.remaining_attempts }} attempt(s) remaining.
 
         Kindly retry the assessment.
+    next: satisfied
+
+  - id: assessment_limit_collect_email
+    type: collect
+    prompt:
+      text: "I'll raise a support ticket for you. Please enter your **registered email address**:"
+    field:
+      name: collected.user_email
+      type: email
+      validation:
+        pattern:   "^[\\w.+-]+@[\\w-]+\\.[a-z]{2,}$"
+        error_msg: "That doesn't look like a valid email. Please try again."
+    next: assessment_limit_auto_ticket
+
+  - id: assessment_limit_auto_ticket
+    type: transfer_llm
+    auto_raise: true
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user has exceeded their assessment attempt limit.
+        Generate a Zoho support ticket.
+        Subject: "Assessment Limit Exceeded — <course_name>"
+        Description: include user_id, course_name, course_id, content_do_id, and user_email.
+      priority_override: P3
+    on_complete: assessment_limit_ticket_confirm
+
+  - id: assessment_limit_ticket_confirm
+    type: message
+    prompt:
+      text: |
+        We have verified that the assessment attempt limit has been exceeded.
+
+        A support ticket (Ticket ID: #{{ ctx.collected.ticket_id }}) has been raised and shared with the concerned team for further investigation.
     next: satisfied
 
   # Section 11.6 — Any Other Error: capture error, raise ticket
@@ -735,8 +977,14 @@ nodes:
         Description: include user_id, course_name, course_id, content_do_id,
           error_description, and user_email.
       priority_override: P3
-    on_complete: confirm_ticket
+    on_complete: assessment_other_error_ticket_confirm
 
+  - id: assessment_other_error_ticket_confirm
+    type: message
+    prompt:
+      text: |
+        We have captured the reported error and raised a support ticket (Ticket ID: #{{ ctx.collected.ticket_id }}) for further investigation.
+    next: satisfied
   # ===========================================================================
   # SECTION 13 — Engineering Excel Remarks Handling
   # Triggered after Engineering Team updates remarks in the backend.
@@ -806,25 +1054,29 @@ nodes:
     integration: karmayogi
     request:
       method: POST
-      url: "/api/admin/content/v1/state"
+      url: "/api/admin/content/state/read"
       body:
         request:
-          userId:    "{{ ctx.user_id_hash }}"
-          courseIds: "{{ ctx.collected.child_course_ids | default([ctx.collected.course_id]) }}"
+          userId:   "{{ ctx.user_id_hash }}"
+          # Same inline if-else fix as api_admin_content_state — avoids Jinja2
+          # NativeEnvironment Undefined error when child_course_ids is absent.
+          courseId: "{{ ctx.collected.child_course_ids[0] if ctx.collected.child_course_ids else ctx.collected.course_id }}"
+          batchId:  "{{ ctx.collected.batch_id }}"
     response_mapping:
-      - { from: "$.result.contentList[*]",
+      # KarmayogiService unwraps result → correct path is $.consumptionRecords[*]
+      - { from: "$.consumptionRecords[*]",
           to:   collected.admin_content_states,
-          transform: extract_content_state_list }
+          transform: extract_consumption_records }
     on_success: branch_remark_technical_issue
     on_error:
-      any: resolution_generic_error
+      any: api_read_course_content
     timeout_ms: 8000
 
   # Remark 2 — Scenario A: Technical issue found again (Section 13.2.2)
   - id: branch_remark_technical_issue
     type: branch
     rules:
-      - { if: "has_technical_issue(ctx.collected.admin_content_states, ctx.collected.enrollment_status)",
+      - { if: "compare_enrollment_vs_admin_state(ctx.collected.lang_content_status, ctx.collected.admin_content_states) == True",
           then: remark_revalidate_tech_issue_confirm }
     default: remark_pending_resources_found
 
