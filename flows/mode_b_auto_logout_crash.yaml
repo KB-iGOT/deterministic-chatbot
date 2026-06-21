@@ -129,7 +129,6 @@ nodes:
 
   - id: android_raise_ticket
     type: transfer_llm
-    auto_raise: true
     llm_context:
       include_messages:  true
       include_collected: true
@@ -142,6 +141,7 @@ nodes:
         Description: Include device details — Device Name: {{ ctx.collected.device_name }}, Device Model: {{ ctx.collected.device_model }}, Android Version: {{ ctx.collected.android_version }}. Note that the issue persisted after clearing the app cache and data.
       priority_override: P3
     on_complete: android_ticket_confirmed
+    on_restart: ask_device_type
 
   - id: android_ticket_confirmed
     type: message
@@ -188,7 +188,6 @@ nodes:
 
   - id: ios_raise_ticket
     type: transfer_llm
-    auto_raise: true
     llm_context:
       include_messages:  true
       include_collected: true
@@ -201,6 +200,7 @@ nodes:
         Description: Include device details — Device Name: {{ ctx.collected.device_name }}, Device Model: {{ ctx.collected.device_model }}, iOS Version: {{ ctx.collected.ios_version }}.
       priority_override: P3
     on_complete: ios_ticket_confirmed
+    on_restart: ask_device_type
 
   - id: ios_ticket_confirmed
     type: message

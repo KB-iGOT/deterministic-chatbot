@@ -701,7 +701,6 @@ nodes:
 
   - id: raise_ticket
     type: transfer_llm
-    auto_raise: true
     llm_context:
       include_messages:  true
       include_collected: true
@@ -714,6 +713,7 @@ nodes:
         Description: The CBP plan API returned no data for this user. Include user email ({{ ctx.collected.user_email }}) and rootOrgId ({{ ctx.collected.root_org_id }}).
       priority_override: P3
     on_complete: ticket_confirmed
+    on_restart: fetch_user_profile
 
   - id: ticket_confirmed
     type: message

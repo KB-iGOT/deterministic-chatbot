@@ -36,6 +36,7 @@ def _get_interrupt_nodes(flow: dict[str, Any]) -> list[str]:
     - ``message`` nodes that have a ``quick_replies`` key
     - all ``collect`` nodes
     - ``resolution`` nodes that have a ``follow_up`` key
+    - ``transfer_llm`` nodes without ``auto_raise: true`` (show confirmation, wait for user)
     """
     result: list[str] = []
     for node in flow.get("nodes", []):
@@ -48,6 +49,8 @@ def _get_interrupt_nodes(flow: dict[str, Any]) -> list[str]:
         elif ntype == "collect":
             result.append(nid)
         elif ntype == "resolution" and "follow_up" in node:
+            result.append(nid)
+        elif ntype == "transfer_llm" and not node.get("auto_raise", False):
             result.append(nid)
     return result
 

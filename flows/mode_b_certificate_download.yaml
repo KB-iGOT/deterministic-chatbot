@@ -267,7 +267,6 @@ nodes:
 
   - id: c1_auto_ticket
     type: transfer_llm
-    auto_raise: true
     llm_context:
       include_messages:  true
       include_collected: true
@@ -282,6 +281,7 @@ nodes:
         and a brief summary of what the user tried.
       priority_override: P4
     on_complete: confirm_ticket
+    on_restart: ask_certificate_issue
 
   # ===========================================================================
   # C3: Incorrect Name on Certificate (UC-02)
@@ -422,7 +422,6 @@ nodes:
 
   - id: generic_auto_ticket
     type: transfer_llm
-    auto_raise: true
     llm_context:
       include_messages:  true
       include_collected: true
@@ -434,3 +433,4 @@ nodes:
         Description: summarise the issue type (sub_scenario if available), course details, and what was tried.
       priority_override: P4
     on_complete: confirm_ticket
+    on_restart: ask_certificate_issue

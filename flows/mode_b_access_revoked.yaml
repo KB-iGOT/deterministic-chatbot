@@ -419,16 +419,8 @@ nodes:
         This might be a temporary problem. If it continues, please email our support team directly at **support@igotkarmayogi.gov.in** for assistance.
     next: satisfied
 
-  - id: escalate_to_ticket
-    type: collect
-    prompt:
-      text: "I will raise a support ticket for your access issue. Please enter your **registered email address**:"
-    field: { name: collected.email, type: email }
-    next: access_revoked_auto_ticket
-
   - id: access_revoked_auto_ticket
     type: transfer_llm
-    auto_raise: true
     llm_context:
       include_messages:  true
       include_collected: true
@@ -441,6 +433,7 @@ nodes:
         Description: Include whether a transfer request was already pending (wf_transfer_id: {{ ctx.collected.wf_transfer_id }}), the target organization ({{ ctx.collected.transfer_dept_name }}), which path the user followed (e.g., pending request, no request, button disabled, org not found), and the user's current organization/channel ({{ ctx.collected.user_channel }}).
       priority_override: P2
     on_complete: confirm_ticket
+    on_restart: intro_context
 
   - id: confirm_ticket
     type: message

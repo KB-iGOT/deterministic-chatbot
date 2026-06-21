@@ -48,7 +48,6 @@ from typing import Any, Callable
 from app.engine.activity import Activity
 from app.engine.nodes.base import NodeHandler
 from app.engine.state import ConversationState, FlowStatus, TicketDraft
-from app.engine.template import render
 
 
 class TransferLLMNode(NodeHandler):
@@ -73,38 +72,44 @@ class TransferLLMNode(NodeHandler):
         llm_directives = cfg["llm_directives"]
 
         async def run(state: ConversationState) -> dict:
+            import asyncio as _asyncio
             llm_adapter = self.services.get("llm")
             presidio = self.services.get("presidio")
-
-            # Per-session LLM call cap (cost control)
-            if state.llm_calls_this_session >= 1:
-                return _fallback_to_template(state, cfg, reason="session_cap", auto_raise=auto_raise)
-
-            # Kill-switch
             from app.config import settings
 
-            if settings.llm_kill_switch or llm_adapter is None:
-                return _fallback_to_template(state, cfg, reason="llm_disabled_or_unavailable", auto_raise=auto_raise)
+            # Always build the template draft first — instant, always populated
+            draft = _build_template_draft(state, cfg, llm_directives)
+            llm_used = False
 
-            # Build LLM input from llm_context config
-            llm_input = _build_llm_input(state, llm_context_cfg, llm_directives, presidio)
-
-            try:
-                draft_dict = await llm_adapter.generate_ticket_summary(
-                    transcript=llm_input["transcript"],
-                    collected=llm_input["collected"],
-                    flow_meta=llm_input["flow_meta"],
-                    directives=llm_directives,
-                )
-                draft = TicketDraft(**draft_dict)
-            except Exception:  # noqa: BLE001
-                # Graceful fallback to template summary
-                return _fallback_to_template(state, cfg, reason="llm_call_failed", auto_raise=auto_raise)
+            # Try LLM to enhance the draft (only if not already capped / kill-switched)
+            if (
+                state.llm_calls_this_session < 1
+                and not settings.llm_kill_switch
+                and llm_adapter is not None
+            ):
+                llm_input = _build_llm_input(state, llm_context_cfg, llm_directives, presidio)
+                try:
+                    draft_dict = await _asyncio.wait_for(
+                        llm_adapter.generate_ticket_summary(
+                            transcript=llm_input["transcript"],
+                            collected=llm_input["collected"],
+                            flow_meta=llm_input["flow_meta"],
+                            directives=llm_directives,
+                        ),
+                        timeout=float(settings.llm_timeout_seconds),
+                    )
+                    candidate = TicketDraft(**draft_dict)
+                    if candidate.subject and candidate.description:
+                        # Carry over the template-built conversation trail — LLM doesn't return it
+                        draft = candidate.model_copy(update={
+                            "conversation_trail": draft.conversation_trail,
+                        })
+                        llm_used = True
+                except Exception:  # noqa: BLE001
+                    pass  # keep template draft
 
             if auto_raise:
-                # Mode B auto-raise: generate draft, show brief acknowledgement,
-                # then proceed directly to on_complete (confirm_ticket) without
-                # asking the user to confirm.
+                # Mode B auto-raise: show brief acknowledgement, proceed to on_complete
                 activities = [
                     Activity.markdown(
                         "📋 I wasn't able to resolve your issue through the self-service steps.\n\n"
@@ -117,32 +122,23 @@ class TransferLLMNode(NodeHandler):
                     "pending_activities": state.pending_activities + activities,
                     "current_node": cfg["on_complete"],
                     "status": FlowStatus.ACTIVE,
-                    "llm_calls_this_session": state.llm_calls_this_session + 1,
+                    "llm_calls_this_session": state.llm_calls_this_session + (1 if llm_used else 0),
                 }
 
+
             # Standard mode: show draft + ask for confirmation
-            summary_msg = render(
-                "📋 Here's what I'll raise as a support ticket:\n\n"
-                "**Subject:** {{ subject }}\n"
-                "**Category:** {{ category }} → {{ sub_category | default('-') }}\n"
-                "**Priority:** {{ priority }}\n\n"
-                "{{ description }}\n\n"
-                "Confirm to raise.",
-                {
-                    "subject": draft.subject,
-                    "category": draft.category,
-                    "sub_category": draft.sub_category,
-                    "priority": draft.priority,
-                    "description": draft.description[:300],
-                },
+            summary_msg = (
+                f"📋 **Issue Identified:** {draft.subject}\n\n"
+                f"{draft.description[:500]}\n\n"
+                f"Please confirm if the above details are correct."
             )
 
             activities = [
                 Activity.markdown(summary_msg).model_dump(exclude_none=True),
                 Activity.quick_replies(
                     choices=[
-                        {"id": "confirm", "label": "✅ Yes — raise ticket"},
-                        {"id": "edit", "label": "✏️ Let me correct something"},
+                        {"id": "confirm", "label": "✅ Confirm"},
+                        {"id": "restart", "label": "🔄 Discard & Restart"},
                     ]
                 ).model_dump(exclude_none=True),
             ]
@@ -152,13 +148,40 @@ class TransferLLMNode(NodeHandler):
                 "pending_activities": state.pending_activities + activities,
                 "current_node": cfg["id"],
                 "status": FlowStatus.ESCALATING,
-                "llm_calls_this_session": state.llm_calls_this_session + 1,
+                "llm_calls_this_session": state.llm_calls_this_session + (1 if llm_used else 0),
             }
 
         return run
 
     def next_node(self, cfg: dict[str, Any]) -> str | None:
+        # Standard mode uses conditional edges (register_conditional_edges returns True)
+        if not cfg.get("auto_raise", False):
+            return None
         return cfg.get("on_complete")
+
+    def register_conditional_edges(self, graph: Any, cfg: dict[str, Any]) -> bool:
+        if cfg.get("auto_raise", False):
+            return False
+
+        from langgraph.graph import END
+
+        on_complete = cfg["on_complete"]
+        on_restart = cfg.get("on_restart")
+
+        def _route(state: ConversationState) -> str:
+            choice = (state.collected or {}).get("_last_choice_id", "")
+            if choice == "restart" and on_restart:
+                return on_restart
+            return on_complete
+
+        targets = {on_complete: on_complete}
+        if on_restart:
+            targets[on_restart] = on_restart
+        else:
+            targets[END] = END
+
+        graph.add_conditional_edges(cfg["id"], _route, targets)
+        return True
 
 
 def _build_llm_input(
@@ -182,10 +205,6 @@ def _build_llm_input(
         transcript = presidio.redact(transcript)
 
     # Strip internal routing keys before sending to LLM.
-    # These are flow-engine bookkeeping fields — not meaningful to the ticket summary
-    # and can cause the LLM to leak internal IDs (e.g. "sub_scenario L1") into descriptions.
-    _INTERNAL_KEY_PREFIXES = ("_", "sub_scenario", "report_error", "leaderboard_issue",
-                               "bulk_issue", "bulk_error", "user_role", "otp_channel")
     raw_collected = state.collected if ctx_cfg.get("include_collected", True) else {}
     collected_for_llm = {
         k: v for k, v in (raw_collected or {}).items()
@@ -202,6 +221,149 @@ def _build_llm_input(
         "collected": collected_for_llm,
         "flow_meta": flow_meta,
     }
+
+
+_INTERNAL_KEY_PREFIXES = (
+    "_", "sub_scenario", "report_error", "leaderboard_issue",
+    "bulk_issue", "bulk_error", "user_role", "otp_channel",
+    "user_found_count", "fetched_user_id", "root_org_id", "org_channel",
+    "profile_status", "org_search_count",
+)
+
+_READABLE_KEYS = {
+    # Common
+    "user_id":              "User ID",
+    "email":                "Email",
+    "mobile":               "Phone",
+    "first_name":           "First Name",
+    "last_name":            "Last Name",
+    "user_email":           "Email",
+    "user_primary_email":   "Primary Email",
+    "org_name":             "Organisation",
+    "transfer_dept_name":   "Target Organisation",
+    "identifier":           "Identifier",
+    "update_type":          "Update Type",
+    # Course / content
+    "course_name":          "Course",
+    "course_id":            "Course ID",
+    "resource_name":        "Resource",
+    "resource_type":        "Resource Type",
+    # Device
+    "device_name":          "Device Name",
+    "device_model":         "Device Model",
+    "android_version":      "Android Version",
+    "ios_version":          "iOS Version",
+    # Certificate flow (C1/C3)
+    "c1_course_name":       "Course",
+    "c1_course_id":         "Course ID",
+    "c1_enrollment_status": "Enrollment Status",
+    "c1_completion_pct":    "Completion %",
+    "c1_completed_on_iso":  "Completed On",
+    "c3_first_name":        "Name (First)",
+    "c3_last_name":         "Name (Last)",
+    # CAP / APAR
+    "cap_name":             "CAP Name",
+    "ec1_course_name":      "Course (APAR)",
+    # Weekly clap
+    "total_claps":          "Total Claps",
+    "w1_label":             "Week 1",
+    "w2_label":             "Week 2",
+    "w3_label":             "Week 3",
+    "w4_label":             "Week 4",
+}
+
+
+def _build_template_draft(
+    state: ConversationState,
+    cfg: dict[str, Any],
+    directives: dict[str, Any],
+) -> TicketDraft:
+    """Build a clean, readable ticket draft from collected fields — no LLM involved.
+
+    Used as the baseline for the confirmation preview and as fallback for Zoho
+    when the LLM is unavailable or returns empty fields.
+    """
+    collected = state.collected or {}
+    priority = directives.get("priority_override", "P3")
+
+    # Fields to exclude from the summary body — either in the header table or internal routing
+    _HEADER_FIELDS = {"email", "mobile", "first_name", "last_name", "user_id"}
+    _SKIP_FIELDS   = {"category", "device_type", "youtube_restricted"}
+
+    field_items: list[tuple[str, Any]] = []
+    for k, v in collected.items():
+        if any(k.startswith(p) for p in _INTERNAL_KEY_PREFIXES):
+            continue
+        if v is None or v == "" or v == [] or v == {}:
+            continue
+        if k in _HEADER_FIELDS or k in _SKIP_FIELDS:
+            continue
+        label = _READABLE_KEYS.get(k, k.replace("_", " ").title())
+        field_items.append((label, v))
+
+    flow_label = (state.flow_id or "").replace("_", " ").title()
+    subject = directives.get("subject_hint") or _derive_subject(flow_label, collected)
+
+    # Plain text — no markdown symbols. Renders in chat and embeds cleanly in Zoho HTML.
+    if field_items:
+        description = "Details collected:\n\n" + "\n".join(
+            f"{label}: {v}" for label, v in field_items
+        )
+    else:
+        description = "No additional details collected."
+
+    return TicketDraft(
+        subject=subject,
+        description=description,
+        category=collected.get("category", "General"),
+        sub_category=collected.get("sub_scenario"),
+        priority=priority,
+        severity="Sev 3",
+        conversation_trail=_build_conversation_trail(state),
+    )
+
+
+def _derive_subject(flow_label: str, collected: dict[str, Any]) -> str:
+    """Build a specific ticket subject from collected context fields."""
+    course = (
+        collected.get("c1_course_name")
+        or collected.get("ec1_course_name")
+        or collected.get("course_name")
+    )
+    resource = collected.get("resource_name")
+    cap = collected.get("cap_name")
+
+    if resource and course:
+        return f"{flow_label} — {course} / {resource}"
+    if course:
+        return f"{flow_label} — {course}"
+    if cap:
+        return f"{flow_label} — {cap}"
+    return f"{flow_label} — Support Request"
+
+
+def _build_conversation_trail(state: ConversationState) -> str:
+    """Build an HTML <ol> of key-value pairs from the conversation steps.
+
+    Steps are recorded in collected['_user_steps'] by routes.py as
+    'Question Label: User Answer'. Keys are rendered bold in Zoho HTML.
+    """
+    steps = (state.collected or {}).get("_user_steps") or []
+    if not steps or not isinstance(steps, list):
+        return ""
+    items = []
+    for step in steps:
+        if not isinstance(step, str) or not step.strip():
+            continue
+        safe = step.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        if ": " in safe:
+            key, _, val = safe.partition(": ")
+            items.append(f"<li><b>{key}:</b> {val}</li>")
+        else:
+            items.append(f"<li>{safe}</li>")
+    if not items:
+        return ""
+    return "<ol>" + "".join(items) + "</ol>"
 
 
 def _fallback_to_template(
@@ -259,14 +421,16 @@ def _fallback_to_template(
     # Standard mode: show summary + ask for confirmation
     activities = [
         Activity.markdown(
-            f"📋 I'll raise a support ticket with the conversation details:\n\n"
-            f"**Subject:** {draft.subject}\n\n"
-            f"Confirm to raise."
+            f"📋 **Issue Identified:** {draft.subject}\n\n"
+            f"**Summary of Request:**\n{draft.description[:400]}\n\n"
+            f"**Category:** {draft.category}\n"
+            f"**Priority:** {draft.priority}\n\n"
+            f"Please review the details above and confirm whether they are correct."
         ).model_dump(exclude_none=True),
         Activity.quick_replies(
             choices=[
-                {"id": "confirm", "label": "✅ Yes — raise ticket"},
-                {"id": "edit", "label": "✏️ Let me correct something"},
+                {"id": "confirm", "label": "✅ Confirm"},
+                {"id": "restart", "label": "🔄 Discard & Restart"},
             ]
         ).model_dump(exclude_none=True),
     ]

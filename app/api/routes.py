@@ -399,6 +399,33 @@ async def submit_turn(
         )
         state_dict = state.model_dump(mode="json")
         state_dict["flow_id"] = flow_id
+        # Seed user_id from JWT so ticket templates can reference it
+        state_dict.setdefault("collected", {})["user_id"] = user_id
+
+        # Pre-fetch user profile (email/name/mobile) once at flow start so every
+        # flow has it available without per-flow profile fetch nodes.
+        _karmayogi = getattr(request.app.state, "services", {}).get("karmayogi")
+        if _karmayogi is not None:
+            try:
+                _profile = await _karmayogi.execute_request(
+                    "POST",
+                    "/api/private/user/v1/search",
+                    body={"request": {"filters": {"userId": user_id_hash}, "limit": 1}},
+                )
+                _content = (_profile.get("response") or {}).get("content") or []
+                if _content:
+                    _personal = (_content[0].get("profileDetails") or {}).get("personalDetails") or {}
+                    _profile_fields = {
+                        "email":      _personal.get("primaryEmail"),
+                        "mobile":     _personal.get("mobile"),
+                        "first_name": _personal.get("firstname"),
+                        "last_name":  _personal.get("surname"),
+                    }
+                    state_dict["collected"].update(
+                        {k: v for k, v in _profile_fields.items() if v is not None}
+                    )
+            except Exception:  # noqa: BLE001
+                pass  # fail-open: flow continues without profile data
 
         session["turn_count"] = session.get("turn_count", 0) + 1
         lg_config = {"configurable": {"thread_id": sid}}
@@ -880,9 +907,13 @@ def _build_state_update(
                 if save_to:
                     field = save_to.removeprefix("collected.")
                     collected[field] = body.choice_id
-        update["collected"] = collected
-        # Record user choice as a human message so the LLM transcript is populated
+        # Record step in conversation trail (before updating collected)
         choice_label = _resolve_choice_label(node_cfg, body.choice_id)
+        step_label = _get_step_label(node_cfg)
+        steps = list(collected.get("_user_steps") or [])
+        steps.append(f"{step_label}: {choice_label}")
+        collected["_user_steps"] = steps
+        update["collected"] = collected
         update["messages"] = [HumanMessage(content=choice_label)]
 
     elif body.action == "pick_item" and body.item_id:
@@ -899,6 +930,8 @@ def _build_state_update(
         update["messages"] = [HumanMessage(content=f"Selected: {body.item_id}")]
 
     elif body.action == "send_message" and body.text:
+        # Capture field_meta BEFORE saving (points to the field being filled now)
+        field_meta = _find_current_field(node_cfg, collected) if node_cfg and node_cfg.get("type") == "collect" else None
         if node_cfg and node_cfg.get("type") == "collect":
             # Multi-field: find next unfilled required field
             for p in (node_cfg.get("prompts") or []):
@@ -911,6 +944,11 @@ def _build_state_update(
                 fname = (node_cfg.get("field") or {}).get("name", "").removeprefix("collected.")
                 if fname:
                     collected[fname] = body.text
+        # Record step in conversation trail
+        step_label = _get_step_label(node_cfg, field_meta)
+        steps = list(collected.get("_user_steps") or [])
+        steps.append(f"{step_label}: {body.text}")
+        collected["_user_steps"] = steps
         update["collected"] = collected
         update["messages"] = [HumanMessage(content=body.text)]
 
@@ -941,6 +979,29 @@ def _find_node(flow: dict | None, node_id: str | None) -> dict | None:
         if node.get("id") == node_id:
             return node
     return None
+
+
+def _get_step_label(node_cfg: dict | None, field_meta: dict | None = None) -> str:
+    """Short readable label for a conversation trail key-value entry.
+
+    For collect nodes: strips boilerplate from the prompt text ("Please share the ...").
+    For choice nodes: strips common node-ID prefixes (ask_, branch_, etc.).
+    """
+    if field_meta:
+        text = (field_meta.get("text") or "").strip().rstrip(":")
+        text = re.sub(r'(?i)^(please|kindly)?\s*(share|enter|provide|select)\s*(the|your|a)?\s*', '', text).strip()
+        if text:
+            return text[:60]
+        field = (field_meta.get("field") or field_meta.get("name") or "").removeprefix("collected.")
+        return field.replace("_", " ").title()[:60]
+    if not node_cfg:
+        return "Step"
+    node_id = node_cfg.get("id", "step")
+    for pfx in ("ask_", "branch_on_", "branch_", "show_", "check_", "init_"):
+        if node_id.startswith(pfx):
+            node_id = node_id[len(pfx):]
+            break
+    return node_id.replace("_", " ").title()[:60]
 
 
 def _find_current_field(node_cfg: dict, collected: dict) -> dict | None:

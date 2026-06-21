@@ -811,26 +811,13 @@ nodes:
         We will raise a support ticket for further investigation.
 
         📸 **Please keep a screenshot of the error ready.** Our support agent will reach out to your registered email and may request it to help resolve your issue faster.
-    next: cap_raise_ticket_prompt
+    next: cap_auto_ticket
 
   # ---------------------------------------------------------------------------
   # Ticket Raising
   # ---------------------------------------------------------------------------
-  - id: cap_raise_ticket_prompt
-    type: collect
-    prompt:
-      text: "Please provide your **registered email address** so we can raise a support ticket:"
-    field:
-      name: collected.email
-      type: email
-      validation:
-        pattern: "^[\\w.+-]+@[\\w-]+\\.[a-z]{2,}$"
-        error_msg: "Please enter a valid email address."
-    next: cap_auto_ticket
-
   - id: cap_auto_ticket
     type: transfer_llm
-    auto_raise: true
     llm_context:
       include_messages: true
       include_collected: true
@@ -849,6 +836,7 @@ nodes:
           Max attempts: {{ ctx.collected.assessment_max_attempts }}
       priority_override: P3
     on_complete: confirm_ticket
+    on_restart: ask_cap_issue_type
 
   # ===========================================================================
   # Assessment Limit Exceeded - Validation Flow
@@ -985,7 +973,7 @@ nodes:
       - { id: skip,  label: "❌ I'll try later" }
     disable_input: true
     on_reply:
-      raise: cap_raise_ticket_prompt
+      raise: cap_auto_ticket
       skip:  satisfied
 
   - id: resolution_cap_scorm_guidance
@@ -1120,7 +1108,7 @@ nodes:
         We will raise a support ticket for further investigation.
 
         The concerned team will check whether the assessment attempt limit has been exceeded and take the necessary action.
-    next: cap_raise_ticket_prompt
+    next: cap_auto_ticket
 
   # ===========================================================================
   # Child Course Technical Issue & Engineering Excel
@@ -1132,23 +1120,10 @@ nodes:
         Upon checking, we found a technical issue affecting one or more child courses under your Comprehensive Assessment Program (CAP). 
 
         We will raise a support ticket for further investigation. The technical team will review this and update the Engineering Excel in the backend accordingly.
-    next: cap_raise_ticket_prompt_technical
-
-  - id: cap_raise_ticket_prompt_technical
-    type: collect
-    prompt:
-      text: "Please provide your **registered email address** so we can raise a support ticket:"
-    field:
-      name: collected.email
-      type: email
-      validation:
-        pattern: "^[\\w.+-]+@[\\w-]+\\.[a-z]{2,}$"
-        error_msg: "Please enter a valid email address."
     next: cap_child_course_technical_ticket
 
   - id: cap_child_course_technical_ticket
     type: transfer_llm
-    auto_raise: true
     llm_context:
       include_messages: true
       include_collected: true
@@ -1161,6 +1136,7 @@ nodes:
         Description: include the user email, the CAP name, and clearly state that a child course has a technical issue and needs to be updated in the Engineering Excel in the backend.
       priority_override: P3
     on_complete: confirm_ticket
+    on_restart: ask_cap_issue_type
 
   # ===========================================================================
   # Dynamic Ticket Confirmation Override

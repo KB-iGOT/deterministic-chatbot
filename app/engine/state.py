@@ -36,13 +36,14 @@ class FlowStatus(str, Enum):
 class TicketDraft(BaseModel):
     """LLM-generated or template-generated ticket fields prior to Zoho POST."""
     subject: str
-    description: str
+    description: str          # markdown — shown in chat confirmation preview
     category: str
     sub_category: str | None = None
     classification: str = "Query"
     priority: str = "P3"
     severity: str = "Sev 3"
     portal: str = "Learner Portal"
+    conversation_trail: str = ""  # HTML <ol> — user's readable selections for Zoho body
 
 
 class ConversationState(BaseModel):

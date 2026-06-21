@@ -586,7 +586,6 @@ nodes:
   # ===========================================================================
   - id: raise_support_ticket
     type: transfer_llm
-    auto_raise: true
     llm_context:
       include_messages:  true
       include_collected: true
@@ -610,6 +609,7 @@ nodes:
         This is a P3 ticket requiring manual L2 account deactivation. Do NOT auto-apply any changes.
       priority_override: P3
     on_complete: confirm_ticket
+    on_restart: ask_identifier_type
 
   # ===========================================================================
   # Terminal nodes

@@ -57,7 +57,6 @@ imports:
       cf_flow_id:      RESOURCE_NOT_OPENING
 
 nodes:
-
   # ===========================================================================
   # 1. Identify User Device (User Selection)
   # ===========================================================================
@@ -123,7 +122,7 @@ nodes:
       - { field: collected.resource_name, text: "Please share the Resource Name:" }
       - { field: collected.mobile_model,  text: "Please share your Mobile Device Model (e.g., Samsung Galaxy S21):" }
       - { field: collected.app_version,   text: "Please share your Mobile Application Version (if known):", optional: true }
-    next: escalate_to_ticket
+    next: resource_auto_ticket
 
   # ===========================================================================
   # CASE 2: Web Browser
@@ -292,7 +291,7 @@ nodes:
       - { id: no,  label: "❌ No, I'll check again later" }
     disable_input: true
     on_reply:
-      yes: escalate_to_ticket
+      yes: resource_auto_ticket
       no:  satisfied
 
   - id: youtube_config_issue
@@ -309,7 +308,7 @@ nodes:
       - { id: no,  label: "❌ No, I'll check again later" }
     disable_input: true
     on_reply:
-      yes: escalate_to_ticket
+      yes: resource_auto_ticket
       no:  satisfied
 
   # Fallback for API failures
@@ -318,7 +317,7 @@ nodes:
     prompt:
       text: |
         I'm having trouble fetching your course or resource details right now. Please try again later or share the details so I can raise a ticket.
-    next: escalate_to_ticket
+    next: resource_auto_ticket
 
   # ===========================================================================
   # CASE 2B: SCORM / Other Formats
@@ -337,7 +336,7 @@ nodes:
       - { id: no,  label: "❌ No, I'll check again later" }
     disable_input: true
     on_reply:
-      yes: escalate_to_ticket
+      yes: resource_auto_ticket
       no:  satisfied
 
   - id: other_format_issue
@@ -362,27 +361,14 @@ nodes:
       - { id: no,  label: "❌ No, I'll check again later" }
     disable_input: true
     on_reply:
-      yes: escalate_to_ticket
+      yes: resource_auto_ticket
       no:  satisfied
 
   # ===========================================================================
   # Escalation
   # ===========================================================================
-  - id: escalate_to_ticket
-    type: collect
-    prompt:
-      text: "I will raise a support ticket. Please enter your **registered email address** so we can contact you:"
-    field:
-      name: collected.user_email
-      type: email
-      validation:
-        pattern:   "^[\\w.+-]+@[\\w-]+\\.[a-z]{2,}$"
-        error_msg: "That doesn't look like a valid email. Please try again."
-    next: resource_auto_ticket
-
   - id: resource_auto_ticket
     type: transfer_llm
-    auto_raise: true
     llm_context:
       include_messages:  true
       include_collected: true
@@ -395,3 +381,4 @@ nodes:
         Description: include course name, resource name, channel ({{ ctx.channel }}), resource type, and email.
       priority_override: P3
     on_complete: confirm_ticket
+    on_restart: ask_device_type
