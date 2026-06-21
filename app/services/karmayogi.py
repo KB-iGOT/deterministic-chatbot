@@ -21,6 +21,7 @@ directly via the YAML `request:` block.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -30,6 +31,12 @@ from app.engine.nodes.api_call_node import IntegrationNotFound
 
 log = logging.getLogger(__name__)
 
+# Endpoints that require a privileged system-admin Keycloak token as
+# x-authenticated-user-token instead of the regular API key.
+_SYSTEM_TOKEN_URL_PATTERNS: tuple[str, ...] = (
+    "/system/settings/",
+)
+
 
 class KarmayogiService:
     """Async HTTP gateway for Karmayogi platform APIs."""
@@ -38,6 +45,8 @@ class KarmayogiService:
         self.base_url = settings.karmayogi_portal_base_url.rstrip("/")
         self.api_key = settings.karmayogi_api_key
         self._client: httpx.AsyncClient | None = None
+        self._system_token: str | None = None
+        self._system_token_expiry: float = 0.0
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -52,6 +61,38 @@ class KarmayogiService:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+
+    async def _get_system_token(self) -> str:
+        """Fetch (and cache) a Keycloak system-admin token.
+
+        Used for privileged endpoints (e.g. cadreConfig) that require a real
+        user token rather than the static API key as x-authenticated-user-token.
+        Token is cached until 60 s before expiry.
+        """
+        if self._system_token and time.time() < self._system_token_expiry:
+            return self._system_token
+
+        token_path = settings.access_token_api or "/auth/realms/sunbird/protocol/openid-connect/token"
+        token_url = self.base_url + token_path
+        # Use a fresh one-shot client so long-lived HTTP/2 connection state
+        # from the main API client never interferes with token fetches.
+        async with httpx.AsyncClient(timeout=10.0) as token_client:
+            resp = await token_client.post(
+                token_url,
+                data={
+                    "grant_type": "password",
+                    "username": settings.system_admin_user,
+                    "password": settings.system_admin_password,
+                    "client_id": "android",
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+        resp.raise_for_status()
+        data = resp.json()
+        self._system_token = data["access_token"]
+        self._system_token_expiry = time.time() + data.get("expires_in", 3600) - 60
+        log.info("[karmayogi] system token refreshed, expires_in=%s", data.get("expires_in"))
+        return self._system_token
 
     async def execute_request(
         self,
@@ -71,8 +112,22 @@ class KarmayogiService:
             httpx.HTTPError: on other failures (timeout, connection, 5xx)
         """
         client = await self._get_client()
+
+        # Privileged endpoints (e.g. cadreConfig) require a real Keycloak
+        # system-admin token; all others use the static API key.
+        needs_system_token = any(pattern in url for pattern in _SYSTEM_TOKEN_URL_PATTERNS)
+        if needs_system_token:
+            try:
+                user_token = await self._get_system_token()
+            except Exception as exc:
+                log.warning("[karmayogi] system token fetch failed, falling back to api_key: %s", exc)
+                user_token = self.api_key
+        else:
+            user_token = self.api_key
+
         merged_headers = {
             "Authorization": f"Bearer {self.api_key}",
+            "x-authenticated-user-token": user_token,
             "Accept": "application/json",
             **(headers or {}),
         }
@@ -93,6 +148,14 @@ class KarmayogiService:
                 method, url, resp.status_code, resp.text[:500],
             )
         resp.raise_for_status()
+
+        log.info(
+            "Karmayogi response: %s %s → HTTP %d  content_type=%s  body_bytes=%d  body=%s",
+            method, url, resp.status_code,
+            resp.headers.get("content-type", "?"),
+            len(resp.content),
+            resp.text[:300] if resp.content else "<empty>",
+        )
 
         data = resp.json()
 

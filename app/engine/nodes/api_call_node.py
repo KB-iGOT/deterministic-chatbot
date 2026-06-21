@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import Any, Callable
 
 log = logging.getLogger(__name__)
@@ -1289,6 +1290,25 @@ def _extract_hierarchy_names(hierarchy: Any, incomplete_ids: Any) -> str:
     return ", ".join(names)
 
 
+def _flatten_cadre_services(value: Any) -> list[dict]:
+    """Flatten cadreConfig nested service list into [{id, name}, ...].
+
+    Input: result.response.value (after karmayogi.py unwraps result envelope).
+    Traversal: civilServiceType.civilServiceTypeList[].serviceList[]
+    """
+    if not isinstance(value, dict):
+        return []
+    type_list = value.get("civilServiceType", {}).get("civilServiceTypeList", [])
+    services = []
+    for service_type in type_list:
+        for service in service_type.get("serviceList", []):
+            sid  = service.get("id", "")
+            name = service.get("name", "")
+            if sid and name:
+                services.append({"id": sid, "name": name})
+    return services
+
+
 # Registry of named transforms usable in YAML response_mapping `transform:` field.
 _TRANSFORMS: dict[str, Any] = {
     "extract_hierarchy_names":     _extract_hierarchy_names,
@@ -1352,6 +1372,8 @@ _TRANSFORMS: dict[str, Any] = {
     # (requires transform_ctx_key: collected.user_eligibility_ctx)
     # Checks organisation list + isVerifiedKarmayogi flag against user profile
     "check_secure_settings_eligibility": _check_secure_settings_eligibility,  # (secureSettings, user_eligibility_ctx) → bool
+    # cadreConfig master list flattening
+    "flatten_cadre_services":        _flatten_cadre_services,
 }
 
 
@@ -1431,3 +1453,132 @@ def _jsonpath_get_list(data: Any, path: str) -> list[Any]:
         if cur is None:
             return []
     return [cur] if cur is not None else []
+
+
+# ── Typeahead preload cache ───────────────────────────────────────────────────
+# Module-level dict keyed by "designations" / "services". Lives for the process
+# lifetime. Populated at startup by warm_typeahead_cache(); read by collect_node
+# when building Activity.input for typeahead.preload=true fields.
+
+_TYPEAHEAD_CACHE: dict[str, list] = {}
+
+_PAGE_SIZE = 20
+_ALPHA_PAIRS = [c + v for c in "abcdefghijklmnopqrstuvwxyz" for v in "aeiou"]
+_CONSONANT_CLUSTERS = [
+    "bl", "br", "ch", "cl", "cr", "dr", "fl", "fr", "gl", "gr",
+    "nd", "ng", "nt", "ph", "pl", "pr", "sc", "sh", "sk", "sl",
+    "sm", "sn", "sp", "sq", "st", "sw", "th", "tr", "tw", "wh",
+]
+_seen: set = set()
+_DESIG_SEARCH_TERMS = [
+    t for t in _ALPHA_PAIRS + _CONSONANT_CLUSTERS
+    if not (_seen.__contains__(t) or _seen.add(t))  # type: ignore[func-returns-value]
+]
+
+
+async def _desig_fetch_page(karmayogi: Any, term: str, page_num: int) -> list:
+    try:
+        r = await karmayogi.execute_request(
+            method="POST",
+            url="/apis/public/v8/designation/search",
+            body={
+                "pageNumber": page_num,
+                "pageSize": _PAGE_SIZE,
+                "filterCriteriaMap": {"status": "Active"},
+                "requestedFields": ["id", "designation"],
+                "searchString": term,
+            },
+        )
+        return r.get("result", {}).get("data", [])
+    except Exception as exc:
+        log.warning("[typeahead] designation term=%r page=%d failed: %s", term, page_num, exc)
+        return []
+
+
+async def _desig_fetch_all_for_term(karmayogi: Any, term: str) -> list:
+    try:
+        first = await karmayogi.execute_request(
+            method="POST",
+            url="/apis/public/v8/designation/search",
+            body={
+                "pageNumber": 1,
+                "pageSize": _PAGE_SIZE,
+                "filterCriteriaMap": {"status": "Active"},
+                "requestedFields": ["id", "designation"],
+                "searchString": term,
+            },
+        )
+    except Exception as exc:
+        log.warning("[typeahead] designation term=%r page=1 failed: %s", term, exc)
+        return []
+
+    data: list = first.get("result", {}).get("data", [])
+    total_count = int(first.get("result", {}).get("totalCount", 0) or 0)
+    if not data:
+        return []
+    total_pages = max(1, math.ceil(total_count / _PAGE_SIZE))
+    if total_pages > 1:
+        for batch_start in range(2, total_pages + 1, 20):
+            batch = list(range(batch_start, min(batch_start + 20, total_pages + 1)))
+            pages = await asyncio.gather(*[_desig_fetch_page(karmayogi, term, p) for p in batch])
+            for page_data in pages:
+                data.extend(page_data)
+    return data
+
+
+async def _load_designations(karmayogi: Any) -> list:
+    if "designations" in _TYPEAHEAD_CACHE:
+        return _TYPEAHEAD_CACHE["designations"]
+    log.info("[typeahead] designations: fetching for %d search terms", len(_DESIG_SEARCH_TERMS))
+    term_results: list = []
+    for term_start in range(0, len(_DESIG_SEARCH_TERMS), 8):
+        batch = _DESIG_SEARCH_TERMS[term_start:term_start + 8]
+        batch_results = await asyncio.gather(*[_desig_fetch_all_for_term(karmayogi, t) for t in batch])
+        term_results.extend(batch_results)
+    seen_ids: set = set()
+    items: list = []
+    for term_data in term_results:
+        for d in term_data:
+            if not isinstance(d, dict) or not d.get("id") or not d.get("designation"):
+                continue
+            item_id = str(d["id"])
+            if item_id not in seen_ids:
+                seen_ids.add(item_id)
+                items.append({"id": item_id, "label": str(d["designation"])})
+    log.info("[typeahead] designations: loaded %d unique items", len(items))
+    _TYPEAHEAD_CACHE["designations"] = items
+    return items
+
+
+async def _load_services(karmayogi: Any) -> list:
+    if "services" in _TYPEAHEAD_CACHE:
+        return _TYPEAHEAD_CACHE["services"]
+    try:
+        data = await karmayogi.execute_request(
+            method="GET",
+            url="/api/data/v2/system/settings/get/cadreConfig",
+        )
+        flat = _flatten_cadre_services(data.get("response", {}).get("value", {}))
+        items = [{"id": s["id"], "label": s["name"]} for s in flat]
+        _TYPEAHEAD_CACHE["services"] = items
+        log.info("[typeahead] services: loaded %d items", len(items))
+        return items
+    except Exception as exc:
+        log.warning("[typeahead] services: failed to load cadreConfig: %s", exc)
+        return []
+
+
+async def warm_typeahead_cache(services: Any) -> None:
+    """Pre-warm typeahead caches at startup. Called as an asyncio background task."""
+    karmayogi = services.get("karmayogi") if hasattr(services, "get") else None
+    if karmayogi is None:
+        log.warning("[typeahead] warm: karmayogi service not available, skipping")
+        return
+    try:
+        await _load_designations(karmayogi)
+    except Exception as exc:
+        log.warning("[typeahead] warm: designations failed: %s", exc)
+    try:
+        await _load_services(karmayogi)
+    except Exception as exc:
+        log.warning("[typeahead] warm: services failed: %s", exc)
