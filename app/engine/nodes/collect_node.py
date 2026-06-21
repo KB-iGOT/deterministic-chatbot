@@ -262,6 +262,7 @@ async def _resolve_dynamic_options(
             url=rendered_url,
             params=rendered_params,
             body=rendered_body,
+            headers={k: _render(str(v), ctx) for k, v in request_cfg.get("headers", {}).items()} if "headers" in request_cfg else None,
         )
     except Exception:  # noqa: BLE001
         return [], {}  # network failure → empty picker (user can still type or try again)

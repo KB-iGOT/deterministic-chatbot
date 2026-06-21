@@ -1263,8 +1263,35 @@ def _detect_assessment_only_filtered(content_list: Any, incomplete_ids: Any) -> 
     return _detect_assessment_only(filtered)
 
 
+def _extract_hierarchy_names(hierarchy: Any, incomplete_ids: Any) -> str:
+    """Fallback transformer: traverse course hierarchy and extract names matching incomplete_ids."""
+    if isinstance(hierarchy, dict) and "content" in hierarchy:
+        hierarchy = hierarchy.get("content")
+    if not hierarchy or not incomplete_ids:
+        return ""
+    
+    id_list = incomplete_ids if isinstance(incomplete_ids, list) else [incomplete_ids]
+    names = []
+    
+    def traverse(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        if node.get("identifier") in id_list:
+            name = node.get("name")
+            if name and name not in names:
+                names.append(name)
+        children = node.get("children", [])
+        if isinstance(children, list):
+            for child in children:
+                traverse(child)
+                
+    traverse(hierarchy)
+    return ", ".join(names)
+
+
 # Registry of named transforms usable in YAML response_mapping `transform:` field.
 _TRANSFORMS: dict[str, Any] = {
+    "extract_hierarchy_names":     _extract_hierarchy_names,
     "extract_incomplete_ids":      _extract_incomplete_ids,
     "extract_completed_ids":           _extract_completed_ids,
     # Extracts batchId from batches[0] for in-progress courses where batchId

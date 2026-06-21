@@ -99,7 +99,7 @@ nodes:
           or (ctx.collected.org_name or '').lower() in ('igot',)
           or 'prarambh' in (ctx.collected.org_name or '').lower()
         then: show_wrong_org_message
-    default: fetch_cbp_plan
+    default: fetch_cbp_plan 
 
   - id: user_not_found_fallback
     type: message
@@ -175,18 +175,7 @@ nodes:
     type: message
     prompt:
       text: |
-        {%- set apar_list = ctx.collected.all_courses | selectattr('isApar', 'equalto', true) | list -%}
-        {%- set non_apar_list = ctx.collected.all_courses | selectattr('isApar', 'equalto', false) | list -%}
-        {%- set apar_ns = namespace(count=0) -%}
-        {%- set non_apar_ns = namespace(count=0) -%}
-        {%- for plan in apar_list -%}{%- for item in (plan.contentList or []) -%}{%- if item.contentType == 'Course' -%}{%- set apar_ns.count = apar_ns.count + 1 -%}{%- endif -%}{%- endfor -%}{%- endfor -%}
-        {%- for plan in non_apar_list -%}{%- for item in (plan.contentList or []) -%}{%- if item.contentType == 'Course' -%}{%- set non_apar_ns.count = non_apar_ns.count + 1 -%}{%- endif -%}{%- endfor -%}{%- endfor %}
         Upon checking, we found that the training plan has been assigned to your profile.
-
-        | Course Type | Course Count | Last Date |
-        |---|---|---|
-        | **APAR** | {% if apar_ns.count > 0 %}<details><summary>{{ apar_ns.count }} Courses</summary>{% for plan in apar_list %}{% for item in (plan.contentList or []) %}{% if item.contentType == 'Course' %}{% set enrolls = ctx.collected.all_enrollment_list or [] %}{% set course_status = namespace(text='Not Started') %}{% set matching_enroll = enrolls | selectattr('courseId', 'equalto', item.identifier) | first %}{% if matching_enroll %}{% if matching_enroll.status == 2 or matching_enroll.status == 'Completed' %}{% set course_status.text = 'Completed' %}{% elif matching_enroll.status == 1 or matching_enroll.status == 'In-Progress' %}{% set progress = matching_enroll.get('progress', 0) %}{% set leafNodes = matching_enroll.get('leafNodesCount', 1) %}{% if leafNodes == 0 %}{% set leafNodes = 1 %}{% endif %}{% set percentage = ((progress / leafNodes) * 100) | round | int %}{% if percentage > 100 %}{% set percentage = 100 %}{% endif %}{% set course_status.text = 'Incomplete (' ~ percentage ~ '%)' %}{% endif %}{% endif %}<br/>• [{{ item.name }}](https://portal.uat.karmayogibharat.net/app/toc/{{ item.get('identifier') }}/overview) - {{ course_status.text }}{% endif %}{% endfor %}{% endfor %}</details>{% else %}0 Courses{% endif %} | {{ (apar_list | first).endDate | date('%d/%m/%Y') if apar_list else '—' }} |
-        | **Non-APAR** | {% if non_apar_ns.count > 0 %}<details><summary>{{ non_apar_ns.count }} Courses</summary>{% for plan in non_apar_list %}{% for item in (plan.contentList or []) %}{% if item.contentType == 'Course' %}{% set enrolls = ctx.collected.all_enrollment_list or [] %}{% set course_status = namespace(text='Not Started') %}{% set matching_enroll = enrolls | selectattr('courseId', 'equalto', item.identifier) | first %}{% if matching_enroll %}{% if matching_enroll.status == 2 or matching_enroll.status == 'Completed' %}{% set course_status.text = 'Completed' %}{% elif matching_enroll.status == 1 or matching_enroll.status == 'In-Progress' %}{% set progress = matching_enroll.get('progress', 0) %}{% set leafNodes = matching_enroll.get('leafNodesCount', 1) %}{% if leafNodes == 0 %}{% set leafNodes = 1 %}{% endif %}{% set percentage = ((progress / leafNodes) * 100) | round | int %}{% if percentage > 100 %}{% set percentage = 100 %}{% endif %}{% set course_status.text = 'Incomplete (' ~ percentage ~ '%)' %}{% endif %}{% endif %}<br/>• [{{ item.name }}](https://portal.uat.karmayogibharat.net/app/toc/{{ item.get('identifier') }}/overview) - {{ course_status.text }}{% endif %}{% endfor %}{% endfor %}</details>{% else %}0 Courses{% endif %} | {{ (non_apar_list | first).endDate | date('%d/%m/%Y') if non_apar_list else '—' }} |
 
         To view the training plan courses, please follow the steps below:
 
@@ -245,15 +234,29 @@ nodes:
         {%- set plan_end = plan.get('endDate') -%}
         {%- set courses = (plan.get('contentList') or []) | selectattr('contentType', 'equalto', 'Course') | list | sort(attribute='name') -%}
         {%- if courses %}
-        **Plan {{ loop.index }}** — Last Date: {{ plan_end | default('—') | date('%d/%m/%Y') }}
+        **Plan {{ loop.index }}** — Last Date: {{ (plan_end | date('%d/%m/%Y')) if plan_end else '—' }}
 
-        | # | Course Name |
-        |---|---|
         {%- set ns = namespace(count=0) %}
         {% for item in courses %}
         {% set ns.count = ns.count + 1 %}
         {% set total.count = total.count + 1 %}
-        | {{ ns.count }} | [{{ item.name }}](https://portal.uat.karmayogibharat.net/app/toc/{{ item.get('identifier') }}/overview) |
+        {%- set enrolls = ctx.collected.all_enrollment_list or [] -%}
+        {%- set course_status = namespace(text='Not Started') -%}
+        {%- set matching_enroll = enrolls | selectattr('courseId', 'equalto', item.identifier) | first -%}
+        {%- if matching_enroll -%}
+          {%- if matching_enroll.status == 2 or matching_enroll.status == 'Completed' -%}
+            {%- set course_status.text = 'Completed' -%}
+          {%- elif matching_enroll.status == 1 or matching_enroll.status == 'In-Progress' -%}
+            {%- set progress = matching_enroll.get('progress', 0) -%}
+            {%- set leafNodes = matching_enroll.get('leafNodesCount', 1) -%}
+            {%- if leafNodes == 0 %}{% set leafNodes = 1 %}{% endif -%}
+            {%- set percentage = ((progress / leafNodes) * 100) | round | int -%}
+            {%- if percentage > 100 %}{% set percentage = 100 %}{% endif -%}
+            {%- set course_status.text = 'Incomplete (' ~ percentage ~ '%)' -%}
+          {%- endif -%}
+        {%- endif %}
+        {{ ns.count }}. [{{ item.name }}](https://portal.uat.karmayogibharat.net/app/toc/{{ item.get('identifier') }}/overview)
+           **Status:** {{ course_status.text }}
         {% endfor %}
 
         {% endif %}
@@ -278,15 +281,29 @@ nodes:
         {%- set plan_end = plan.get('endDate') -%}
         {%- set courses = (plan.get('contentList') or []) | selectattr('contentType', 'equalto', 'Course') | list | sort(attribute='name') -%}
         {%- if courses %}
-        **Plan {{ loop.index }}** — Last Date: {{ plan_end | default('—') | date('%d/%m/%Y') }}
+        **Plan {{ loop.index }}** — Last Date: {{ (plan_end | date('%d/%m/%Y')) if plan_end else '—' }}
 
-        | # | Course Name |
-        |---|---|
         {%- set ns = namespace(count=0) %}
         {% for item in courses %}
         {% set ns.count = ns.count + 1 %}
         {% set total.count = total.count + 1 %}
-        | {{ ns.count }} | [{{ item.name }}](https://portal.uat.karmayogibharat.net/app/toc/{{ item.get('identifier') }}/overview) |
+        {%- set enrolls = ctx.collected.all_enrollment_list or [] -%}
+        {%- set course_status = namespace(text='Not Started') -%}
+        {%- set matching_enroll = enrolls | selectattr('courseId', 'equalto', item.identifier) | first -%}
+        {%- if matching_enroll -%}
+          {%- if matching_enroll.status == 2 or matching_enroll.status == 'Completed' -%}
+            {%- set course_status.text = 'Completed' -%}
+          {%- elif matching_enroll.status == 1 or matching_enroll.status == 'In-Progress' -%}
+            {%- set progress = matching_enroll.get('progress', 0) -%}
+            {%- set leafNodes = matching_enroll.get('leafNodesCount', 1) -%}
+            {%- if leafNodes == 0 %}{% set leafNodes = 1 %}{% endif -%}
+            {%- set percentage = ((progress / leafNodes) * 100) | round | int -%}
+            {%- if percentage > 100 %}{% set percentage = 100 %}{% endif -%}
+            {%- set course_status.text = 'Incomplete (' ~ percentage ~ '%)' -%}
+          {%- endif -%}
+        {%- endif %}
+        {{ ns.count }}. [{{ item.name }}](https://portal.uat.karmayogibharat.net/app/toc/{{ item.get('identifier') }}/overview)
+           **Status:** {{ course_status.text }}
         {% endfor %}
 
         {% endif %}
