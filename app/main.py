@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -117,6 +118,11 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
     app.state.system_messages = system_messages
     app.state.sessions: dict[str, dict] = {}  # in-memory session metadata
     app.state.session_store = session_store   # Redis-backed; None when Redis unavailable
+
+    # Pre-warm typeahead caches (designations + services) in the background so
+    # collect nodes can embed items in the activity payload without cold-start delay.
+    from app.services import preload_cache
+    asyncio.create_task(preload_cache.warm(services))
 
     # Engineering tickets DB setup
     engineering_db = None

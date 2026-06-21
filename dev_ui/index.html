@@ -293,6 +293,31 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .pick-meta  { font-size: 11px; color: var(--muted); }
 .no-res     { padding: 12px; text-align: center; color: var(--muted); font-size: 12px; }
 
+/* ── Typeahead ───────────────────────────────────────────────────────────── */
+.typeahead-wrap { position: relative; }
+.typeahead-dropdown {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0; right: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  max-height: 220px;
+  overflow-y: auto;
+  z-index: 50;
+  box-shadow: 0 -4px 16px rgba(0,0,0,.1);
+}
+.ta-item {
+  padding: 9px 13px;
+  cursor: pointer;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+  transition: background .1s;
+}
+.ta-item:last-child { border-bottom: none; }
+.ta-item:hover, .ta-item.active { background: var(--accent-light); color: var(--accent); }
+.ta-empty { padding: 10px 13px; font-size: 12px; color: var(--muted); text-align: center; }
+
 /* ── Disabled / status strip ─────────────────────────────────────────────── */
 .status-strip {
   text-align: center; padding: 8px 0;
@@ -549,6 +574,28 @@ async function startSession() {
 
 function resetSession() { startSession(); }
 
+async function switchToFlow(flowId) {
+  S = mkState();
+  S.language = langEl().value;
+  clearMessages();
+  setStrip('Connecting…');
+  try {
+    const r = await fetch(url('/ai-chatbot/v1/sessions/create'), {
+      method: 'POST',
+      headers: hdrs(),
+      body: JSON.stringify({ channel: 'web', language: S.language }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || 'HTTP ' + r.status);
+    S.sessionId = d.session_id;
+    updateDebug(d);
+    // Skip main menu — immediately select the target flow
+    await turn({ action: 'select_choice', choice_id: flowId });
+  } catch(e) {
+    showErr('Failed to switch: ' + e.message);
+  }
+}
+
 // ── Turn ─────────────────────────────────────────────────────────────────────
 async function turn(payload) {
   if (!S.sessionId) return;
@@ -601,7 +648,8 @@ function renderActivities(activities) {
 
       case 'input':
         if (a.content) appendBot(esc(a.content), false);
-        nextMode = 'text';
+        nextMode = a.typeahead ? 'typeahead' : 'text';
+        if (a.typeahead) S._pendingTypeahead = a;
         break;
 
       case 'typing':
@@ -609,6 +657,10 @@ function renderActivities(activities) {
         break;
 
       case 'end':
+        if (a.outcome && a.outcome.startsWith('redirect:')) {
+          switchToFlow(a.outcome.split(':')[1]);
+          return;  // exit renderActivities — switchToFlow takes over
+        }
         hasEnd = true;
         appendEndBanner(a);
         break;
@@ -633,6 +685,9 @@ function renderActivities(activities) {
     S.pendingPkr = nextPkr;
     S.inputMode  = 'picker';
     renderPicker(nextPkr);
+  } else if (nextMode === 'typeahead') {
+    S.inputMode = 'typeahead';
+    renderTypeaheadInput(S._pendingTypeahead);
   } else if (nextMode === 'text') {
     S.inputMode  = 'text';
     renderTextInput();
@@ -785,15 +840,121 @@ function renderTextInput(ph) {
   document.getElementById('txtIn')?.focus();
 }
 
+// ── Typeahead input ──────────────────────────────────────────────────────────
+let _taTimer    = null;
+let _taCfg      = null;
+let _taAllItems = null;   // null = items not available; array = ready to filter
+
+function renderTypeaheadInput(a) {
+  _taCfg = a.typeahead;
+  // Items arrive pre-loaded in the activity payload from the backend
+  _taAllItems = (_taCfg?.items?.length > 0) ? _taCfg.items : null;
+  inputArea().innerHTML = `
+    <div class="typeahead-wrap">
+      <div id="taDropdown" class="typeahead-dropdown" style="display:none"></div>
+      <div class="text-row">
+        <input type="text" id="txtIn" placeholder="${escA(a.input_placeholder || 'Type to search…')}"
+               oninput="onTypeahead(this.value)"
+               onkeydown="onTypeaheadKey(event)"
+               autocomplete="off">
+        <button class="send-btn" onclick="doSend()" title="Send (Enter)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/>
+          </svg>
+        </button>
+      </div>
+    </div>`;
+  document.getElementById('txtIn')?.focus();
+}
+
+function onTypeahead(query) {
+  clearTimeout(_taTimer);
+  const dd = document.getElementById('taDropdown');
+  if (!query || query.length < 1) { if (dd) dd.style.display = 'none'; return; }
+
+  if (_taCfg?.preload) {
+    if (_taAllItems === null) {
+      if (dd) { dd.innerHTML = '<div class="ta-empty">Loading options…</div>'; dd.style.display = ''; }
+      return;
+    }
+    if (_taAllItems && _taAllItems.length > 0) filterTypeahead(query);
+  }
+}
+
+function filterTypeahead(query) {
+  const q = query.toLowerCase();
+  const matches = (_taAllItems || [])
+    .filter(item => item.label.toLowerCase().includes(q))
+    .slice(0, 20);
+  renderTypeaheadDropdown(matches, query);
+}
+
+
+function renderTypeaheadDropdown(items, query) {
+  const dd = document.getElementById('taDropdown');
+  if (!dd) return;
+  if (!items.length) {
+    dd.innerHTML = `<div class="ta-empty">No matches for "${esc(query)}"</div>`;
+  } else {
+    dd.innerHTML = items.map((item, i) =>
+      `<div class="ta-item" data-id="${escA(item.id)}" data-label="${escA(item.label)}"
+            onclick="selectTypeahead('${escA(item.id)}','${escA(item.label)}')">${esc(item.label)}</div>`
+    ).join('');
+  }
+  dd.style.display = '';
+}
+
+function selectTypeahead(id, label) {
+  document.getElementById('taDropdown').style.display = 'none';
+  const inp = document.getElementById('txtIn');
+  if (inp) inp.value = label;
+  appendUser(label);
+  turn({ action: 'send_message', text: label, item_id: id, item_label: label });
+}
+
+function onTypeaheadKey(e) {
+  if (e.key === 'Escape') {
+    const dd = document.getElementById('taDropdown');
+    if (dd) dd.style.display = 'none';
+  } else if (e.key === 'Enter') {
+    const dd = document.getElementById('taDropdown');
+    const active = dd?.querySelector('.ta-item.active');
+    if (active) {
+      selectTypeahead(active.dataset.id, active.dataset.label);
+    } else {
+      const typed = (document.getElementById('txtIn')?.value || '').trim().toLowerCase();
+      const match = typed && Array.isArray(_taAllItems)
+        ? _taAllItems.find(item => item.label.toLowerCase() === typed)
+        : null;
+      if (match) {
+        selectTypeahead(match.id, match.label);
+      } else {
+        doSend();
+      }
+    }
+  } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const dd = document.getElementById('taDropdown');
+    const items = dd?.querySelectorAll('.ta-item') || [];
+    const cur = dd?.querySelector('.ta-item.active');
+    let idx = Array.from(items).indexOf(cur);
+    if (e.key === 'ArrowDown') idx = Math.min(idx + 1, items.length - 1);
+    else idx = Math.max(idx - 1, 0);
+    items.forEach(it => it.classList.remove('active'));
+    if (items[idx]) { items[idx].classList.add('active'); items[idx].scrollIntoView({ block: 'nearest' }); }
+  }
+}
+
 function setStrip(msg) {
   inputArea().innerHTML = `<div class="status-strip">${esc(msg)}</div>`;
 }
 
 function disableInput()  { setStrip('Thinking…'); }
 function restoreInput()  {
-  if (S.inputMode === 'quick_replies' && S.pendingQR)  renderQR(S.pendingQR);
-  else if (S.inputMode === 'picker' && S.pendingPkr)   renderPicker(S.pendingPkr);
-  else if (S.inputMode === 'text')                     renderTextInput();
+  if (S.inputMode === 'quick_replies' && S.pendingQR)        renderQR(S.pendingQR);
+  else if (S.inputMode === 'picker' && S.pendingPkr)         renderPicker(S.pendingPkr);
+  else if (S.inputMode === 'typeahead' && S._pendingTypeahead) renderTypeaheadInput(S._pendingTypeahead);
+  else if (S.inputMode === 'text')                           renderTextInput();
 }
 function switchToText()  { S.inputMode = 'text'; renderTextInput('Describe your issue…'); }
 

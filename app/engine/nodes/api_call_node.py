@@ -1289,6 +1289,25 @@ def _extract_hierarchy_names(hierarchy: Any, incomplete_ids: Any) -> str:
     return ", ".join(names)
 
 
+def _flatten_cadre_services(value: Any) -> list[dict]:
+    """Flatten cadreConfig nested service list into [{id, name}, ...].
+
+    Input: result.response.value (after karmayogi.py unwraps result envelope).
+    Traversal: civilServiceType.civilServiceTypeList[].serviceList[]
+    """
+    if not isinstance(value, dict):
+        return []
+    type_list = value.get("civilServiceType", {}).get("civilServiceTypeList", [])
+    services = []
+    for service_type in type_list:
+        for service in service_type.get("serviceList", []):
+            sid  = service.get("id", "")
+            name = service.get("name", "")
+            if sid and name:
+                services.append({"id": sid, "name": name})
+    return services
+
+
 # Registry of named transforms usable in YAML response_mapping `transform:` field.
 _TRANSFORMS: dict[str, Any] = {
     "extract_hierarchy_names":     _extract_hierarchy_names,
@@ -1352,6 +1371,8 @@ _TRANSFORMS: dict[str, Any] = {
     # (requires transform_ctx_key: collected.user_eligibility_ctx)
     # Checks organisation list + isVerifiedKarmayogi flag against user profile
     "check_secure_settings_eligibility": _check_secure_settings_eligibility,  # (secureSettings, user_eligibility_ctx) → bool
+    # cadreConfig master list flattening
+    "flatten_cadre_services":        _flatten_cadre_services,
 }
 
 
