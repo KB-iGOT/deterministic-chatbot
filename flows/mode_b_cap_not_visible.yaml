@@ -614,7 +614,7 @@ nodes:
       url: "/api/private/content/v3/hierarchy/{{ ctx.collected.selected_cap_id or (ctx.collected.all_caps[0].identifier if ctx.collected.all_caps else '') }}"
     response_mapping:
       - { from: "$.content.children", to: collected.cap_hierarchy_children }
-      - { from: "$.content.children", to: collected.incomplete_child_courses, transform: extract_incomplete_child_courses, transform_ctx_key: collected.all_enrollment_list }
+      - { from: "$.content", to: collected.incomplete_child_courses, transform: extract_incomplete_child_courses, transform_ctx_key: collected.all_enrollment_list }
     on_success: evaluate_child_courses
     on_error:
       any: cap_not_enrolled_message
@@ -767,7 +767,14 @@ nodes:
     disable_input: true
     on_reply:
       incomplete_ack: satisfied
-      locked: fetch_child_admin_content_state
+      locked: branch_check_incomplete_children
+
+  - id: branch_check_incomplete_children
+    type: branch
+    rules:
+      - if: "len(ctx.collected.incomplete_child_courses or []) > 0"
+        then: fetch_child_admin_content_state
+    default: final_assessment_locked_options
 
   - id: fetch_child_admin_content_state
     type: api_call

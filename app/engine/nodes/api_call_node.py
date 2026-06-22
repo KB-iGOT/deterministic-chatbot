@@ -1214,6 +1214,54 @@ def _compare_enrollment_vs_admin_state(
     return False
 
 
+def _extract_incomplete_child_courses(cap_content: Any, all_enrollment_list: Any) -> list[dict]:
+    """Return a list of dicts {"courseId": ..., "batchId": ...} for incomplete CAP child courses.
+       If the CAP has no children, treats the CAP itself as the course to check.
+    """
+    if not isinstance(cap_content, dict) or not isinstance(all_enrollment_list, list):
+        return []
+    
+    children = cap_content.get("children", [])
+    if not children:
+        children = [cap_content]
+    
+    incomplete = []
+    for child in children:
+        if not isinstance(child, dict): continue
+        if "assessment" in str(child.get("name", "")).lower(): continue
+        
+        cid = child.get("identifier")
+        if not cid: continue
+        
+        is_complete = False
+        batch_id = None
+        for enroll in all_enrollment_list:
+            if not isinstance(enroll, dict): continue
+            if enroll.get("courseId") == cid:
+                batch_id = enroll.get("batchId")
+                status = enroll.get("status")
+                pct = enroll.get("completionPercentage")
+                certs = enroll.get("issuedCertificates")
+                if status == 2 or pct == 100 or (isinstance(certs, list) and len(certs) > 0):
+                    is_complete = True
+                break
+                
+        if not is_complete:
+            incomplete.append({"courseId": cid, "batchId": batch_id})
+            
+    return incomplete
+
+
+def _check_cap_technical_issue(all_enrollments: Any, admin_states: Any, course_id: Any) -> bool:
+    if not isinstance(all_enrollments, list) or not course_id:
+        return False
+    for enroll in all_enrollments:
+        if isinstance(enroll, dict) and enroll.get("courseId") == course_id:
+            lang_status = enroll.get("langContentStatus", {})
+            return _compare_enrollment_vs_admin_state(lang_status, admin_states)
+    return False
+
+
 def _filter_by_incomplete_ids(content_list: Any, incomplete_ids: Any) -> list:
     """Filter a composite-search content list to only items whose identifier
     appears in ``incomplete_ids``.
@@ -1292,6 +1340,7 @@ def _extract_hierarchy_names(hierarchy: Any, incomplete_ids: Any) -> str:
 # Registry of named transforms usable in YAML response_mapping `transform:` field.
 _TRANSFORMS: dict[str, Any] = {
     "extract_hierarchy_names":     _extract_hierarchy_names,
+    "extract_incomplete_child_courses": _extract_incomplete_child_courses,
     "extract_incomplete_ids":      _extract_incomplete_ids,
     "extract_completed_ids":           _extract_completed_ids,
     # Extracts batchId from batches[0] for in-progress courses where batchId
