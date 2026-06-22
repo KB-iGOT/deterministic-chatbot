@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import Any, Callable
 
 log = logging.getLogger(__name__)
@@ -160,6 +161,46 @@ class ApiCallNode(NodeHandler):
                 return _record_error(state, cfg, f"any:{e}")
 
             log.info("[api_call] node=%s completed successfully", node_id)
+
+            # Pagination: if `paginate` is configured, fetch remaining pages and
+            # merge all items into `result` before response_mapping runs.
+            paginate_cfg = cfg.get("paginate")
+            if paginate_cfg:
+                p_count_path = paginate_cfg.get("total_count_path", "").lstrip("$").lstrip(".")
+                p_list_path  = paginate_cfg.get("list_path", "").lstrip("$").lstrip(".")
+                p_page_param = paginate_cfg.get("page_param", "pageNumber")
+                p_page_size  = paginate_cfg.get("page_size", 100)
+                total_count  = _jsonpath_get(result, p_count_path) or 0
+                total_pages  = math.ceil(total_count / p_page_size) if p_page_size else 1
+                all_items: list = list(_jsonpath_get(result, p_list_path) or [])
+                for page_num in range(2, total_pages + 1):
+                    page_body = {**(rendered.get("body") or {}), p_page_param: page_num}
+                    try:
+                        page_result = await asyncio.wait_for(
+                            integration.execute_request(
+                                method=rendered["method"],
+                                url=rendered["url"],
+                                params=rendered.get("params"),
+                                body=page_body,
+                                headers=rendered.get("headers"),
+                            ),
+                            timeout=timeout_ms / 1000.0,
+                        )
+                        page_items = _jsonpath_get(page_result, p_list_path) or []
+                        all_items.extend(page_items)
+                        log.info("[api_call] node=%s page=%d fetched %d items (total so far: %d)",
+                                 node_id, page_num, len(page_items), len(all_items))
+                    except Exception:  # noqa: BLE001
+                        log.warning("[api_call] node=%s pagination stopped at page %d", node_id, page_num)
+                        break
+                # Write merged list back into result so response_mapping sees the full set
+                parts = p_list_path.split(".")
+                target = result
+                for part in parts[:-1]:
+                    if isinstance(target, dict):
+                        target = target.get(part, {})
+                if isinstance(target, dict) and parts:
+                    target[parts[-1]] = all_items
 
             # Apply response_mapping → populate state.collected
             updates: dict[str, Any] = {}
@@ -1289,6 +1330,25 @@ def _extract_hierarchy_names(hierarchy: Any, incomplete_ids: Any) -> str:
     return ", ".join(names)
 
 
+def _flatten_cadre_services(value: Any) -> list[dict]:
+    """Flatten cadreConfig nested service list into [{id, name}, ...].
+
+    Input: result.response.value (after karmayogi.py unwraps result envelope).
+    Traversal: civilServiceType.civilServiceTypeList[].serviceList[]
+    """
+    if not isinstance(value, dict):
+        return []
+    type_list = value.get("civilServiceType", {}).get("civilServiceTypeList", [])
+    services = []
+    for service_type in type_list:
+        for service in service_type.get("serviceList", []):
+            sid  = service.get("id", "")
+            name = service.get("name", "")
+            if sid and name:
+                services.append({"id": sid, "name": name})
+    return services
+
+
 # Registry of named transforms usable in YAML response_mapping `transform:` field.
 _TRANSFORMS: dict[str, Any] = {
     "extract_hierarchy_names":     _extract_hierarchy_names,
@@ -1352,6 +1412,8 @@ _TRANSFORMS: dict[str, Any] = {
     # (requires transform_ctx_key: collected.user_eligibility_ctx)
     # Checks organisation list + isVerifiedKarmayogi flag against user profile
     "check_secure_settings_eligibility": _check_secure_settings_eligibility,  # (secureSettings, user_eligibility_ctx) → bool
+    # cadreConfig master list flattening
+    "flatten_cadre_services":        _flatten_cadre_services,
 }
 
 
@@ -1431,3 +1493,4 @@ def _jsonpath_get_list(data: Any, path: str) -> list[Any]:
         if cur is None:
             return []
     return [cur] if cur is not None else []
+

@@ -960,19 +960,6 @@ def _build_state_update(
                 fname = field_cfg.get("name", "").removeprefix("collected.")
                 if fname:
                     collected[fname] = body.text
-                on_select = (field_cfg.get("typeahead") or {}).get("on_select", {})
-                if body.item_id:
-                    # Typeahead selection: store the selected id and label
-                    if on_select.get("id_to"):
-                        collected[on_select["id_to"].removeprefix("collected.")] = body.item_id
-                    if on_select.get("label_to"):
-                        collected[on_select["label_to"].removeprefix("collected.")] = body.item_label or body.text
-                elif on_select:
-                    # Manual text submit (no dropdown selection) — clear any stale selection
-                    if on_select.get("id_to"):
-                        collected[on_select["id_to"].removeprefix("collected.")] = None
-                    if on_select.get("label_to"):
-                        collected[on_select["label_to"].removeprefix("collected.")] = None
         # Record step in conversation trail
         step_label = _get_step_label(node_cfg, field_meta)
         steps = list(collected.get("_user_steps") or [])
