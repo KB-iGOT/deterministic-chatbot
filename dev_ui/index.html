@@ -549,28 +549,6 @@ async function startSession() {
 
 function resetSession() { startSession(); }
 
-async function switchToFlow(flowId) {
-  S = mkState();
-  S.language = langEl().value;
-  clearMessages();
-  setStrip('Connecting…');
-  try {
-    const r = await fetch(url('/ai-chatbot/v1/sessions/create'), {
-      method: 'POST',
-      headers: hdrs(),
-      body: JSON.stringify({ channel: 'web', language: S.language }),
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.detail || 'HTTP ' + r.status);
-    S.sessionId = d.session_id;
-    updateDebug(d);
-    // Skip main menu — immediately select the target flow
-    await turn({ action: 'select_choice', choice_id: flowId });
-  } catch(e) {
-    showErr('Failed to switch: ' + e.message);
-  }
-}
-
 // ── Turn ─────────────────────────────────────────────────────────────────────
 async function turn(payload) {
   if (!S.sessionId) return;
@@ -631,10 +609,6 @@ function renderActivities(activities) {
         break;
 
       case 'end':
-        if (a.outcome && a.outcome.startsWith('redirect:')) {
-          switchToFlow(a.outcome.split(':')[1]);
-          return;  // exit renderActivities — switchToFlow takes over
-        }
         hasEnd = true;
         appendEndBanner(a);
         break;
