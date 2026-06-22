@@ -23,7 +23,7 @@ STEP 2 → GET   /api/content/v1/read/{course_id}
          IF Program                          → STEP 3
          IF Course / Event                   → STEP 4
 
-STEP 3 → GET   /api/content/v1/hierarchy/{program_id}          [Programs only]
+STEP 3 → GET   /api/private/content/v3/hierarchy/{program_id}?mode=edit          [Programs only]
               ↓ Fetch child Course DO_IDs → child_course_ids
               ↓ continue ↓
 
@@ -94,7 +94,6 @@ R2 → POST  /api/admin/content/state/read
 ```bash
 curl -X POST \
   "https://portal.uat.karmayogibharat.net/api/course/private/v4/user/enrollment/list/{user_id}" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {
@@ -175,8 +174,7 @@ curl -X POST \
 
 ```bash
 curl -X GET \
-  "https://portal.uat.karmayogibharat.net/api/user/private/v1/events/list/{user_id}" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}"
+  "https://portal.uat.karmayogibharat.net/api/user/private/v1/events/list/{user_id}"
 ```
 
 ### Response Fields Used
@@ -198,8 +196,7 @@ curl -X GET \
 
 ```bash
 curl -X GET \
-  "https://portal.uat.karmayogibharat.net/api/content/v1/read/do_1141986246718750721214" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}"
+  "https://portal.uat.karmayogibharat.net/api/content/v1/read/do_1141986246718750721214"
 ```
 
 ### Response Fields Used
@@ -221,12 +218,11 @@ curl -X GET \
 
 > Fetches the child Course DO_IDs nested under a Program. The Admin Content State API (Step 4) must be called with a Course DO_ID, not the Program DO_ID.
 
-**Endpoint:** `GET /api/content/v1/hierarchy/{program_id}`
+**Endpoint:** `GET /api/private/content/v3/hierarchy/{program_id}?mode=edit`
 
 ```bash
 curl -X GET \
-  "https://portal.uat.karmayogibharat.net/api/content/v1/hierarchy/do_1141986246718750721214" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}"
+  "https://portal.uat.karmayogibharat.net/api/private/content/v3/hierarchy/do_1141986246718750721214?mode=edit"
 ```
 
 ### Response Fields Used
@@ -264,7 +260,6 @@ curl -X GET \
 ```bash
 curl -X POST \
   "https://portal.uat.karmayogibharat.net/api/admin/content/state/read" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {
@@ -345,8 +340,7 @@ This means the backend recorded completion but the portal has not reflected it.
 
 ```bash
 curl -X GET \
-  "https://portal.uat.karmayogibharat.net/api/content/v1/read/do_1141986246718750721214" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}"
+  "https://portal.uat.karmayogibharat.net/api/content/v1/read/do_1141986246718750721214"
 ```
 
 ### Response Fields Used
@@ -520,8 +514,7 @@ all_resources_assessment = all(
 
 ```bash
 curl -X GET \
-  "https://portal.uat.karmayogibharat.net/api/admin/assesment/retake/count?assessmentIdentifier={content_do_id}&userId={user_id}&editMode=false" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}"
+  "https://portal.uat.karmayogibharat.net/api/admin/assesment/retake/count?assessmentIdentifier={content_do_id}&userId={user_id}&editMode=false"
 ```
 
 ### Query Parameters

@@ -86,7 +86,6 @@ PATH C — Event
 ```bash
 curl -X GET \
   "https://portal.uat.karmayogibharat.net/api/user/private/v1/read/{user_id}" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json"
 ```
 
@@ -119,7 +118,6 @@ curl -X GET \
 ```bash
 curl -X POST \
   "https://portal.uat.karmayogibharat.net/api/composite/v4/search" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {
@@ -246,7 +244,6 @@ Fallback to YP/AM lookup if MDO not found.
 ```bash
 curl -X GET \
   "https://portal.uat.karmayogibharat.net/api/accessSettings/read/{course_id}" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "wid: {user_id_hash}" \
   -H "Content-Type: application/json"
 ```
@@ -302,7 +299,6 @@ Supported `criteriaKey` values and their source in the user profile:
 ```bash
 curl -X POST \
   "https://portal.uat.karmayogibharat.net/api/private/user/v1/search" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {
@@ -369,7 +365,6 @@ curl -X POST \
 ```bash
 curl -X POST \
   "https://portal.uat.karmayogibharat.net/api/composite/v4/search" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {
@@ -402,7 +397,6 @@ Same endpoint and logic as PATH B Step 3, using `collected.event_id` in the URL.
 ```bash
 curl -X GET \
   "https://portal.uat.karmayogibharat.net/api/accessSettings/read/{event_id}" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "wid: {user_id_hash}" \
   -H "Content-Type: application/json"
 ```

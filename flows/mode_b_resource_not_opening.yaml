@@ -71,7 +71,7 @@ nodes:
     on_reply:
       save_to: collected.device_type
       mobile: mobile_app_guidance
-      web:    web_pick_course
+      web:    shared_pick_course
 
   # ===========================================================================
   # CASE 1: Mobile Application
@@ -101,11 +101,13 @@ nodes:
     prompt:
       text: "Let's try using Desktop Mode on your mobile browser."
     steps:
-      - "Open **Google Chrome** browser on your mobile device."
+      - "Open **Google Chrome** browser on the mobile device."
       - "Click on the **three dots** at the top right corner of the browser."
       - "Enable **Desktop Site** / **Desktop Mode**."
-      - "Navigate to iGOT Karmayogi and login."
-      - "Search for the course, click **Resume**, and try opening the resource again."
+      - "In the address bar, type **iGOT Karmayogi**."
+      - "Login using the registered credentials."
+      - "Search for the course."
+      - "Click **Resume** and try opening the resource again."
     follow_up:
       text: "Did the resource open successfully in Desktop Mode?"
       quick_replies:
@@ -113,23 +115,21 @@ nodes:
         - { id: no,  label: "❌ No, still not opening" }
     on_reply:
       yes: satisfied
-      no:  mobile_collect_details
+      no:  mobile_collect_device_details
 
-  - id: mobile_collect_details
+  - id: mobile_collect_device_details
     type: collect
     prompts:
-      - { field: collected.course_name,   text: "Please share the Course Name:" }
-      - { field: collected.resource_name, text: "Please share the Resource Name:" }
       - { field: collected.mobile_model,  text: "Please share your Mobile Device Model (e.g., Samsung Galaxy S21):" }
       - { field: collected.app_version,   text: "Please share your Mobile Application Version (if known):", optional: true }
-    next: resource_auto_ticket
+    next: shared_pick_course
 
   # ===========================================================================
-  # CASE 2: Web Browser
+  # CASE 2: Web Browser / Shared API Path
   # ===========================================================================
 
   # Step 1: Select course from enrollment list
-  - id: web_pick_course
+  - id: shared_pick_course
     type: collect
     prompt:
       text: "Please select the course that has the resource not opening:"
@@ -172,12 +172,12 @@ nodes:
       - from: "$.content.children" # Use a separate field for children
         to: collected.all_child_ids
         transform: extract_child_course_ids
-    on_success: web_pick_resource
+    on_success: shared_pick_resource
     on_error:
       any: api_error_fallback
 
   # Step 3: Select the resource from a searchable list
-  - id: web_pick_resource
+  - id: shared_pick_resource
     type: collect
     prompt:
       text: "I found the following resources in **{{ ctx.collected.course_name }}**. Which one is not opening?"
@@ -206,7 +206,14 @@ nodes:
           - { from: mimeType, to: collected.resource_mime_type }
       search: { enabled: true, placeholder: "Search for a video or module name..." }
       pagination: { enabled: true, page_size: 15 }
-    next: branch_resource_type_step
+    next: branch_device_check_after_resource
+
+  - id: branch_device_check_after_resource
+    type: branch
+    rules:
+      - if: "ctx.collected.device_type == 'mobile'"
+        then: resource_auto_ticket
+    default: branch_resource_type_step
 
   - id: branch_resource_type_step
     type: branch
@@ -379,6 +386,7 @@ nodes:
         Generate a Zoho support ticket.
         Subject: "Resource Not Opening — {{ ctx.collected.course_name | default('Course') }}"
         Description: include course name, resource name, channel ({{ ctx.channel }}), resource type, and email.
+        If mobile device details (mobile model, app version) are provided, include them as well.
       priority_override: P3
     on_complete: confirm_ticket
     on_restart: ask_device_type

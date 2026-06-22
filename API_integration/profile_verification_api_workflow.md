@@ -39,7 +39,6 @@ STEP 2   → POST /private/user/v1/search        (pending request only)
 ```bash
 curl -X POST \
   "https://portal.uat.karmayogibharat.net/private/user/v1/search" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {
@@ -84,7 +83,6 @@ curl -X POST \
 ```bash
 curl -X POST \
   "https://portal.uat.karmayogibharat.net/private/user/v1/search" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {

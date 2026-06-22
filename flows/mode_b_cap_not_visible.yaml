@@ -614,6 +614,7 @@ nodes:
       url: "/api/private/content/v3/hierarchy/{{ ctx.collected.selected_cap_id or (ctx.collected.all_caps[0].identifier if ctx.collected.all_caps else '') }}"
     response_mapping:
       - { from: "$.content.children", to: collected.cap_hierarchy_children }
+      - { from: "$.content", to: collected.incomplete_child_courses, transform: extract_incomplete_child_courses, transform_ctx_key: collected.all_enrollment_list }
     on_success: evaluate_child_courses
     on_error:
       any: cap_not_enrolled_message
@@ -766,7 +767,47 @@ nodes:
     disable_input: true
     on_reply:
       incomplete_ack: satisfied
-      locked: final_assessment_locked_options
+      locked: branch_check_incomplete_children
+
+  - id: branch_check_incomplete_children
+    type: branch
+    rules:
+      - if: "len(ctx.collected.incomplete_child_courses or []) > 0"
+        then: fetch_child_admin_content_state
+    default: final_assessment_locked_options
+
+  - id: fetch_child_admin_content_state
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/admin/content/state/read"
+      body:
+        request:
+          userId:   "{{ ctx.user_id_hash }}"
+          courseId: "{{ ctx.collected.incomplete_child_courses[ctx.counters.cap_child_idx or 0].courseId }}"
+          batchId:  "{{ ctx.collected.incomplete_child_courses[ctx.counters.cap_child_idx or 0].batchId }}"
+    response_mapping:
+      - { from: "$.consumptionRecords[*]", to: collected.admin_content_states, transform: extract_consumption_records }
+    on_success: branch_cap_child_tech_issue
+    on_error:
+      any: loop_incomplete_courses
+    timeout_ms: 8000
+
+  - id: branch_cap_child_tech_issue
+    type: branch
+    rules:
+      - if: "check_cap_technical_issue(ctx.collected.all_enrollment_list, ctx.collected.admin_content_states, ctx.collected.incomplete_child_courses[ctx.counters.cap_child_idx or 0].courseId) == True"
+        then: cap_child_course_technical_message
+    default: loop_incomplete_courses
+
+  - id: loop_incomplete_courses
+    type: increment_and_branch
+    counter: cap_child_idx
+    rules:
+      - if: "ctx.counters.cap_child_idx < len(ctx.collected.incomplete_child_courses)"
+        then: fetch_child_admin_content_state
+    default: final_assessment_locked_options
 
   - id: final_assessment_locked_options
     type: message
@@ -779,7 +820,7 @@ nodes:
     disable_input: true
     on_reply:
       mobile: cap_assessment_mobile_guidance
-      other: cap_other_error_screenshot_guidance
+      other: cap_other_error_guidance
 
   # ---------------------------------------------------------------------------
   # Option 1 — Unable to Access Final Assessment from Mobile
@@ -804,13 +845,11 @@ nodes:
   # ---------------------------------------------------------------------------
   # Option 3 — Any Other Error
   # ---------------------------------------------------------------------------
-  - id: cap_other_error_screenshot_guidance
+  - id: cap_other_error_guidance
     type: message
     prompt:
       text: |
         We will raise a support ticket for further investigation.
-
-        📸 **Please keep a screenshot of the error ready.** Our support agent will reach out to your registered email and may request it to help resolve your issue faster.
     next: cap_auto_ticket
 
   # ---------------------------------------------------------------------------
@@ -1010,8 +1049,8 @@ nodes:
         - { id: other,   label: "⚠️ Any Other Error" }
     on_reply:
       YES: satisfied
-      NO: cap_other_error_screenshot_guidance
-      other: cap_other_error_screenshot_guidance
+      NO: cap_other_error_guidance
+      other: cap_other_error_guidance
 
   - id: resolution_cap_non_scorm_guidance
     type: resolution
@@ -1039,8 +1078,8 @@ nodes:
         - { id: other,   label: "⚠️ Any Other Error" }
     on_reply:
       YES: satisfied
-      NO: cap_other_error_screenshot_guidance
-      other: cap_other_error_screenshot_guidance
+      NO: cap_other_error_guidance
+      other: cap_other_error_guidance
 
   - id: msg_only_assessment_pending
     type: message
@@ -1060,7 +1099,7 @@ nodes:
     on_reply:
       mobile: cap_assessment_mobile_guidance
       limit: api_fetch_assessment_limit
-      other: cap_other_error_screenshot_guidance
+      other: cap_other_error_guidance
 
   - id: api_fetch_assessment_limit
     type: api_call
@@ -1123,20 +1162,18 @@ nodes:
     next: cap_child_course_technical_ticket
 
   - id: cap_child_course_technical_ticket
-    type: transfer_llm
-    llm_context:
-      include_messages: true
-      include_collected: true
-      include_flow_meta: true
-    llm_directives:
-      objective: |
-        The user has reported a technical issue affecting a child course under their CAP.
-        Generate a Zoho support ticket.
-        Subject: "CAP Child Course Technical Issue - <org_name>"
-        Description: include the user email, the CAP name, and clearly state that a child course has a technical issue and needs to be updated in the Engineering Excel in the backend.
-      priority_override: P3
-    on_complete: confirm_ticket
-    on_restart: ask_cap_issue_type
+    type: engineering_ticket
+    user_id: "{{ ctx.user_id_hash }}"
+    course_do_id: "{{ ctx.collected.course_id or ctx.collected.selected_cap_id or ctx.collected.cap_id }}"
+    content_do_id: >-
+      {% set loop_idx = ctx.counters.cap_child_idx or 0 if ctx.counters else 0 %}
+      {% set inc_list = ctx.collected.incomplete_child_courses if ctx.collected.incomplete_child_courses else [] %}
+      {% if loop_idx < inc_list | length %}
+        {{ inc_list[loop_idx].courseId }}
+      {% else %}
+        {{ ctx.collected.content_do_id or ctx.collected.course_id or ctx.collected.selected_cap_id or ctx.collected.cap_id }}
+      {% endif %}
+    on_success: ticket_confirmation
 
   # ===========================================================================
   # Dynamic Ticket Confirmation Override

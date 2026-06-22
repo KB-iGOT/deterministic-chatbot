@@ -45,7 +45,7 @@ classification:
     - "not my user"
     - "access revoked"
 
-entry_node: intro_context
+entry_node: fetch_transfer_status
 
 imports:
   - _terminal
@@ -58,31 +58,6 @@ imports:
 
 nodes:
 
-  # ===========================================================================
-  # 1. Intro & Context (SOP Step 1)
-  # ===========================================================================
-  - id: intro_context
-    type: message
-    prompt:
-      text: |
-        I understand you're having an issue with your account access. Are you seeing this specific error message on the platform?
-
-        > "Your access has been revoked because your organization no longer identifies you as a user. To regain access, please submit a ‘Transfer Request’ and choose the correct organization.”
-    quick_replies:
-      - { id: yes, label: "✅ Yes, that's the error" }
-      - { id: no,  label: "❌ No, I have a different issue" }
-    disable_input: true
-    on_reply:
-      yes: inform_and_fetch
-      no:  different_issue_fallback
-
-  - id: inform_and_fetch
-    type: message
-    prompt:
-      text: |
-        Thank you for confirming.
-
-    next: fetch_transfer_status
 
   # ===========================================================================
   # 2. Verify Transfer Request Status (SOP Step 2.1: Private User Search API)
@@ -161,14 +136,7 @@ nodes:
         For security reasons, I can't proceed. Please contact our support team directly at **support@igotkarmayogi.gov.in** for further assistance.
     next: satisfied
 
-  - id: different_issue_fallback
-    type: message
-    prompt:
-      text: |
-        I see. This support flow is specifically for the "Access Revoked" error.
 
-        Please start a new conversation and choose a topic from the main menu that best matches your issue.
-    next: satisfied
 
   - id: show_pending_transfer
     type: message
@@ -245,14 +213,14 @@ nodes:
 
         Since the organization is incorrect, you need to cancel the current transfer request and raise a fresh one with the correct organization.
     steps:
-      - "Step 1: Log in to iGOT Karmayogi."
-      - "Step 2: Click on **Profile Icon** (Top Right Corner)."
-      - "Step 3: Click on **View Profile**."
-      - "Step 4: Click on **Cancel Transfer Request**."
-      - "Step 5: Once cancelled, click **Make Transfer Request** again."
-      - "Step 6: Select the **correct organization name** from the dropdown."
-      - "Step 7: Ensure all details (Group, Designation) are accurate."
-      - "Step 8: Click **Submit**. Your new request will be sent to the MDO Admin for approval."
+      - "Log in to iGOT Karmayogi."
+      - "Click on **Profile Icon** (Top Right Corner)."
+      - "Click on **View Profile**."
+      - "Click on **Cancel Transfer Request**."
+      - "Once cancelled, click **Make Transfer Request** again."
+      - "Select the **correct organization name** from the dropdown."
+      - "Ensure all details (Group, Designation) are accurate."
+      - "Click **Submit**. Your new request will be sent to the MDO Admin for approval."
     next: satisfied
 
   # ===========================================================================
@@ -266,15 +234,15 @@ nodes:
 
         Your previous department's MDO has marked your profile as **'Not My User'**. Therefore, you are required to raise a **Transfer Request** to regain access to the platform.
     steps:
-      - "**Step 1:** Log in to iGOT Karmayogi."
-      - "**Step 2:** Click on **Profile Icon** (Top Right Corner)."
-      - "**Step 3:** Click on **View Profile**."
-      - "**Step 4:** Select **Make Transfer Request**."
-      - "**Step 5:** Select the **Correct Organization Name** from the dropdown."
-      - "**Step 6:** Choose **Group** and **Designation** (if applicable)."
-      - "**Step 7:** Ensure all details are accurate and click **Submit**."
-      - "**Step 8:** Your request will be sent to the concerned MDO Admin for approval."
-      - "**Step 9:** Access will be restored once the MDO Admin approves the request."
+      - "Log in to iGOT Karmayogi."
+      - "Click on **Profile Icon** (Top Right Corner)."
+      - "Click on **View Profile**."
+      - "Select **Make Transfer Request**."
+      - "Select the **Correct Organization Name** from the dropdown."
+      - "Choose **Group** and **Designation** (if applicable)."
+      - "Ensure all details are accurate and click **Submit**."
+      - "Your request will be sent to the concerned MDO Admin for approval."
+      - "Access will be restored once the MDO Admin approves the request."
     follow_up:
       text: "Are you facing any issues while raising the request?"
       quick_replies:
@@ -297,12 +265,12 @@ nodes:
 
         This usually happens when you have a pending request under your **Primary Details** section.
     steps:
-      - "Step 1: Log in to iGOT Karmayogi."
-      - "Step 2: Go to **Profile** (Top Right Corner)."
-      - "Step 3: Open the **Primary Details** section."
-      - "Step 4: Click on **Withdraw Request** to cancel the pending request."
-      - "Step 5: Once withdrawn, the 'Make Transfer Request' option will become enabled again."
-      - "Step 6: Submit a fresh transfer request with the correct organization details."
+      - "Log in to iGOT Karmayogi."
+      - "Go to **Profile** (Top Right Corner)."
+      - "Open the **Primary Details** section."
+      - "Click on **Withdraw Request** to cancel the pending request."
+      - "Once withdrawn, the 'Make Transfer Request' option will become enabled again."
+      - "Submit a fresh transfer request with the correct organization details."
       
     next: satisfied
 
@@ -330,6 +298,7 @@ nodes:
         request:
           filters:
             orgName: "{{ ctx.collected.exact_org_name }}"
+            isTenant: true  # ensures only top-level tenant orgs are returned — these are the ones users can select in the Transfer Request dropdown
           limit: 5
     response_mapping:
       - { from: "$.response.count",                                               to: collected.org_search_count }
@@ -353,59 +322,55 @@ nodes:
 
         We found an organization matching your details in the system.
     steps:
-      - "When you raise your transfer request, use the following exact organization name:\n\n**{{ ctx.collected.found_org_name }}**"
+      - "When you raise your transfer request, use the exact organization name: **{{ ctx.collected.found_org_name }}**"
       - "Go to your Profile → Make Transfer Request"
       - "Select the organization name exactly as shown above"
     next: satisfied
 
   - id: share_spoc_details_for_org_creation
-    type: resolution
+    type: message
     prompt:
       text: |
         ⚠️ **Organization Not Found**
 
-        We could not find the organization "**{{ ctx.collected.exact_org_name }}**" in the iGOT system based on the details provided.
+        We could not find the organization "**{{ ctx.collected.exact_org_name }}**" in the iGOT system. We are now looking up the YP contact for your Ministry/State.
+    next: lookup_yp_by_dept
 
-        This could mean the organization hasn't been onboarded yet, or the name might be spelled differently.
-    steps:
-      - "We are now looking up the YP (Young Professional) contact for your Ministry/State."
-      - "Alternatively, email **support@igotkarmayogi.gov.in** with your organization details for further assistance."
-    next: lookup_yp_contact
+  # Inline YP lookup for Path B using user-typed dept/ministry name as key.
+  # The shared _yp_lookup fragment uses org_channel (the user's old revoked org),
+  # which would be wrong here. This node uses dept_name/ministry_name instead.
+  - id: lookup_yp_by_dept
+    type: data_lookup
+    service: yp_lookup
+    key: "{{ ctx.collected.dept_name or ctx.collected.ministry_name or ctx.collected.org_channel }}"
+    response_mapping:
+      - { from: name,      to: collected.yp_name }
+      - { from: email,     to: collected.yp_email }
+      - { from: mobile,    to: collected.yp_mobile }
+      - { from: cc_email,  to: collected.yp_cc_email }
+    on_success: yp_found_result
+    on_error:
+      any: yp_not_found
 
   - id: yp_found_result
-    type: resolution
+    type: message
     prompt:
       text: |
-        📋 **YP / SPOC Contact Details**
+        Please reach out to the YP/SPOC below for further assistance:
 
-        We have identified the Young Professional (YP) for your Ministry/State.
-
-        **Contact Details:**
         - **Name:** {{ ctx.collected.yp_name or "YP Contact" }}
         - **Email:** {{ ctx.collected.yp_email or "N/A" }}
         - **Mobile:** {{ ctx.collected.yp_mobile or "N/A" }}
-    steps:
-      - "Please coordinate with the YP using the contact details above."
-      - "The YP will assist with:"
-      - "  • Creation of MDO Leader/Admin for your organization"
-      - "  • Approval-related support for your transfer request"
-      - "  • Organization onboarding if not yet registered on iGOT"
     next: satisfied
 
   - id: yp_not_found
-    type: resolution
+    type: message
     prompt:
       text: |
         ⚠️ **YP / SPOC Details Not Found**
 
-        We could not locate a Young Professional (YP) or SPOC for your organization in our records.
-    steps:
-      - "Please email our support team at **support@igotkarmayogi.gov.in** with the following details:"
-      - "  • Your Ministry / State / Department name"
-      - "  • Your organization name"
-      - "  • A brief description of your issue"
-      - "Our team will assist you with MDO Admin creation or organization onboarding."
-    next: satisfied
+        We could not locate a YP or SPOC for your organization. We will raise a support ticket for further investigation — our team will reach out to assist you.
+    next: access_revoked_auto_ticket
 
   # ===========================================================================
   # 5. Escalation & Terminal
@@ -433,7 +398,7 @@ nodes:
         Description: Include whether a transfer request was already pending (wf_transfer_id: {{ ctx.collected.wf_transfer_id }}), the target organization ({{ ctx.collected.transfer_dept_name }}), which path the user followed (e.g., pending request, no request, button disabled, org not found), and the user's current organization/channel ({{ ctx.collected.user_channel }}).
       priority_override: P2
     on_complete: confirm_ticket
-    on_restart: intro_context
+    on_restart: fetch_transfer_status
 
   - id: confirm_ticket
     type: message

@@ -4,22 +4,14 @@
 # Flow: Weekly Clap Not Updated / Reset to Zero / Not Credited
 #
 # Logic:
-#   1. Call Insights API → retrieve weekly activity (w1 = current week, w4 = 3 weeks ago)
-#   2. Traverse w1 → w2 → w3 → w4 to find the first week with timespent < 60 min
-#   3a. Reset week found (timespent < 60 min):
+#   1. Call Search API -> retrieve rootOrgId
+#   2. Call Insights API (v2) → retrieve weekly activity (w1 = current week, w12 = 12 weeks ago)
+#   3. Traverse w1 → w2 → ... → w12 to find the first week with timespent < 60 min
+#   4a. Reset week found (timespent < 60 min):
 #       → Inform user of exact time spent and the 60-minute rule
 #       → If user agrees  → close (self-served)
 #       → If user disagrees → raise ticket
-#   3b. All 4 weeks ≥ 60 min → discrepancy detected → raise ticket for tech team
-#
-# API used:
-#   GET /api/user/v1/activity/insights/{{ ctx.user_id_hash }}
-#   Response: $.weekly-claps.{w1..w4}.timespent (values in MINUTES)
-#             $.weekly-claps.total_claps
-#             $.weekly-claps.startDate / endDate
-#
-# Limitation: Insights API covers only last 4 weeks (w1–w4).
-#   If streak > 4 weeks, the reset point may not be traceable — ticket is raised.
+#   4b. All 12 weeks ≥ 60 min → discrepancy detected → raise ticket for tech team
 #
 # SOP: Use Case – Weekly Clap Not Updated / Reset to Zero / Not Credited
 # =============================================================================
@@ -54,7 +46,7 @@ classification:
     - "lost my weekly clap"
     - "weekly clap went to zero"
 
-entry_node: fetch_insights_data
+entry_node: fetch_user_profile
 
 imports:
   - _terminal
@@ -66,34 +58,72 @@ imports:
 
 nodes:
   # ===========================================================================
-  # 1. Fetch Insights API — weekly activity data (w1 = current, w4 = oldest)
+  # 1. Fetch User Profile to get rootOrgId
+  # ===========================================================================
+  - id: fetch_user_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            userId: "{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.result.response.content[0].rootOrgId", to: ctx.root_org_id }
+    on_success: fetch_insights_data
+    on_error:
+      any: api_error_fallback
+    timeout_ms: 8000
+
+  # ===========================================================================
+  # 2. Fetch Insights API v2 — weekly activity data (w1 = current, w12 = oldest)
   # timespent values are in MINUTES; threshold = 60 minutes
   # ===========================================================================
   - id: fetch_insights_data
     type: api_call
     integration: karmayogi
     request:
-      method: GET
-      url: "/api/user/v1/activity/insights/{{ ctx.user_id_hash }}"
+      method: POST
+      url: "/api/chatbot/v2/insights"
+      headers:
+        x-authenticated-userid: "{{ ctx.user_id_hash }}"
+      body:
+        request:
+          filters:
+            primaryCategory: "programs"
+            organisations:
+              - "across"
+              - "{{ ctx.root_org_id }}"
     response_mapping:
-      # Week 1 — most recent / current week
-      - { from: "$.weekly-claps.w1.timespent", to: collected.w1_mins }
-      # Week 2
-      - { from: "$.weekly-claps.w2.timespent", to: collected.w2_mins }
-      # Week 3
-      - { from: "$.weekly-claps.w3.timespent", to: collected.w3_mins }
-      # Week 4 — oldest available week
-      - { from: "$.weekly-claps.w4.timespent", to: collected.w4_mins }
-      # Total weekly clap count
-      - { from: "$.weekly-claps.total_claps",  to: collected.total_claps }
-      # Date range for display context
-      - { from: "$.weekly-claps.startDate",     to: collected.week_start_date }
-      - { from: "$.weekly-claps.endDate",       to: collected.week_end_date }
-      # Computed week date-range labels (e.g. "11 May – 17 May 2026")
-      - { from: "$.weekly-claps.startDate", to: collected.w1_label, transform: week_label_w1 }
-      - { from: "$.weekly-claps.startDate", to: collected.w2_label, transform: week_label_w2 }
-      - { from: "$.weekly-claps.startDate", to: collected.w3_label, transform: week_label_w3 }
-      - { from: "$.weekly-claps.startDate", to: collected.w4_label, transform: week_label_w4 }
+      - { from: "$.result.response.weekly-claps.w1.timespent", to: collected.w1_mins }
+      - { from: "$.result.response.weekly-claps.w2.timespent", to: collected.w2_mins }
+      - { from: "$.result.response.weekly-claps.w3.timespent", to: collected.w3_mins }
+      - { from: "$.result.response.weekly-claps.w4.timespent", to: collected.w4_mins }
+      - { from: "$.result.response.weekly-claps.w5.timespent", to: collected.w5_mins }
+      - { from: "$.result.response.weekly-claps.w6.timespent", to: collected.w6_mins }
+      - { from: "$.result.response.weekly-claps.w7.timespent", to: collected.w7_mins }
+      - { from: "$.result.response.weekly-claps.w8.timespent", to: collected.w8_mins }
+      - { from: "$.result.response.weekly-claps.w9.timespent", to: collected.w9_mins }
+      - { from: "$.result.response.weekly-claps.w10.timespent", to: collected.w10_mins }
+      - { from: "$.result.response.weekly-claps.w11.timespent", to: collected.w11_mins }
+      - { from: "$.result.response.weekly-claps.w12.timespent", to: collected.w12_mins }
+      - { from: "$.result.response.weekly-claps.total_claps",  to: collected.total_claps }
+      - { from: "$.result.response.weekly-claps.startDate",     to: collected.week_start_date }
+      - { from: "$.result.response.weekly-claps.endDate",       to: collected.week_end_date }
+      - { from: "$.result.response.weekly-claps.startDate", to: collected.w1_label, transform: week_label_w1 }
+      - { from: "$.result.response.weekly-claps.startDate", to: collected.w2_label, transform: week_label_w2 }
+      - { from: "$.result.response.weekly-claps.startDate", to: collected.w3_label, transform: week_label_w3 }
+      - { from: "$.result.response.weekly-claps.startDate", to: collected.w4_label, transform: week_label_w4 }
+      - { from: "$.result.response.weekly-claps.startDate", to: collected.w5_label, transform: week_label_w5 }
+      - { from: "$.result.response.weekly-claps.startDate", to: collected.w6_label, transform: week_label_w6 }
+      - { from: "$.result.response.weekly-claps.startDate", to: collected.w7_label, transform: week_label_w7 }
+      - { from: "$.result.response.weekly-claps.startDate", to: collected.w8_label, transform: week_label_w8 }
+      - { from: "$.result.response.weekly-claps.startDate", to: collected.w9_label, transform: week_label_w9 }
+      - { from: "$.result.response.weekly-claps.startDate", to: collected.w10_label, transform: week_label_w10 }
+      - { from: "$.result.response.weekly-claps.startDate", to: collected.w11_label, transform: week_label_w11 }
+      - { from: "$.result.response.weekly-claps.startDate", to: collected.w12_label, transform: week_label_w12 }
     on_success: branch_has_data
     on_error:
       not_found: no_insights_data
@@ -102,18 +132,13 @@ nodes:
 
   # ===========================================================================
   # 1b. Guard — verify at least one week has a usable timespent value.
-  #     A 200 response with all-null weeks means the API returned an empty /
-  #     structurally unexpected payload — treat as data unavailable.
   # ===========================================================================
   - id: branch_has_data
     type: branch
     rules:
       - if: >
-          ctx.collected.w1_mins == None and
-          ctx.collected.w2_mins == None and
-          ctx.collected.w3_mins == None and
-          ctx.collected.w4_mins == None
-        then: no_week_data
+          ctx.collected.w1_mins == None and ctx.collected.w2_mins == None and ctx.collected.w3_mins == None and ctx.collected.w4_mins == None and ctx.collected.w5_mins == None and ctx.collected.w6_mins == None and ctx.collected.w7_mins == None and ctx.collected.w8_mins == None and ctx.collected.w9_mins == None and ctx.collected.w10_mins == None and ctx.collected.w11_mins == None and ctx.collected.w12_mins == None
+        then: no_insights_data
     default: branch_check_week1
 
   - id: no_week_data
@@ -126,21 +151,13 @@ nodes:
         - Your learning activity has not been synced yet (usually takes up to 24 hours), **or**
         - There is a temporary data availability issue on the platform.
 
-        Please try again later. If the problem persists, I can raise a support ticket for investigation.
-    quick_replies:
-      - { id: raise, label: "📋 Raise a support ticket" }
-      - { id: skip,  label: "🔄 I'll try again later" }
-    disable_input: true
-    on_reply:
-      raise: disagree_auto_ticket
-      skip:  satisfied
+        Please try again later.
+    next: satisfied
 
   # ===========================================================================
-  # 2. Traverse w1 → w2 → w3 → w4 to find the reset point
-  #    A week causes a reset when timespent < 60 minutes
+  # 2. Traverse w1 → ... → w12 to find the reset point
   # ===========================================================================
 
-  # --- Check w1 (most recent / current week) ---
   - id: branch_check_week1
     type: branch
     rules:
@@ -148,7 +165,6 @@ nodes:
           then: resolve_clap_reset_w1 }
     default: branch_check_week2
 
-  # --- Check w2 ---
   - id: branch_check_week2
     type: branch
     rules:
@@ -156,7 +172,6 @@ nodes:
           then: resolve_clap_reset_w2 }
     default: branch_check_week3
 
-  # --- Check w3 ---
   - id: branch_check_week3
     type: branch
     rules:
@@ -164,17 +179,69 @@ nodes:
           then: resolve_clap_reset_w3 }
     default: branch_check_week4
 
-  # --- Check w4 (oldest available week) ---
   - id: branch_check_week4
     type: branch
     rules:
       - { if: "ctx.collected.w4_mins != None and ctx.collected.w4_mins < 60",
           then: resolve_clap_reset_w4 }
+    default: branch_check_week5
+
+  - id: branch_check_week5
+    type: branch
+    rules:
+      - { if: "ctx.collected.w5_mins != None and ctx.collected.w5_mins < 60",
+          then: resolve_clap_reset_w5 }
+    default: branch_check_week6
+
+  - id: branch_check_week6
+    type: branch
+    rules:
+      - { if: "ctx.collected.w6_mins != None and ctx.collected.w6_mins < 60",
+          then: resolve_clap_reset_w6 }
+    default: branch_check_week7
+
+  - id: branch_check_week7
+    type: branch
+    rules:
+      - { if: "ctx.collected.w7_mins != None and ctx.collected.w7_mins < 60",
+          then: resolve_clap_reset_w7 }
+    default: branch_check_week8
+
+  - id: branch_check_week8
+    type: branch
+    rules:
+      - { if: "ctx.collected.w8_mins != None and ctx.collected.w8_mins < 60",
+          then: resolve_clap_reset_w8 }
+    default: branch_check_week9
+
+  - id: branch_check_week9
+    type: branch
+    rules:
+      - { if: "ctx.collected.w9_mins != None and ctx.collected.w9_mins < 60",
+          then: resolve_clap_reset_w9 }
+    default: branch_check_week10
+
+  - id: branch_check_week10
+    type: branch
+    rules:
+      - { if: "ctx.collected.w10_mins != None and ctx.collected.w10_mins < 60",
+          then: resolve_clap_reset_w10 }
+    default: branch_check_week11
+
+  - id: branch_check_week11
+    type: branch
+    rules:
+      - { if: "ctx.collected.w11_mins != None and ctx.collected.w11_mins < 60",
+          then: resolve_clap_reset_w11 }
+    default: branch_check_week12
+
+  - id: branch_check_week12
+    type: branch
+    rules:
+      - { if: "ctx.collected.w12_mins != None and ctx.collected.w12_mins < 60",
+          then: resolve_clap_reset_w12 }
     default: resolution_discrepancy
 
-  # ===========================================================================
-  # 3a-i. Reset found — w1 (most recent / current week)
-  # ===========================================================================
   - id: resolve_clap_reset_w1
     type: message
     prompt:
@@ -194,20 +261,17 @@ nodes:
       agree:    satisfied
       disagree: disagree_auto_ticket
 
-  # ===========================================================================
-  # 3a-ii. Reset found — w2
-  # ===========================================================================
   - id: resolve_clap_reset_w2
     type: message
     prompt:
       text: |
-        We checked your activity data for the week **{{ ctx.collected.w2_label }}**.
+        We checked your activity data for the week **{{ ctx.collected.w2_label }}** .
 
         During that week, you spent **{{ ctx.collected.w2_mins | round(1) }} minutes** on the platform.
 
         The weekly clap is maintained only when you spend **at least 60 minutes per week** on iGOT Karmayogi. Since the time spent in that week was below the 60-minute threshold, the **weekly clap count was reset to zero**.
 
-        ℹ️ Your weekly clap restarts from the next week in which you meet the 60-minute requirement.
+        ℹ️ Your weekly clap will start building again from the next week in which you spend 60 or more minutes on the platform.
     quick_replies:
       - { id: agree,    label: "✅ I understand" }
       - { id: disagree, label: "❌ I disagree — I spent more time" }
@@ -216,20 +280,17 @@ nodes:
       agree:    satisfied
       disagree: disagree_auto_ticket
 
-  # ===========================================================================
-  # 3a-iii. Reset found — w3
-  # ===========================================================================
   - id: resolve_clap_reset_w3
     type: message
     prompt:
       text: |
-        We checked your activity data for the week **{{ ctx.collected.w3_label }}**.
+        We checked your activity data for the week **{{ ctx.collected.w3_label }}** .
 
         During that week, you spent **{{ ctx.collected.w3_mins | round(1) }} minutes** on the platform.
 
         The weekly clap is maintained only when you spend **at least 60 minutes per week** on iGOT Karmayogi. Since the time spent in that week was below the 60-minute threshold, the **weekly clap count was reset to zero**.
 
-        ℹ️ Your weekly clap restarts from the next week in which you meet the 60-minute requirement.
+        ℹ️ Your weekly clap will start building again from the next week in which you spend 60 or more minutes on the platform.
     quick_replies:
       - { id: agree,    label: "✅ I understand" }
       - { id: disagree, label: "❌ I disagree — I spent more time" }
@@ -238,22 +299,171 @@ nodes:
       agree:    satisfied
       disagree: disagree_auto_ticket
 
-  # ===========================================================================
-  # 3a-iv. Reset found — w4 (oldest available week)
-  # ===========================================================================
   - id: resolve_clap_reset_w4
     type: message
     prompt:
       text: |
-        We checked your activity data for the week **{{ ctx.collected.w4_label }}** (oldest available).
+        We checked your activity data for the week **{{ ctx.collected.w4_label }}** .
 
         During that week, you spent **{{ ctx.collected.w4_mins | round(1) }} minutes** on the platform.
 
         The weekly clap is maintained only when you spend **at least 60 minutes per week** on iGOT Karmayogi. Since the time spent in that week was below the 60-minute threshold, the **weekly clap count was reset to zero**.
 
-        ℹ️ Your weekly clap restarts from the next week in which you meet the 60-minute requirement.
+        ℹ️ Your weekly clap will start building again from the next week in which you spend 60 or more minutes on the platform.
+    quick_replies:
+      - { id: agree,    label: "✅ I understand" }
+      - { id: disagree, label: "❌ I disagree — I spent more time" }
+    disable_input: true
+    on_reply:
+      agree:    satisfied
+      disagree: disagree_auto_ticket
 
-        > ⚠️ **Note:** The Insights API provides data for only the last 4 weeks. If the clap streak exceeded 4 weeks, the exact reset point may be beyond the available history.
+  - id: resolve_clap_reset_w5
+    type: message
+    prompt:
+      text: |
+        We checked your activity data for the week **{{ ctx.collected.w5_label }}** .
+
+        During that week, you spent **{{ ctx.collected.w5_mins | round(1) }} minutes** on the platform.
+
+        The weekly clap is maintained only when you spend **at least 60 minutes per week** on iGOT Karmayogi. Since the time spent in that week was below the 60-minute threshold, the **weekly clap count was reset to zero**.
+
+        ℹ️ Your weekly clap will start building again from the next week in which you spend 60 or more minutes on the platform.
+    quick_replies:
+      - { id: agree,    label: "✅ I understand" }
+      - { id: disagree, label: "❌ I disagree — I spent more time" }
+    disable_input: true
+    on_reply:
+      agree:    satisfied
+      disagree: disagree_auto_ticket
+
+  - id: resolve_clap_reset_w6
+    type: message
+    prompt:
+      text: |
+        We checked your activity data for the week **{{ ctx.collected.w6_label }}** .
+
+        During that week, you spent **{{ ctx.collected.w6_mins | round(1) }} minutes** on the platform.
+
+        The weekly clap is maintained only when you spend **at least 60 minutes per week** on iGOT Karmayogi. Since the time spent in that week was below the 60-minute threshold, the **weekly clap count was reset to zero**.
+
+        ℹ️ Your weekly clap will start building again from the next week in which you spend 60 or more minutes on the platform.
+    quick_replies:
+      - { id: agree,    label: "✅ I understand" }
+      - { id: disagree, label: "❌ I disagree — I spent more time" }
+    disable_input: true
+    on_reply:
+      agree:    satisfied
+      disagree: disagree_auto_ticket
+
+  - id: resolve_clap_reset_w7
+    type: message
+    prompt:
+      text: |
+        We checked your activity data for the week **{{ ctx.collected.w7_label }}** .
+
+        During that week, you spent **{{ ctx.collected.w7_mins | round(1) }} minutes** on the platform.
+
+        The weekly clap is maintained only when you spend **at least 60 minutes per week** on iGOT Karmayogi. Since the time spent in that week was below the 60-minute threshold, the **weekly clap count was reset to zero**.
+
+        ℹ️ Your weekly clap will start building again from the next week in which you spend 60 or more minutes on the platform.
+    quick_replies:
+      - { id: agree,    label: "✅ I understand" }
+      - { id: disagree, label: "❌ I disagree — I spent more time" }
+    disable_input: true
+    on_reply:
+      agree:    satisfied
+      disagree: disagree_auto_ticket
+
+  - id: resolve_clap_reset_w8
+    type: message
+    prompt:
+      text: |
+        We checked your activity data for the week **{{ ctx.collected.w8_label }}** .
+
+        During that week, you spent **{{ ctx.collected.w8_mins | round(1) }} minutes** on the platform.
+
+        The weekly clap is maintained only when you spend **at least 60 minutes per week** on iGOT Karmayogi. Since the time spent in that week was below the 60-minute threshold, the **weekly clap count was reset to zero**.
+
+        ℹ️ Your weekly clap will start building again from the next week in which you spend 60 or more minutes on the platform.
+    quick_replies:
+      - { id: agree,    label: "✅ I understand" }
+      - { id: disagree, label: "❌ I disagree — I spent more time" }
+    disable_input: true
+    on_reply:
+      agree:    satisfied
+      disagree: disagree_auto_ticket
+
+  - id: resolve_clap_reset_w9
+    type: message
+    prompt:
+      text: |
+        We checked your activity data for the week **{{ ctx.collected.w9_label }}** .
+
+        During that week, you spent **{{ ctx.collected.w9_mins | round(1) }} minutes** on the platform.
+
+        The weekly clap is maintained only when you spend **at least 60 minutes per week** on iGOT Karmayogi. Since the time spent in that week was below the 60-minute threshold, the **weekly clap count was reset to zero**.
+
+        ℹ️ Your weekly clap will start building again from the next week in which you spend 60 or more minutes on the platform.
+    quick_replies:
+      - { id: agree,    label: "✅ I understand" }
+      - { id: disagree, label: "❌ I disagree — I spent more time" }
+    disable_input: true
+    on_reply:
+      agree:    satisfied
+      disagree: disagree_auto_ticket
+
+  - id: resolve_clap_reset_w10
+    type: message
+    prompt:
+      text: |
+        We checked your activity data for the week **{{ ctx.collected.w10_label }}** .
+
+        During that week, you spent **{{ ctx.collected.w10_mins | round(1) }} minutes** on the platform.
+
+        The weekly clap is maintained only when you spend **at least 60 minutes per week** on iGOT Karmayogi. Since the time spent in that week was below the 60-minute threshold, the **weekly clap count was reset to zero**.
+
+        ℹ️ Your weekly clap will start building again from the next week in which you spend 60 or more minutes on the platform.
+    quick_replies:
+      - { id: agree,    label: "✅ I understand" }
+      - { id: disagree, label: "❌ I disagree — I spent more time" }
+    disable_input: true
+    on_reply:
+      agree:    satisfied
+      disagree: disagree_auto_ticket
+
+  - id: resolve_clap_reset_w11
+    type: message
+    prompt:
+      text: |
+        We checked your activity data for the week **{{ ctx.collected.w11_label }}** .
+
+        During that week, you spent **{{ ctx.collected.w11_mins | round(1) }} minutes** on the platform.
+
+        The weekly clap is maintained only when you spend **at least 60 minutes per week** on iGOT Karmayogi. Since the time spent in that week was below the 60-minute threshold, the **weekly clap count was reset to zero**.
+
+        ℹ️ Your weekly clap will start building again from the next week in which you spend 60 or more minutes on the platform.
+    quick_replies:
+      - { id: agree,    label: "✅ I understand" }
+      - { id: disagree, label: "❌ I disagree — I spent more time" }
+    disable_input: true
+    on_reply:
+      agree:    satisfied
+      disagree: disagree_auto_ticket
+
+  - id: resolve_clap_reset_w12
+    type: message
+    prompt:
+      text: |
+        We checked your activity data for the week **{{ ctx.collected.w12_label }}** (oldest available).
+
+        During that week, you spent **{{ ctx.collected.w12_mins | round(1) }} minutes** on the platform.
+
+        The weekly clap is maintained only when you spend **at least 60 minutes per week** on iGOT Karmayogi. Since the time spent in that week was below the 60-minute threshold, the **weekly clap count was reset to zero**.
+
+        ℹ️ Your weekly clap will start building again from the next week in which you spend 60 or more minutes on the platform.
+
+        > ⚠️ **Note:** The Insights API provides data for only the last 12 weeks. If the clap streak exceeded 12 weeks, the exact reset point may be beyond the available history.
     quick_replies:
       - { id: agree,    label: "✅ I understand" }
       - { id: disagree, label: "❌ I disagree — I spent more time" }
@@ -263,20 +473,28 @@ nodes:
       disagree: disagree_auto_ticket
 
   # ===========================================================================
-  # 3b. All 4 weeks ≥ 60 min — discrepancy detected → raise ticket
+  # 3b. All 12 weeks ≥ 60 min — discrepancy detected → raise ticket
   # ===========================================================================
   - id: resolution_discrepancy
     type: message
     prompt:
       text: |
-        We reviewed your weekly activity data for the last 4 weeks and found that you met the **60-minute threshold** in all available weeks:
+        We reviewed your weekly activity data for the last 12 weeks and found that you met the **60-minute threshold** in all available weeks:
 
         | Week | Time Spent |
         |------|-----------|
-        | {{ ctx.collected.w1_label }} (most recent) | {{ ctx.collected.w1_mins | default(0) | round(1) }} min |
+        | {{ ctx.collected.w1_label }} | {{ ctx.collected.w1_mins | default(0) | round(1) }} min |
         | {{ ctx.collected.w2_label }} | {{ ctx.collected.w2_mins | default(0) | round(1) }} min |
         | {{ ctx.collected.w3_label }} | {{ ctx.collected.w3_mins | default(0) | round(1) }} min |
-        | {{ ctx.collected.w4_label }} (oldest) | {{ ctx.collected.w4_mins | default(0) | round(1) }} min |
+        | {{ ctx.collected.w4_label }} | {{ ctx.collected.w4_mins | default(0) | round(1) }} min |
+        | {{ ctx.collected.w5_label }} | {{ ctx.collected.w5_mins | default(0) | round(1) }} min |
+        | {{ ctx.collected.w6_label }} | {{ ctx.collected.w6_mins | default(0) | round(1) }} min |
+        | {{ ctx.collected.w7_label }} | {{ ctx.collected.w7_mins | default(0) | round(1) }} min |
+        | {{ ctx.collected.w8_label }} | {{ ctx.collected.w8_mins | default(0) | round(1) }} min |
+        | {{ ctx.collected.w9_label }} | {{ ctx.collected.w9_mins | default(0) | round(1) }} min |
+        | {{ ctx.collected.w10_label }} | {{ ctx.collected.w10_mins | default(0) | round(1) }} min |
+        | {{ ctx.collected.w11_label }} | {{ ctx.collected.w11_mins | default(0) | round(1) }} min |
+        | {{ ctx.collected.w12_label }} | {{ ctx.collected.w12_mins | default(0) | round(1) }} min |
 
         Since your time spent meets the requirement across all tracked weeks, this appears to be a **discrepancy** that requires investigation by our technical team.
 
@@ -297,12 +515,12 @@ nodes:
         The user disputes the weekly clap reset explanation provided by the bot.
         Generate a Zoho support ticket for further investigation.
         Subject: "Weekly Clap Issue — User Disputes Reset Explanation"
-        Description: include total_claps, all 4 weeks of activity data
-        (w1_label through w4_label with corresponding wX_mins values in minutes), user email,
+        Description: include total_claps, all 12 weeks of activity data
+        (w1_label through w12_label with corresponding wX_mins values in minutes), user email,
         and a note that the user believes they spent more time than the system recorded.
       priority_override: P3
     on_complete: confirm_ticket
-    on_restart: fetch_insights_data
+    on_restart: fetch_user_profile
 
   # ===========================================================================
   # Ticket path — Discrepancy (all weeks ≥ 60 min but clap not credited) (SOP 1.3.1)
@@ -316,18 +534,18 @@ nodes:
     llm_directives:
       objective: |
         The user's weekly clap was not credited despite meeting the 60-minute threshold
-        in all 4 available weeks of Insights API data.
+        in all 12 available weeks of Insights API data.
         Generate a Zoho support ticket for the technical team to investigate.
         Subject: "Weekly Clap Discrepancy — Threshold Met But Clap Not Credited"
-        Description: include total_claps, all 4 weeks of activity data
-        (w1_label through w4_label with wX_mins values in minutes), user email,
+        Description: include total_claps, all 12 weeks of activity data
+        (w1_label through w12_label with wX_mins values in minutes), user email,
         and the finding that all available weeks show ≥ 60 minutes yet the
         weekly clap count was not updated correctly.
-        Engineering note: clarification required if the streak exceeds 4 weeks —
-        historical data beyond 4 weeks is unavailable from the Insights API.
+        Engineering note: clarification required if the streak exceeds 12 weeks —
+        historical data beyond 12 weeks is unavailable from the Insights API.
       priority_override: P3
     on_complete: confirm_ticket
-    on_restart: fetch_insights_data
+    on_restart: fetch_user_profile
 
   # ===========================================================================
   # Insights API — 404 Not Found (no activity data available for this user)
@@ -344,15 +562,7 @@ nodes:
 
         The weekly clap is awarded only after completing **at least 60 minutes of learning per week**.
         Once you start learning, your activity will appear here.
-
-        If you believe you have been active and this is incorrect, I can raise a support ticket for investigation.
-    quick_replies:
-      - { id: raise, label: "📋 Raise a support ticket" }
-      - { id: skip,  label: "✅ Got it, I'll start learning" }
-    disable_input: true
-    on_reply:
-      raise: disagree_auto_ticket
-      skip:  satisfied
+    next: satisfied
 
   # ===========================================================================
   # Insights API error fallback (timeout / server error)
@@ -362,18 +572,4 @@ nodes:
     prompt:
       text: |
         I'm unable to retrieve your activity data right now. Please try again in a few minutes.
-
-        If the issue persists, I can raise a support ticket for you.
-    quick_replies:
-      - { id: raise, label: "📋 Raise a ticket" }
-      - { id: skip,  label: "❌ I'll try later" }
-    disable_input: true
-    on_reply:
-      raise: disagree_auto_ticket
-      skip:  satisfied
-
-  # ===========================================================================
-  # confirm_ticket, ticket_confirmation, ticket_failed, ticket_raised_end,
-  # ticket_failed_end  — injected from _shared/_zoho_ticket.yaml
-  # satisfied, ticket_raised_end — injected from _shared/_terminal.yaml
-  # ===========================================================================
+    next: satisfied
