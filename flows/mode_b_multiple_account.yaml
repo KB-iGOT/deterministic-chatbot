@@ -44,7 +44,7 @@
 
 flow_id: MULTIPLE_ACCOUNT
 flow_type: deterministic_with_llm_fallback
-version: 2
+version: 2❌ Invalid format. Please enter exactly 10 digits starting with 6-9. No letters, emails, or special characters allowed.
 
 metadata:
   category:         account
@@ -134,8 +134,40 @@ nodes:
       type: text
       validation:
         pattern:   "^[6-9][0-9]{9}$"
-        error_msg: "Please enter a valid 10-digit Indian mobile number (without country code)."
-    next: check_registration
+        error_msg: "❌ Invalid format. Please enter exactly 10 digits starting with 6-9. No letters, emails, or special characters allowed."
+    next: validate_mobile_format
+
+  # Explicit mobile format validation (ensures no emails slip through)
+  - id: validate_mobile_format
+    type: branch
+    rules:
+      # Reject if contains @ (email detected)
+      - { if: "'@' in ctx.collected.new_identifier",
+          then: reject_invalid_mobile }
+      # Reject if not exactly 10 digits
+      - { if: "len(ctx.collected.new_identifier) != 10",
+          then: reject_invalid_mobile }
+      # Reject if doesn't start with 6-9
+      - { if: "ctx.collected.new_identifier[0] not in ['6','7','8','9']",
+          then: reject_invalid_mobile }
+      # Reject if contains non-digit characters
+      - { if: "not ctx.collected.new_identifier.isdigit()",
+          then: reject_invalid_mobile }
+    default: check_registration
+
+  - id: reject_invalid_mobile
+    type: message
+    prompt:
+      text: |
+        ❌ That doesn't look like a valid **Mobile Number**
+
+        This doesn't look like a valid Indian mobile number. Please ensure:
+        - Exactly 10 digits
+        - Starts with 6, 7, 8, or 9
+        - No letters, emails, spaces, or special characters
+
+        Please try again.
+    next: collect_new_mobile
 
   # ===========================================================================
   # STEP 2 — Email domain validation (email path only)
@@ -331,12 +363,10 @@ nodes:
     quick_replies:
       - { id: done,    label: "✅ Updated successfully" }
       - { id: no_otp,  label: "❌ Did not receive OTP" }
-      - { id: error,   label: "⚠️ Still getting an error" }
     disable_input: true
     on_reply:
       done:   self_served_end
       no_otp: otp_not_received_fetch_profile
-      error:  guide_self_service_update
 
   # ---------------------------------------------------------------------------
   # 3.1.1 — User did not receive the OTP
@@ -558,8 +588,8 @@ nodes:
 
         Kindly review the below details and confirm whether they are correct:
 
-        📧 **Current {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }}:** {{ (ctx.collected.current_email or "(your registered identifier)") if ctx.collected.update_type == 'EMAIL' else (ctx.collected.current_phone or "(your registered identifier)") }}
-        📧 **{{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} to be Updated:** {{ ctx.collected.new_identifier }}
+        {{ '📧' if ctx.collected.update_type == 'EMAIL' else '📱' }} **Current {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }}:** {{ (ctx.collected.current_email or "(your registered identifier)") if ctx.collected.update_type == 'EMAIL' else (ctx.collected.current_phone or "(your registered identifier)") }}
+        {{ '📧' if ctx.collected.update_type == 'EMAIL' else '📱' }} **{{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} to be Updated:** {{ ctx.collected.new_identifier }}
 
         Please confirm whether you would like us to proceed with this change.
     quick_replies:
@@ -598,7 +628,7 @@ nodes:
         Subject: "Multiple Account Conflict — {{ ctx.collected.update_type }} Update Request"
         Description: Include:
           - User ID (ctx.user_id_hash)
-          - Current identifier (ctx.collected.current_identifier if available)
+          - Current identifier: {{ ctx.collected.current_email if ctx.collected.update_type == 'EMAIL' else ctx.collected.current_phone }}
           - New identifier to be updated (ctx.collected.new_identifier)
           - Conflict account organisation (ctx.collected.conflict_org_name)
           - Conflict account enrollment stats: in_progress={{ ctx.collected.conflict_inprogress }}, completed={{ ctx.collected.conflict_completed }}, total={{ (ctx.collected.conflict_inprogress or 0) + (ctx.collected.conflict_completed or 0) }}
