@@ -791,33 +791,29 @@ nodes:
   # ═══════════════════════════════════════════════════════════════════════════
   # §8  SERVICE NOT FOUND
   #
-  # Case 1 — Service exists in master list → show update steps
-  # Case 2 — Service not found → collect cadre authority → raise ticket
-  #
   # Flow:
-  #   service_fetch_cadre_config
-  #     → service_picker (dynamic picker from flattened cadreConfig list)
-  #       → service_found_confirm → service_update_steps          (Case 1)
-  #       → service_ask_name_text → service_cadre_collect         (Case 2)
-  #     → service_ask_name_text (fallback when API fails)
+  #   service_fetch_cadre_config (user JWT forwarded via headers)
+  #     → service_picker → service_found_confirm → service_update_steps  (found)
+  #     → service_nudge_search → service_not_found_collect               (not found)
+  #     → service_not_found_collect (on_error fallback)
   # ═══════════════════════════════════════════════════════════════════════════
 
-  # Step 1 — Fetch + flatten cadreConfig into collected._service_list
   - id: service_fetch_cadre_config
     type: api_call
     integration: karmayogi
     request:
       method: GET
       url: "/api/data/v2/system/settings/get/cadreConfig"
+      headers:
+        x-authenticated-user-token: "{{ ctx.collected._user_token }}"
     response_mapping:
       - from: "$.response.value"
         to: collected._service_list
         transform: flatten_cadre_services
     on_success: service_picker
     on_error:
-      any: service_ask_name_text
+      any: service_not_found_collect
 
-  # Step 2 — Show picker from pre-fetched context list
   - id: service_picker
     type: collect
     prompt:
@@ -836,7 +832,6 @@ nodes:
     on_empty: service_not_found_collect
     next: service_found_confirm
 
-  # Case 1 — Service found in picker → confirm and show update steps
   - id: service_found_confirm
     type: message
     prompt:
@@ -928,30 +923,6 @@ nodes:
         - { id: yes, label: "✅ Yes, updated" }
     on_reply:
       yes: satisfied
-
-  # Case 2 — Service not in list → collect details and raise ticket
-  - id: service_ask_name_text
-    type: collect
-    prompt:
-      text: |
-        Please share the **exact service name in full form** — avoid abbreviations.
-
-        *Example: Indian Administrative Service (not IAS)*
-      placeholder: "Type the full service name..."
-    field:
-      name: collected.service_requested
-      type: text
-    next: service_cadre_collect
-
-  - id: service_cadre_collect
-    type: collect
-    prompt:
-      text: "Please share the **Cadre Controlling Authority** for this service (the ministry or department that controls your cadre)."
-      placeholder: "e.g. Ministry of Finance, UPSC, State Government..."
-    field:
-      name: collected.service_cadre_authority
-      type: text
-    next: confirm_service_ticket
 
   - id: confirm_service_ticket
     type: message

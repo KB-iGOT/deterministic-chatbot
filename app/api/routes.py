@@ -406,8 +406,10 @@ async def submit_turn(
         )
         state_dict = state.model_dump(mode="json")
         state_dict["flow_id"] = flow_id
-        # Seed user_id from JWT so ticket templates can reference it
+        # Seed user_id and raw JWT so ticket templates and privileged API calls can reference them
+        raw_token = request.headers.get(settings.auth_header_name, "")
         state_dict.setdefault("collected", {})["user_id"] = user_id
+        state_dict["collected"]["_user_token"] = raw_token
 
         # Pre-fetch user profile (email/name/mobile) once at flow start so every
         # flow has it available without per-flow profile fetch nodes.
