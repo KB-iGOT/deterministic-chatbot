@@ -40,7 +40,6 @@ STEP 4   → GET  /api/content/v1/read/{resource_id}     (YouTube resources only
 ```bash
 curl -X POST \
   "https://portal.uat.karmayogibharat.net/api/course/private/v4/user/enrollment/list/{user_id}" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {
@@ -171,8 +170,7 @@ curl -X POST \
 
 ```bash
 curl -X GET \
-  "https://portal.uat.karmayogibharat.net/api/content/v1/read/{resource_id}" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}"
+  "https://portal.uat.karmayogibharat.net/api/content/v1/read/{resource_id}"
 ```
 
 ### Response Fields Used

@@ -59,8 +59,7 @@ STEP 4   → POST /api/course/private/v4/user/enrollment/list/{conflict_user_id}
 
 ```bash
 curl -X GET \
-  "https://portal.uat.karmayogibharat.net/api/user/v1/email/approvedDomains" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}"
+  "https://portal.uat.karmayogibharat.net/api/user/v1/email/approvedDomains"
 ```
 
 ### Response Fields Used
@@ -89,8 +88,7 @@ curl -X GET \
 
 ```bash
 curl -X GET \
-  "https://portal.uat.karmayogibharat.net/api/user/private/v1/read/{user_id}" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}"
+  "https://portal.uat.karmayogibharat.net/api/user/private/v1/read/{user_id}"
 ```
 
 ### Response Fields Used
@@ -111,7 +109,6 @@ curl -X GET \
 ```bash
 curl -X POST \
   "https://portal.uat.karmayogibharat.net/api/private/user/v1/search" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {
@@ -151,7 +148,6 @@ curl -X POST \
 ```bash
 curl -X POST \
   "https://portal.uat.karmayogibharat.net/api/private/user/v1/search" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {
@@ -167,7 +163,6 @@ curl -X POST \
 ```bash
 curl -X POST \
   "https://portal.uat.karmayogibharat.net/api/private/user/v1/search" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {
@@ -243,7 +238,6 @@ Same MDO Leader search as Step 2a — filters by `channel` and `MDO_LEADER` role
 ```bash
 curl -X POST \
   "https://portal.uat.karmayogibharat.net/api/course/private/v4/user/enrollment/list/{conflict_user_id}" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {
@@ -279,8 +273,7 @@ curl -X POST \
 
 ```bash
 curl -X GET \
-  "https://portal.uat.karmayogibharat.net/api/user/private/v1/read/{user_id}" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}"
+  "https://portal.uat.karmayogibharat.net/api/user/private/v1/read/{user_id}"
 ```
 
 ### Response Fields Used
@@ -301,7 +294,6 @@ curl -X GET \
 ```bash
 curl -X POST \
   "https://portal.uat.karmayogibharat.net/api/course/private/v4/user/enrollment/list/{user_id}" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {

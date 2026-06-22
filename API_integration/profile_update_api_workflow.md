@@ -55,8 +55,7 @@ Path C (Incorrect Casing — All Caps / All Lowercase):
 
 ```bash
 curl -X GET \
-  "https://portal.uat.karmayogibharat.net/api/user/private/v1/read/{user_id}" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}"
+  "https://portal.uat.karmayogibharat.net/api/user/private/v1/read/{user_id}"
 ```
 
 #### Response Fields Used
@@ -81,7 +80,6 @@ curl -X GET \
 ```bash
 curl -X PATCH \
   "https://portal.uat.karmayogibharat.net/api/user/private/v1/update" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {
@@ -166,8 +164,7 @@ STEP 1 → GET /user/private/v1/read/{user_id}
 
 ```bash
 curl -X GET \
-  "https://portal.uat.karmayogibharat.net/api/user/private/v1/read/{user_id}" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}"
+  "https://portal.uat.karmayogibharat.net/api/user/private/v1/read/{user_id}"
 ```
 
 #### Response Fields Used
@@ -211,8 +208,7 @@ STEP 2 → POST /user/v1/search
 
 ```bash
 curl -X GET \
-  "https://portal.uat.karmayogibharat.net/api/user/private/v1/read/{user_id}" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}"
+  "https://portal.uat.karmayogibharat.net/api/user/private/v1/read/{user_id}"
 ```
 
 #### Response Fields Used
@@ -229,7 +225,6 @@ curl -X GET \
 ```bash
 curl -X POST \
   "https://portal.uat.karmayogibharat.net/api/user/v1/search" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {
@@ -273,8 +268,7 @@ STEP 1 → GET /masterData/v1/languages
 
 ```bash
 curl -X GET \
-  "https://portal.uat.karmayogibharat.net/api/masterData/v1/languages" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}"
+  "https://portal.uat.karmayogibharat.net/api/masterData/v1/languages"
 ```
 
 #### Response Fields Used
@@ -328,7 +322,6 @@ STEP 2 → GET /user/private/v1/read/{user_id}      (via get_mdo_contact_details
 ```bash
 curl -X POST \
   "https://portal.uat.karmayogibharat.net/api/private/user/v1/search" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {
@@ -376,7 +369,6 @@ STEP 1 → GET /data/v2/system/settings/get/cadreConfig
 ```bash
 curl -X GET \
   "https://portal.uat.karmayogibharat.net/api/data/v2/system/settings/get/cadreConfig" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "x-authenticated-user-token: {{SYSTEM_ADMIN_TOKEN}}"
 ```
 
@@ -443,7 +435,6 @@ CASE 2 — User Wants to Add Previous Employment History:
 ```bash
 curl -X POST \
   "https://portal.uat.karmayogibharat.net/api/private/user/v1/search" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {
@@ -535,8 +526,7 @@ Matching priority: exact match → partial match (term contained in designation 
 
 ```bash
 curl -X GET \
-  "https://portal.uat.karmayogibharat.net/api/user/private/v1/read/{user_id}" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}"
+  "https://portal.uat.karmayogibharat.net/api/user/private/v1/read/{user_id}"
 ```
 
 | Field path | Purpose |
@@ -548,8 +538,7 @@ curl -X GET \
 
 ```bash
 curl -X GET \
-  "https://portal.uat.karmayogibharat.net/api/framework/v1/read/{rootOrgId}_odcs" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}"
+  "https://portal.uat.karmayogibharat.net/api/framework/v1/read/{rootOrgId}_odcs"
 ```
 
 #### Response Fields Used
@@ -607,7 +596,6 @@ Used by: UC-08, UC-13, UC-14, UC-16 (fallback), UC-17 (ticket path), UC-18 (cond
 
 ```
 GET /api/user/private/v1/read/{user_id}
-Authorization: Bearer {{KARMAYOGI_API_KEY}}
 ```
 
 ### Private User Search
@@ -616,7 +604,6 @@ Used by: UC-16, UC-18 (org/designation fetch)
 
 ```
 POST /api/private/user/v1/search
-Authorization: Bearer {{KARMAYOGI_API_KEY}}
 Body: { "request": { "filters": { "userId": "{user_id}" }, "limit": 1 } }
 ```
 
@@ -626,7 +613,6 @@ Used by: UC-14, UC-16 (conditional), UC-18 (conditional), UC-19 (conditional)
 
 ```
 POST /api/user/v1/search
-Authorization: Bearer {{KARMAYOGI_API_KEY}}
 Body: { "request": { "filters": { "rootOrgId": "{rootOrgId}", "roles": ["MDO_ADMIN"] } } }
 ```
 

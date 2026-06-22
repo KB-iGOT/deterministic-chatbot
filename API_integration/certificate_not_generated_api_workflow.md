@@ -7,58 +7,28 @@
 ## Execution Flow
 
 ```
-[optional] POST /api/course/private/v4/user/enrollment/list/{user_id}
-                ↓ Only if user cannot supply the course name — show numbered list
-
-STEP 1   → POST /api/course/private/v4/user/enrollment/list/{user_id}
-                ↓ Match course by name → extract status, completedOn, issuedCertificates
+STEP 1   → POST /api/course/private/v4/user/enrollment/list/{user_id} (via picker)
+                ↓ User selects course → extract status, completedOn, langContentStatus
                 ↓
-           course NOT matched              → show enrolled-course list; ask user to pick again
-           enrollment_status_raw = 1       → course in-progress; show incomplete resources (→ STEP 2)
-           enrollment_status_raw = 2       → course completed → check hours_since_completion
+           enrollment_status = 0 (not started) → inform user, stop
+           enrollment_status = 2 (completed)   → check hours_since_completion
                 ↓
-           certificate_issued = true               → certificate available
-           certificate_issued = false
-             AND hours_since_completion > 24  → certificate should be available via UI
-             AND hours_since_completion ≤ 24  → certificate not yet generated (< 24 h)
-
+              hours_since_completion > 24  → certificate should be available via UI, stop
+              hours_since_completion ≤ 24  → certificate not yet generated (< 24 h), stop
+           
+           enrollment_status = 1 (in-progress) → proceed to STEP 2
+                ↓
 STEP 2   → POST /api/content/v1/search           (only when course is in-progress)
-                ↓ Fetch name, mimeType, duration for each incomplete resource
+                ↓ Fetch name, mimeType for each incomplete resource ID
                 ↓ Determine: has_scorm_resources = any(mimeType == "application/vnd.ekstep.html-archive")
+                ↓ Provide SCORM or Standard progress guidance
 ```
 
 ---
 
-## Optional Step — Enrolled-Course List
+## Step 1 — Course Selection and Status Check
 
-> Called only when the user cannot supply a course name. Shows a numbered list the user can pick from.
-
-**Endpoint:** `POST /api/course/private/v4/user/enrollment/list/{user_id}`
-
-```bash
-curl -X POST \
-  "https://portal.uat.karmayogibharat.net/api/course/private/v4/user/enrollment/list/{user_id}" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "request": {
-      "retiredCoursesEnabled": true,
-      "status": ["In-Progress", "Completed"]
-    }
-  }'
-```
-
-### Response Fields Used
-
-| Field | Used For |
-|---|---|
-| `result.courses[].courseName` | Course name — used to build a numbered list for course selection |
-
----
-
-## Step 1 — Certificate Status Check
-
-> Called via the `check_certificate_status` tool. Determines whether the course is completed and whether a certificate has been issued.
+> Executed via an enrollment picker fragment. Allows the user to select the course and extracts its enrollment status and completion details.
 
 **Endpoint:** `POST /api/course/private/v4/user/enrollment/list/{user_id}`
 
@@ -67,7 +37,6 @@ Same request payload as the Optional Step above.
 ```bash
 curl -X POST \
   "https://portal.uat.karmayogibharat.net/api/course/private/v4/user/enrollment/list/{user_id}" \
-  -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {
@@ -96,23 +65,18 @@ curl -X POST \
 | `result.courses[].batchId` | `batch_id` | Batch reference |
 | `result.courses[].langContentStatus` | `lang_content_status` | Per-resource completion map (used by Step 2) |
 
-### `hours_since_completion` Computation (inside tool, no extra API call)
+### `hours_since_completion` Computation
 
-```
-completed_dt = datetime.fromisoformat(completedOn)   # Unix ms → ISO → datetime
-hours_since_completion = (now_utc - completed_dt).total_seconds() / 3600
-```
+If `completedOn` is present, it is checked to see if 24 hours have elapsed. If `completedOn` is null, it is treated as `> 24` hours for UX purposes.
 
 ### Decision After Step 1
 
 | Condition | Outcome |
 |---|---|
-| Course not found (`matched = false`) | Return `partial_matches` + `all_enrolled_courses` for re-selection |
-| `enrollment_status_raw = 1` (in progress) | `certificate_issued = false`; proceed to Step 2 to identify incomplete resources |
-| `enrollment_status_raw = 2` AND `completed_on` is null | `hours_since_completion = null`; treat as within window |
-| `certificate_issued = true` | Certificate present in `issued_certificates[]` |
-| `certificate_issued = false` AND `hours_since_completion > 24` | Course completed > 24 h ago but no certificate record |
-| `certificate_issued = false` AND `hours_since_completion ≤ 24` | Course completed < 24 h ago; certificate not yet generated |
+| `enrollment_status = 2` AND `hours_since_completion > 24` | Inform user certificate is available, provide steps to download. |
+| `enrollment_status = 2` AND `hours_since_completion <= 24` | Inform user to wait 24 hours for generation. |
+| `enrollment_status = 1` (in progress) | Proceed to Step 2 to identify incomplete resources. |
+| `enrollment_status = 0` (not started) | Guide user to start the course. |
 
 ---
 
@@ -174,6 +138,5 @@ for lang_key, status_map in langContentStatus.items():
 
 | Step | Endpoint | Method | Purpose | Key Fields |
 |---|---|---|---|---|
-| Optional | `/api/course/private/v4/user/enrollment/list/{user_id}` | POST | Show course list when user cannot name a course | `courseName` |
-| 1 | `/api/course/private/v4/user/enrollment/list/{user_id}` | POST | Course status, completedOn, issuedCertificates, hours_since_completion | `status`, `completedOn`, `issuedCertificates`, `langContentStatus` |
-| 2 (in-progress only) | `/api/content/v1/search` | POST | Fetch incomplete resource details; detect SCORM vs non-SCORM | `mimeType`, `name`, `duration` |
+| 1 | `/api/course/private/v4/user/enrollment/list/{user_id}` | POST | Course status, completedOn, hours_since_completion via picker | `status`, `completedOn`, `langContentStatus` |
+| 2 (in-progress only) | `/api/content/v1/search` | POST | Fetch incomplete resource details; detect SCORM vs non-SCORM | `mimeType`, `name` |
