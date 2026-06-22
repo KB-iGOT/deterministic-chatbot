@@ -266,6 +266,7 @@ async def submit_turn(
             # (switchToFlow sends the flow_id without a category prefix).
             _direct_graphs: dict = getattr(request.app.state, "graphs", {})
             if choice_id in _direct_graphs and compiler is not None and compiler.is_flow_enabled(choice_id):
+                # Advance state and fall through to the selecting_topic block below.
                 session["status"] = "selecting_topic"
             else:
                 # Invalid selection → re-offer categories
@@ -290,53 +291,53 @@ async def submit_turn(
                     flow_id=None,
                     current_node=None,
                 )
-
-        # Valid category — show its flows and advance state
-        log.info(
-            "[activity] event=category_selected  session=%s  user=%s  category=%r",
-            sid, session["user_id_hash"], category,
-        )
-        session["selected_category"] = category
-        session["status"] = "selecting_topic"
-
-        _lf_tid_cat: str | None = None
-        _lf_oid_cat: str | None = None
-        with tracing.turn_trace(
-            user_id=user_id,
-            session_id=sid,
-            trace_name=f"category-selected",
-            tags=[session["channel"], session["language"]],
-            trace_id=session.get("_lf_trace_id"),
-            parent_observation_id=session.get("_lf_obs_id"),
-            category=category,
-            channel=session["channel"],
-        ):
-            _lf_tid_cat, _lf_oid_cat = tracing.get_current_span_ids()
-            tracing.set_span_io(
-                input={"user": f"Selected category: {category}"},
-                output={"bot": "Sub-flow menu shown", "flow_options": [qr.label for qr in sub_flows]},
+        else:
+            # Valid category — show its flows and advance state
+            log.info(
+                "[activity] event=category_selected  session=%s  user=%s  category=%r",
+                sid, session["user_id_hash"], category,
             )
+            session["selected_category"] = category
+            session["status"] = "selecting_topic"
 
-        if _lf_tid_cat:
-            session["_lf_trace_id"] = _lf_tid_cat
-        if _lf_oid_cat:
-            session["_lf_obs_id"] = _lf_oid_cat
+            _lf_tid_cat: str | None = None
+            _lf_oid_cat: str | None = None
+            with tracing.turn_trace(
+                user_id=user_id,
+                session_id=sid,
+                trace_name=f"category-selected",
+                tags=[session["channel"], session["language"]],
+                trace_id=session.get("_lf_trace_id"),
+                parent_observation_id=session.get("_lf_obs_id"),
+                category=category,
+                channel=session["channel"],
+            ):
+                _lf_tid_cat, _lf_oid_cat = tracing.get_current_span_ids()
+                tracing.set_span_io(
+                    input={"user": f"Selected category: {category}"},
+                    output={"bot": "Sub-flow menu shown", "flow_options": [qr.label for qr in sub_flows]},
+                )
 
-        activities = [
-            Activity.markdown(
-                _sys(request, "select_issue",
-                     "Please choose the specific issue you're facing:")
-            ).model_dump(exclude_none=True),
-            Activity.quick_replies(choices=sub_flows).model_dump(exclude_none=True),
-        ]
-        activities = await _translate_activities(activities, lang, translation_svc)
-        return TurnResponse(
-            session_id=session_id,
-            activities=activities,
-            status=FlowStatus.AWAITING_USER.value,
-            flow_id=None,
-            current_node=None,
-        )
+            if _lf_tid_cat:
+                session["_lf_trace_id"] = _lf_tid_cat
+            if _lf_oid_cat:
+                session["_lf_obs_id"] = _lf_oid_cat
+
+            activities = [
+                Activity.markdown(
+                    _sys(request, "select_issue",
+                         "Please choose the specific issue you're facing:")
+                ).model_dump(exclude_none=True),
+                Activity.quick_replies(choices=sub_flows).model_dump(exclude_none=True),
+            ]
+            activities = await _translate_activities(activities, lang, translation_svc)
+            return TurnResponse(
+                session_id=session_id,
+                activities=activities,
+                status=FlowStatus.AWAITING_USER.value,
+                flow_id=None,
+                current_node=None,
+            )
 
     # ── Phase: topic selection (before any flow is started) ──────────────────
     if session["status"] == "selecting_topic":
