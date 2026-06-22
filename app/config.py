@@ -82,10 +82,6 @@ class Settings(BaseSettings):
     # Base URL for all Karmayogi platform API calls.
     # Internal deployments: http://kong:8000  |  Local dev: https://portal.uat.karmayogibharat.net
     karmayogi_portal_base_url: str = "http://kong:8000"
-    # Keycloak system-admin credentials for privileged endpoints (e.g. cadreConfig).
-    access_token_api: str = ""
-    system_admin_user: str = ""
-    system_admin_password: str = ""
 
     # Langfuse (observability / tracing)
     # Set LANGFUSE_ENABLED=true + keys to activate; all other settings have safe defaults.
