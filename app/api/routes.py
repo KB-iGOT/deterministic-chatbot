@@ -262,35 +262,28 @@ async def submit_turn(
         sub_flows = _flows_for_category_quick_replies(request, category) if category else []
 
         if not sub_flows:
-            # Check if it's a direct flow_id from the redirect: mechanism
-            # (switchToFlow sends the flow_id without a category prefix).
-            _direct_graphs: dict = getattr(request.app.state, "graphs", {})
-            if choice_id in _direct_graphs and compiler is not None and compiler.is_flow_enabled(choice_id):
-                # Advance state and fall through to the selecting_topic block below.
-                session["status"] = "selecting_topic"
-            else:
-                # Invalid selection → re-offer categories
-                log.info(
-                    "[activity] event=category_invalid  session=%s  user=%s  choice=%r",
-                    sid, session["user_id_hash"], choice_id,
-                )
-                activities = [
-                    Activity.markdown(
-                        _sys(request, "unknown_topic",
-                             "🤔 I didn't catch that — please choose one of the options below.")
-                    ).model_dump(exclude_none=True),
-                    Activity.quick_replies(
-                        choices=_category_quick_replies(request)
-                    ).model_dump(exclude_none=True),
-                ]
-                activities = await _translate_activities(activities, lang, translation_svc)
-                return TurnResponse(
-                    session_id=session_id,
-                    activities=activities,
-                    status=FlowStatus.AWAITING_USER.value,
-                    flow_id=None,
-                    current_node=None,
-                )
+            # Invalid selection → re-offer categories
+            log.info(
+                "[activity] event=category_invalid  session=%s  user=%s  choice=%r",
+                sid, session["user_id_hash"], choice_id,
+            )
+            activities = [
+                Activity.markdown(
+                    _sys(request, "unknown_topic",
+                         "🤔 I didn't catch that — please choose one of the options below.")
+                ).model_dump(exclude_none=True),
+                Activity.quick_replies(
+                    choices=_category_quick_replies(request)
+                ).model_dump(exclude_none=True),
+            ]
+            activities = await _translate_activities(activities, lang, translation_svc)
+            return TurnResponse(
+                session_id=session_id,
+                activities=activities,
+                status=FlowStatus.AWAITING_USER.value,
+                flow_id=None,
+                current_node=None,
+            )
         else:
             # Valid category — show its flows and advance state
             log.info(
