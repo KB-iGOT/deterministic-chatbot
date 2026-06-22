@@ -119,11 +119,6 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
     app.state.sessions: dict[str, dict] = {}  # in-memory session metadata
     app.state.session_store = session_store   # Redis-backed; None when Redis unavailable
 
-    # Pre-warm typeahead caches (designations + services) in the background so
-    # collect nodes can embed items in the activity payload without cold-start delay.
-    from app.engine.nodes.api_call_node import warm_typeahead_cache
-    asyncio.create_task(warm_typeahead_cache(services))
-
     # Engineering tickets DB setup
     engineering_db = None
     try:

@@ -162,6 +162,46 @@ class ApiCallNode(NodeHandler):
 
             log.info("[api_call] node=%s completed successfully", node_id)
 
+            # Pagination: if `paginate` is configured, fetch remaining pages and
+            # merge all items into `result` before response_mapping runs.
+            paginate_cfg = cfg.get("paginate")
+            if paginate_cfg:
+                p_count_path = paginate_cfg.get("total_count_path", "").lstrip("$").lstrip(".")
+                p_list_path  = paginate_cfg.get("list_path", "").lstrip("$").lstrip(".")
+                p_page_param = paginate_cfg.get("page_param", "pageNumber")
+                p_page_size  = paginate_cfg.get("page_size", 100)
+                total_count  = _jsonpath_get(result, p_count_path) or 0
+                total_pages  = math.ceil(total_count / p_page_size) if p_page_size else 1
+                all_items: list = list(_jsonpath_get(result, p_list_path) or [])
+                for page_num in range(2, total_pages + 1):
+                    page_body = {**(rendered.get("body") or {}), p_page_param: page_num}
+                    try:
+                        page_result = await asyncio.wait_for(
+                            integration.execute_request(
+                                method=rendered["method"],
+                                url=rendered["url"],
+                                params=rendered.get("params"),
+                                body=page_body,
+                                headers=rendered.get("headers"),
+                            ),
+                            timeout=timeout_ms / 1000.0,
+                        )
+                        page_items = _jsonpath_get(page_result, p_list_path) or []
+                        all_items.extend(page_items)
+                        log.info("[api_call] node=%s page=%d fetched %d items (total so far: %d)",
+                                 node_id, page_num, len(page_items), len(all_items))
+                    except Exception:  # noqa: BLE001
+                        log.warning("[api_call] node=%s pagination stopped at page %d", node_id, page_num)
+                        break
+                # Write merged list back into result so response_mapping sees the full set
+                parts = p_list_path.split(".")
+                target = result
+                for part in parts[:-1]:
+                    if isinstance(target, dict):
+                        target = target.get(part, {})
+                if isinstance(target, dict) and parts:
+                    target[parts[-1]] = all_items
+
             # Apply response_mapping → populate state.collected
             updates: dict[str, Any] = {}
             for mapping in response_mapping:
@@ -1454,131 +1494,3 @@ def _jsonpath_get_list(data: Any, path: str) -> list[Any]:
             return []
     return [cur] if cur is not None else []
 
-
-# ── Typeahead preload cache ───────────────────────────────────────────────────
-# Module-level dict keyed by "designations" / "services". Lives for the process
-# lifetime. Populated at startup by warm_typeahead_cache(); read by collect_node
-# when building Activity.input for typeahead.preload=true fields.
-
-_TYPEAHEAD_CACHE: dict[str, list] = {}
-
-_PAGE_SIZE = 20
-_ALPHA_PAIRS = [c + v for c in "abcdefghijklmnopqrstuvwxyz" for v in "aeiou"]
-_CONSONANT_CLUSTERS = [
-    "bl", "br", "ch", "cl", "cr", "dr", "fl", "fr", "gl", "gr",
-    "nd", "ng", "nt", "ph", "pl", "pr", "sc", "sh", "sk", "sl",
-    "sm", "sn", "sp", "sq", "st", "sw", "th", "tr", "tw", "wh",
-]
-_seen: set = set()
-_DESIG_SEARCH_TERMS = [
-    t for t in _ALPHA_PAIRS + _CONSONANT_CLUSTERS
-    if not (_seen.__contains__(t) or _seen.add(t))  # type: ignore[func-returns-value]
-]
-
-
-async def _desig_fetch_page(karmayogi: Any, term: str, page_num: int) -> list:
-    try:
-        r = await karmayogi.execute_request(
-            method="POST",
-            url="/apis/public/v8/designation/search",
-            body={
-                "pageNumber": page_num,
-                "pageSize": _PAGE_SIZE,
-                "filterCriteriaMap": {"status": "Active"},
-                "requestedFields": ["id", "designation"],
-                "searchString": term,
-            },
-        )
-        return r.get("result", {}).get("data", [])
-    except Exception as exc:
-        log.warning("[typeahead] designation term=%r page=%d failed: %s", term, page_num, exc)
-        return []
-
-
-async def _desig_fetch_all_for_term(karmayogi: Any, term: str) -> list:
-    try:
-        first = await karmayogi.execute_request(
-            method="POST",
-            url="/apis/public/v8/designation/search",
-            body={
-                "pageNumber": 1,
-                "pageSize": _PAGE_SIZE,
-                "filterCriteriaMap": {"status": "Active"},
-                "requestedFields": ["id", "designation"],
-                "searchString": term,
-            },
-        )
-    except Exception as exc:
-        log.warning("[typeahead] designation term=%r page=1 failed: %s", term, exc)
-        return []
-
-    data: list = first.get("result", {}).get("data", [])
-    total_count = int(first.get("result", {}).get("totalCount", 0) or 0)
-    if not data:
-        return []
-    total_pages = max(1, math.ceil(total_count / _PAGE_SIZE))
-    if total_pages > 1:
-        for batch_start in range(2, total_pages + 1, 20):
-            batch = list(range(batch_start, min(batch_start + 20, total_pages + 1)))
-            pages = await asyncio.gather(*[_desig_fetch_page(karmayogi, term, p) for p in batch])
-            for page_data in pages:
-                data.extend(page_data)
-    return data
-
-
-async def _load_designations(karmayogi: Any) -> list:
-    if "designations" in _TYPEAHEAD_CACHE:
-        return _TYPEAHEAD_CACHE["designations"]
-    log.info("[typeahead] designations: fetching for %d search terms", len(_DESIG_SEARCH_TERMS))
-    term_results: list = []
-    for term_start in range(0, len(_DESIG_SEARCH_TERMS), 8):
-        batch = _DESIG_SEARCH_TERMS[term_start:term_start + 8]
-        batch_results = await asyncio.gather(*[_desig_fetch_all_for_term(karmayogi, t) for t in batch])
-        term_results.extend(batch_results)
-    seen_ids: set = set()
-    items: list = []
-    for term_data in term_results:
-        for d in term_data:
-            if not isinstance(d, dict) or not d.get("id") or not d.get("designation"):
-                continue
-            item_id = str(d["id"])
-            if item_id not in seen_ids:
-                seen_ids.add(item_id)
-                items.append({"id": item_id, "label": str(d["designation"])})
-    log.info("[typeahead] designations: loaded %d unique items", len(items))
-    _TYPEAHEAD_CACHE["designations"] = items
-    return items
-
-
-async def _load_services(karmayogi: Any) -> list:
-    if "services" in _TYPEAHEAD_CACHE:
-        return _TYPEAHEAD_CACHE["services"]
-    try:
-        data = await karmayogi.execute_request(
-            method="GET",
-            url="/api/data/v2/system/settings/get/cadreConfig",
-        )
-        flat = _flatten_cadre_services(data.get("response", {}).get("value", {}))
-        items = [{"id": s["id"], "label": s["name"]} for s in flat]
-        _TYPEAHEAD_CACHE["services"] = items
-        log.info("[typeahead] services: loaded %d items", len(items))
-        return items
-    except Exception as exc:
-        log.warning("[typeahead] services: failed to load cadreConfig: %s", exc)
-        return []
-
-
-async def warm_typeahead_cache(services: Any) -> None:
-    """Pre-warm typeahead caches at startup. Called as an asyncio background task."""
-    karmayogi = services.get("karmayogi") if hasattr(services, "get") else None
-    if karmayogi is None:
-        log.warning("[typeahead] warm: karmayogi service not available, skipping")
-        return
-    try:
-        await _load_designations(karmayogi)
-    except Exception as exc:
-        log.warning("[typeahead] warm: designations failed: %s", exc)
-    try:
-        await _load_services(karmayogi)
-    except Exception as exc:
-        log.warning("[typeahead] warm: services failed: %s", exc)

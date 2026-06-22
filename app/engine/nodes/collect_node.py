@@ -223,18 +223,10 @@ class CollectNode(NodeHandler):
                 if text:
                     bot_prompt_text = text
                     activities.append(Activity.markdown(text).model_dump(exclude_none=True))
-                typeahead_cfg = field_cfg.get("typeahead") if field_cfg else None
-                if typeahead_cfg and typeahead_cfg.get("preload"):
-                    from app.engine.nodes import api_call_node
-                    _url = (typeahead_cfg.get("request") or {}).get("url", "")
-                    _key = "designations" if "designation" in _url else "services" if "cadreConfig" in _url else None
-                    _items = api_call_node._TYPEAHEAD_CACHE.get(_key, []) if _key else []
-                    typeahead_cfg = {"preload": True, "items": _items, "on_select": typeahead_cfg.get("on_select")}
                 activities.append(
                     Activity.input(
                         input_id=field_cfg["name"] if field_cfg else "value",
                         placeholder=(prompt_cfg.get("placeholder", "") if prompt_cfg else ""),
-                        typeahead=typeahead_cfg,
                     ).model_dump(exclude_none=True)
                 )
 
@@ -300,7 +292,9 @@ async def _resolve_dynamic_options(
         mapping   = cfg.get("response_mapping", {})
         id_field    = mapping.get("id_field", "id")
         label_field = mapping.get("label_field", "name")
+        extra_fields_cfg = mapping.get("extra_fields", [])
         items: list[PickerItem] = []
+        extras_map: dict[str, dict] = {}
         for raw in items_raw:
             if not isinstance(raw, dict):
                 continue
@@ -308,7 +302,11 @@ async def _resolve_dynamic_options(
             label   = raw.get(label_field)
             if item_id and label:
                 items.append(PickerItem(id=str(item_id), label=str(label)))
-        return items, {}
+                for ef in extra_fields_cfg:
+                    ef_from, ef_to = ef.get("from", ""), ef.get("to", "")
+                    if ef_from and ef_to and ef_from in raw:
+                        extras_map.setdefault(str(item_id), {})[ef_to.removeprefix("collected.")] = raw[ef_from]
+        return items, extras_map
 
     if source != "api":
         raise NotImplementedError(f"dynamic_options.source = {source!r} not supported yet")

@@ -88,12 +88,12 @@ nodes:
     on_reply:
       name:          fetch_name_for_guide
       display_name:  display_name_info
-      designation:   designation_collect
+      designation:   designation_fetch_list
       email_mobile:  email_mobile_steps
-      mother_tongue: mother_tongue_collect
+      mother_tongue: mother_tongue_fetch_languages
       ehrms:         ehrms_info
       retirement:    checking_profile_for_retirement
-      service:       service_picker
+      service:       service_fetch_cadre_config
       svc_history:   svc_history_ask
       edu_qual:      edu_qual_steps
       photo:         profile_photo_steps
@@ -153,51 +153,30 @@ nodes:
   # ═══════════════════════════════════════════════════════════════════════════
   # §3  DESIGNATION NOT FOUND
   # ═══════════════════════════════════════════════════════════════════════════
-  - id: designation_collect
-    type: collect
-    prompt:
-      text: |
-        Please type your **designation** to search from the master data list.
+  # ── §3A  Fetch designation list → source:context picker ─────────────────────
+  - id: designation_fetch_list
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/apis/public/v8/designation/search"
+      body:
+        pageNumber: 1
+        pageSize: 100
+        filterCriteriaMap: {status: "Active"}
+        requestedFields: ["id", "designation"]
+    paginate:
+      total_count_path: "$.result.totalCount"
+      list_path: "$.result.data"
+      page_param: pageNumber
+      page_size: 100
+    response_mapping:
+      - from: "$.result.data"
+        to: collected._designation_list
+    on_success: designation_search_and_pick
+    on_error:
+      any: designation_no_match_options
 
-        *Avoid abbreviations — e.g. type **Section Officer**, not SO*
-      placeholder: "Type to search designations..."
-    field:
-      name: collected.designation_requested
-      type: text
-      typeahead:
-        preload: true
-        integration: karmayogi
-        request:
-          method: POST
-          url: "/apis/public/v8/designation/search"
-          body:
-            pageNumber: 1
-            pageSize: 10
-            filterCriteriaMap: {status: "Active"}
-            requestedFields: []
-            searchString: "{query}"
-        response_mapping:
-          list_path: "$.result.data"
-          id_field: id
-          label_field: designation
-        on_select:
-          id_to: collected.designation_selected_id
-          label_to: collected.designation_selected_name
-    next: designation_typeahead_branch
-
-  - id: designation_typeahead_branch
-    type: branch
-    rules:
-      - { if: "ctx.collected.designation_selected_id", then: confirm_designation_selection }
-    default: designation_searching_message
-
-  - id: designation_searching_message
-    type: message
-    prompt:
-      text: "Searching for **{{ ctx.collected.designation_requested }}** in the master data, please wait…"
-    next: designation_search_and_pick
-
-  # ── §3A  Search master data + picker ────────────────────────────────────────
   - id: designation_search_and_pick
     type: collect
     prompt:
@@ -206,27 +185,13 @@ nodes:
       name: collected.designation_selected_id
       type: select
     dynamic_options:
-      source: api
-      integration: karmayogi
-      request:
-        method: POST
-        url: "/apis/public/v8/designation/search"
-        body:
-          pageNumber: 1
-          pageSize: 100
-          filterCriteriaMap: {status: "Active"}
-          requestedFields: ["id", "designation"]
-          searchString: "{{ ctx.collected.designation_requested }}"
+      source: context
+      context_key: collected._designation_list
       response_mapping:
-        list_path: "$.result.data"
-        total_count_path: "$.result.totalCount"
         id_field: id
         label_field: designation
         extra_fields:
           - { from: designation, to: collected.designation_selected_name }
-      pagination:
-        page_param: pageNumber
-        page_size: 100
       search: { enabled: true, placeholder: "Search designations..." }
       empty_message: "No matching designations found."
     on_empty: designation_no_match_options
@@ -235,12 +200,12 @@ nodes:
   - id: designation_no_match_options
     type: message
     prompt:
-      text: "Could not find a match for **\"{{ ctx.collected.designation_requested }}\"**. Please select from the dropdown suggestions as you type, or request to add your designation if it doesn't exist."
+      text: "No matching designation was found in the list. You can search again or request to add your designation if it doesn't exist."
     quick_replies:
       - { id: retry,  label: "🔄 Search again" }
       - { id: ticket, label: "➕ Request to add this designation" }
     on_reply:
-      retry:  designation_collect
+      retry:  designation_fetch_list
       ticket: designation_no_match_collect_org
 
   - id: confirm_designation_selection
@@ -253,7 +218,7 @@ nodes:
       - { id: none, label: "❌ None of these match" }
     on_reply:
       yes:   fetch_user_for_desig
-      retry: designation_collect
+      retry: designation_search_and_pick
       none:  designation_no_match_collect_org
 
   # ── §3B  Match found — check MDO import ─────────────────────────────────────
@@ -384,7 +349,7 @@ nodes:
       - { id: retry,   label: "🔄 Try a different designation" }
     on_reply:
       confirm: raise_designation_ticket
-      retry:   designation_collect
+      retry:   designation_search_and_pick
 
   - id: raise_designation_ticket
     type: transfer_llm
@@ -533,69 +498,53 @@ nodes:
   # ═══════════════════════════════════════════════════════════════════════════
   # §5  MOTHER TONGUE
   # ═══════════════════════════════════════════════════════════════════════════
-  - id: mother_tongue_collect
-    type: collect
-    prompt:
-      text: "Please type your **mother tongue** to search from the list:"
-      placeholder: "e.g. Tulu, Dogri, Konkani..."
-    field:
-      name: collected.mother_tongue_requested
-      type: text
-      typeahead:
-        preload: true
-        integration: karmayogi
-        request:
-          method: GET
-          url: "/api/masterData/v1/languages"
-        response_mapping:
-          list_path: "$.languages"
-          id_field: name
-          label_field: name
-        on_select:
-          label_to: collected.mother_tongue_selected
-    next: mother_tongue_check_selected
-
-  - id: mother_tongue_check_selected
-    type: branch
-    rules:
-      - { if: "ctx.collected.mother_tongue_selected", then: confirm_mother_tongue_selection }
-    default: mother_tongue_api_verify
-
-  - id: mother_tongue_api_verify
+  - id: mother_tongue_fetch_languages
     type: api_call
     integration: karmayogi
     request:
       method: GET
       url: "/api/masterData/v1/languages"
     response_mapping:
-      - { from: "$.languages", find_where: {field: name, equals_ctx: collected.mother_tongue_requested}, sub_path: name, to: collected.mother_tongue_verified }
-    on_success: mother_tongue_verify_branch
+      - { from: "$.languages", to: collected._language_list }
+    on_success: mother_tongue_pick
     on_error:
       any: mother_tongue_ticket
 
-  - id: mother_tongue_verify_branch
-    type: branch
-    rules:
-      - { if: "ctx.collected.mother_tongue_verified", then: confirm_mother_tongue_selection }
-    default: mother_tongue_ticket
+  - id: mother_tongue_pick
+    type: collect
+    prompt:
+      text: "Please select your **mother tongue** from the list:"
+    field:
+      name: collected.mother_tongue_verified
+      type: select
+    dynamic_options:
+      source: context
+      context_key: collected._language_list
+      response_mapping:
+        id_field: name
+        label_field: name
+      search: { enabled: true, placeholder: "Search languages..." }
+      empty_message: "No languages found."
+    on_empty: mother_tongue_ticket
+    next: confirm_mother_tongue_selection
 
   - id: confirm_mother_tongue_selection
     type: message
     prompt:
       text: |
-        ✅ **{{ ctx.collected.mother_tongue_selected or ctx.collected.mother_tongue_verified }}** is already available in the iGOT system.
+        ✅ **{{ ctx.collected.mother_tongue_verified }}** is already available in the iGOT system.
     next: mother_tongue_guide
 
   - id: mother_tongue_guide
     type: resolution
     prompt:
-      text: "Follow these steps to update your Mother Tongue to **{{ ctx.collected.mother_tongue_selected or ctx.collected.mother_tongue_verified }}**:"
+      text: "Follow these steps to update your Mother Tongue to **{{ ctx.collected.mother_tongue_verified }}**:"
     steps:
       - "Click on **View Profile**."
       - "Navigate to **Other Details**."
       - "Click on the **Edit (✏️)** icon."
       - "Locate the **Mother Tongue** field."
-      - "Select **{{ ctx.collected.mother_tongue_selected or ctx.collected.mother_tongue_verified }}** from the list."
+      - "Select **{{ ctx.collected.mother_tongue_verified }}** from the list."
       - "Click on **Save / Update Details**."
     next: satisfied
 
@@ -603,9 +552,9 @@ nodes:
     type: message
     prompt:
       text: |
-        **{{ ctx.collected.mother_tongue_requested }}** is not available in the iGOT system.
+        We were unable to load the language list at this time.
 
-        I can raise a request to get it added so it becomes available for you and other users.
+        I can raise a support request on your behalf to get your mother tongue added or updated.
         Shall I submit this request?
     quick_replies:
       - { id: yes, label: "✅ Yes, raise request" }
@@ -622,7 +571,7 @@ nodes:
       include_flow_meta: true
     llm_directives:
       objective: |
-        Raise a Zoho ticket to request adding mother tongue "{{ ctx.collected.mother_tongue_requested }}" to the iGOT system. Include the mother tongue name. Keep to 1 turn.
+        Raise a Zoho ticket to request that the user's mother tongue be added or updated in the iGOT system. Include any relevant details shared by the user. Keep to 1 turn.
       priority_override: P3
       ticket_tags: [mother_tongue_missing, profile_update]
     on_complete: confirm_ticket
@@ -851,43 +800,39 @@ nodes:
   #     → service_ask_name_text (fallback when API fails)
   # ═══════════════════════════════════════════════════════════════════════════
 
-  # Step 1 — Typeahead search (services preloaded from /chat/services by frontend)
+  # Step 1 — Fetch + flatten cadreConfig into collected._service_list
+  - id: service_fetch_cadre_config
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/data/v2/system/settings/get/cadreConfig"
+    response_mapping:
+      - from: "$.response.value"
+        to: collected._service_list
+        transform: flatten_cadre_services
+    on_success: service_picker
+    on_error:
+      any: service_ask_name_text
+
+  # Step 2 — Show picker from pre-fetched context list
   - id: service_picker
     type: collect
     prompt:
-      text: "Please type your service name to search:"
+      text: "Please select your service from the list below:"
     field:
-      name: collected.service_requested
-      type: text
-      typeahead:
-        preload: true
-        integration: karmayogi
-        request:
-          method: GET
-          url: "/api/data/v2/system/settings/get/cadreConfig"
-        on_select:
-          label_to: collected.service_selected_name
-    next: branch_service_typed_or_selected
-
-  - id: branch_service_typed_or_selected
-    type: branch
-    rules:
-      - { if: "ctx.collected.service_selected_name", then: service_found_confirm }
-    default: service_not_available_msg
-
-  - id: service_not_available_msg
-    type: message
-    prompt:
-      text: |
-        The service **{{ ctx.collected.service_requested }}** is not available in the iGOT system.
-
-        Would you like to raise a request to add this service?
-    quick_replies:
-      - { id: yes,    label: "✅ Yes, raise a request" }
-      - { id: search, label: "🔍 Search again" }
-    on_reply:
-      yes:    service_not_found_collect
-      search: service_picker
+      name: collected.service_selected_name
+      type: select
+    dynamic_options:
+      source: context
+      context_key: collected._service_list
+      response_mapping:
+        id_field: name
+        label_field: name
+      search: { enabled: true, placeholder: "Search services..." }
+      empty_message: "No services found."
+    on_empty: service_not_found_collect
+    next: service_found_confirm
 
   # Case 1 — Service found in picker → confirm and show update steps
   - id: service_found_confirm

@@ -63,8 +63,6 @@ class Activity(BaseModel):
     input_id: str | None = None
     input_placeholder: str | None = None
     validate_regex: str | None = None
-    typeahead: dict | None = None  # {integration, url, method, body, list_path, id_field, label_field}
-
     # end
     outcome: str | None = None        # "self_served" | "ticket_raised" | "ended"
 
@@ -107,8 +105,8 @@ class Activity(BaseModel):
         )
 
     @classmethod
-    def input(cls, input_id: str, placeholder: str = "", typeahead: dict | None = None) -> Self:
-        return cls(type="input", input_id=input_id, input_placeholder=placeholder, typeahead=typeahead)
+    def input(cls, input_id: str, placeholder: str = "") -> Self:
+        return cls(type="input", input_id=input_id, input_placeholder=placeholder)
 
     @classmethod
     def typing(cls) -> Self:
