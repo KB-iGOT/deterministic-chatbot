@@ -55,7 +55,7 @@ from langgraph.graph import END
 
 from langchain_core.messages import AIMessage
 
-from app.engine.activity import Activity, PickerItem
+from app.engine.activity import Activity, PickerItem, QuickReply
 from app.engine.nodes.base import NodeHandler
 from app.engine.state import ConversationState, FlowStatus
 from app.engine.template import render
@@ -74,6 +74,10 @@ class CollectNode(NodeHandler):
         # is collected one at a time before proceeding to next node.
         if cfg.get("prompts"):
             return None  # handled by register_conditional_edges()
+        # dynamic_options with on_empty: needs conditional edges
+        on_empty = cfg.get("on_empty") or (cfg.get("dynamic_options") or {}).get("on_empty")
+        if on_empty:
+            return None  # handled by register_conditional_edges()
         # Single-field or dynamic_options: simple static edge
         return cfg.get("next")
 
@@ -85,12 +89,37 @@ class CollectNode(NodeHandler):
         the graph stays on this node (interrupt_after fires each iteration) until
         all required fields have values in state.collected.
         """
+        node_id = cfg["id"]
+        next_target = cfg.get("next")
+        on_empty = cfg.get("on_empty") or (cfg.get("dynamic_options") or {}).get("on_empty")
+        on_other = cfg.get("on_other")
+
+        if (on_empty or on_other) and cfg.get("dynamic_options"):
+            field_cfg_r = cfg.get("field")
+            field_key = field_cfg_r["name"].removeprefix("collected.") if field_cfg_r else None
+
+            def route_picker(state: ConversationState) -> str:
+                c = state.collected or {}
+                if on_other and c.get("_other_requested"):
+                    return on_other
+                if field_key and c.get(field_key) is None:
+                    return on_empty or next_target or node_id
+                return next_target or node_id
+
+            targets = set()
+            if on_empty:
+                targets.add(on_empty)
+            if on_other:
+                targets.add(on_other)
+            if next_target:
+                targets.add(next_target)
+            targets.add(node_id)
+            graph.add_conditional_edges(node_id, route_picker, {t: t for t in targets})
+            return True
+
         prompts = cfg.get("prompts")
         if not prompts:
             return False  # single field or dynamic_options — plain next edge
-
-        next_target = cfg.get("next")
-        node_id = cfg["id"]
 
         def route(state: ConversationState) -> str:
             collected = state.collected or {}
@@ -158,11 +187,31 @@ class CollectNode(NodeHandler):
                 placeholder = (
                     prompt_cfg.get("placeholder") if prompt_cfg else None
                 ) or dynamic_options.get("search", {}).get("placeholder", "Search…")
+                if not items:
+                    empty_msg = dynamic_options.get("empty_message", "No results found.")
+                    activities.append(Activity.markdown(empty_msg).model_dump(exclude_none=True))
+                    on_empty_rt = cfg.get("on_empty") or dynamic_options.get("on_empty")
+                    if on_empty_rt:
+                        return {
+                            "pending_activities": state.pending_activities + activities,
+                            "current_node": cfg["id"],
+                            "status": FlowStatus.ACTIVE,
+                            "collected": {**state.collected,
+                                          (field_cfg["name"].removeprefix("collected.") if field_cfg else "_empty"): None},
+                        }
+                other_opt_cfg = cfg.get("other_option")
+                other_option = None
+                if other_opt_cfg:
+                    other_option = QuickReply(
+                        id=other_opt_cfg["id"],
+                        label=other_opt_cfg["label"],
+                    )
                 activities.append(
                     Activity.picker(
                         picker_id=field_cfg["name"] if field_cfg else cfg["id"],
                         items=items,
                         placeholder=placeholder,
+                        other_option=other_option,
                     ).model_dump(exclude_none=True)
                 )
                 # Store per-item extras in collected so pick_item can merge them
@@ -236,6 +285,29 @@ async def _resolve_dynamic_options(
     from app.engine.template import render as _render, render_native
 
     source = cfg.get("source", "api")
+
+    if source == "context":
+        context_key = cfg.get("context_key", "").removeprefix("collected.")
+        items_raw = (ctx.get("collected") or {}).get(context_key, []) or []
+        mapping   = cfg.get("response_mapping", {})
+        id_field    = mapping.get("id_field", "id")
+        label_field = mapping.get("label_field", "name")
+        extra_fields_cfg = mapping.get("extra_fields", [])
+        items: list[PickerItem] = []
+        extras_map: dict[str, dict] = {}
+        for raw in items_raw:
+            if not isinstance(raw, dict):
+                continue
+            item_id = raw.get(id_field)
+            label   = raw.get(label_field)
+            if item_id and label:
+                items.append(PickerItem(id=str(item_id), label=str(label)))
+                for ef in extra_fields_cfg:
+                    ef_from, ef_to = ef.get("from", ""), ef.get("to", "")
+                    if ef_from and ef_to and ef_from in raw:
+                        extras_map.setdefault(str(item_id), {})[ef_to.removeprefix("collected.")] = raw[ef_from]
+        return items, extras_map
+
     if source != "api":
         raise NotImplementedError(f"dynamic_options.source = {source!r} not supported yet")
 

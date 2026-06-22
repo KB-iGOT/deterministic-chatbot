@@ -261,7 +261,62 @@ async def submit_turn(
         category = choice_id[len(_cat_prefix):] if choice_id.startswith(_cat_prefix) else ""
         sub_flows = _flows_for_category_quick_replies(request, category) if category else []
 
-        if not sub_flows:
+        if sub_flows:
+            # Valid category — show its flows and advance state
+            log.info(
+                "[activity] event=category_selected  session=%s  user=%s  category=%r",
+                sid, session["user_id_hash"], category,
+            )
+            session["selected_category"] = category
+            session["status"] = "selecting_topic"
+
+            _lf_tid_cat: str | None = None
+            _lf_oid_cat: str | None = None
+            with tracing.turn_trace(
+                user_id=user_id,
+                session_id=sid,
+                trace_name=f"category-selected",
+                tags=[session["channel"], session["language"]],
+                trace_id=session.get("_lf_trace_id"),
+                parent_observation_id=session.get("_lf_obs_id"),
+                category=category,
+                channel=session["channel"],
+            ):
+                _lf_tid_cat, _lf_oid_cat = tracing.get_current_span_ids()
+                tracing.set_span_io(
+                    input={"user": f"Selected category: {category}"},
+                    output={"bot": "Sub-flow menu shown", "flow_options": [qr.label for qr in sub_flows]},
+                )
+
+            if _lf_tid_cat:
+                session["_lf_trace_id"] = _lf_tid_cat
+            if _lf_oid_cat:
+                session["_lf_obs_id"] = _lf_oid_cat
+
+            activities = [
+                Activity.markdown(
+                    _sys(request, "select_issue",
+                         "Please choose the specific issue you're facing:")
+                ).model_dump(exclude_none=True),
+                Activity.quick_replies(choices=sub_flows).model_dump(exclude_none=True),
+            ]
+            activities = await _translate_activities(activities, lang, translation_svc)
+            return TurnResponse(
+                session_id=session_id,
+                activities=activities,
+                status=FlowStatus.AWAITING_USER.value,
+                flow_id=None,
+                current_node=None,
+            )
+
+        # No matching category. Check if it's a direct flow_id (used by the
+        # redirect: mechanism — switchToFlow sends the flow_id without a category prefix).
+        _direct_graphs: dict = getattr(request.app.state, "graphs", {})
+        if choice_id in _direct_graphs and compiler is not None and compiler.is_flow_enabled(choice_id):
+            # Advance to topic-selection state and fall through — the
+            # selecting_topic block below will start the flow immediately.
+            session["status"] = "selecting_topic"
+        else:
             # Invalid selection → re-offer categories
             log.info(
                 "[activity] event=category_invalid  session=%s  user=%s  choice=%r",
@@ -284,53 +339,6 @@ async def submit_turn(
                 flow_id=None,
                 current_node=None,
             )
-
-        # Valid category — show its flows and advance state
-        log.info(
-            "[activity] event=category_selected  session=%s  user=%s  category=%r",
-            sid, session["user_id_hash"], category,
-        )
-        session["selected_category"] = category
-        session["status"] = "selecting_topic"
-
-        _lf_tid_cat: str | None = None
-        _lf_oid_cat: str | None = None
-        with tracing.turn_trace(
-            user_id=user_id,
-            session_id=sid,
-            trace_name=f"category-selected",
-            tags=[session["channel"], session["language"]],
-            trace_id=session.get("_lf_trace_id"),
-            parent_observation_id=session.get("_lf_obs_id"),
-            category=category,
-            channel=session["channel"],
-        ):
-            _lf_tid_cat, _lf_oid_cat = tracing.get_current_span_ids()
-            tracing.set_span_io(
-                input={"user": f"Selected category: {category}"},
-                output={"bot": "Sub-flow menu shown", "flow_options": [qr.label for qr in sub_flows]},
-            )
-
-        if _lf_tid_cat:
-            session["_lf_trace_id"] = _lf_tid_cat
-        if _lf_oid_cat:
-            session["_lf_obs_id"] = _lf_oid_cat
-
-        activities = [
-            Activity.markdown(
-                _sys(request, "select_issue",
-                     "Please choose the specific issue you're facing:")
-            ).model_dump(exclude_none=True),
-            Activity.quick_replies(choices=sub_flows).model_dump(exclude_none=True),
-        ]
-        activities = await _translate_activities(activities, lang, translation_svc)
-        return TurnResponse(
-            session_id=session_id,
-            activities=activities,
-            status=FlowStatus.AWAITING_USER.value,
-            flow_id=None,
-            current_node=None,
-        )
 
     # ── Phase: topic selection (before any flow is started) ──────────────────
     if session["status"] == "selecting_topic":
@@ -926,8 +934,15 @@ def _build_state_update(
             extras = (collected.get("_picker_item_extras") or {}).get(body.item_id, {})
             if extras:
                 collected.update(extras)
+        collected.pop("_other_requested", None)  # clear any stale other-option flag
         update["collected"] = collected
         update["messages"] = [HumanMessage(content=f"Selected: {body.item_id}")]
+
+    elif body.action == "request_other":
+        # User tapped "mine isn't in the list" on a picker — set routing flag
+        collected["_other_requested"] = True
+        update["collected"] = collected
+        update["messages"] = [HumanMessage(content=body.other_query or "Not in the list")]
 
     elif body.action == "send_message" and body.text:
         # Capture field_meta BEFORE saving (points to the field being filled now)
@@ -941,7 +956,8 @@ def _build_state_update(
                     break
             # Single field
             if not node_cfg.get("prompts"):
-                fname = (node_cfg.get("field") or {}).get("name", "").removeprefix("collected.")
+                field_cfg = node_cfg.get("field") or {}
+                fname = field_cfg.get("name", "").removeprefix("collected.")
                 if fname:
                     collected[fname] = body.text
         # Record step in conversation trail
