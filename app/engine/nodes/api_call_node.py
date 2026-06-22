@@ -42,11 +42,20 @@ YAML shape (canonical example):
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import math
+import time
 from typing import Any, Callable
 
 log = logging.getLogger(__name__)
+
+# Module-level in-memory TTL cache for api_call nodes that declare `cache:`.
+# Key: MD5 of (integration, method, url, params, body).
+# Value: (expiry_timestamp, result).
+# Shared across all sessions/requests; cleared on server restart.
+_NODE_RESPONSE_CACHE: dict[str, tuple[float, Any]] = {}
 
 from app.engine.nodes.base import NodeHandler
 from app.engine.state import ConversationState
@@ -127,44 +136,70 @@ class ApiCallNode(NodeHandler):
                 node_id, integration_name, rendered["method"], rendered["url"], timeout_ms,
             )
 
-            # Delegate the HTTP call to the integration adapter.
-            # Adapter prepends base URL + injects auth + handles refresh on 401.
-            try:
-                result = await asyncio.wait_for(
-                    integration.execute_request(
-                        method=rendered["method"],
-                        url=rendered["url"],
-                        params=rendered.get("params"),
-                        body=rendered.get("body"),
-                        headers=rendered.get("headers"),
-                    ),
-                    timeout=timeout_ms / 1000.0,
-                )
-            except asyncio.TimeoutError:
-                log.error(
-                    "[api_call] node=%s timed out after %dms (integration=%s %s %s)",
-                    node_id, timeout_ms, integration_name, rendered["method"], rendered["url"],
-                )
-                return _record_error(state, cfg, "timeout")
-            except IntegrationNotFound:
-                log.error(
-                    "[api_call] node=%s got 404 Not Found from %s %s %s",
-                    node_id, integration_name, rendered["method"], rendered["url"],
-                )
-                return _record_error(state, cfg, "not_found")
-            except Exception as e:  # noqa: BLE001
-                log.error(
-                    "[api_call] node=%s raised %s: %s  (integration=%s %s %s)",
-                    node_id, type(e).__name__, e,
-                    integration_name, rendered["method"], rendered["url"],
-                )
-                return _record_error(state, cfg, f"any:{e}")
+            # Cache check — skip HTTP call if a valid cached result exists.
+            cache_cfg = cfg.get("cache")
+            cache_key: str | None = None
+            cache_ttl: int = 3600
+            result: Any = None
+            cache_hit = False
 
-            log.info("[api_call] node=%s completed successfully", node_id)
+            if cache_cfg:
+                cache_ttl = int(cache_cfg.get("ttl_seconds", 3600))
+                _raw = json.dumps({
+                    "i": integration_name,
+                    "m": rendered["method"],
+                    "u": rendered["url"],
+                    "p": rendered.get("params"),
+                    "b": rendered.get("body"),
+                }, sort_keys=True, default=str)
+                cache_key = hashlib.md5(_raw.encode()).hexdigest()  # noqa: S324
+                cached = _NODE_RESPONSE_CACHE.get(cache_key)
+                if cached:
+                    expiry, cached_result = cached
+                    if time.time() < expiry:
+                        log.info("[api_call] node=%s cache HIT (key=%.8s ttl=%ds)", node_id, cache_key, cache_ttl)
+                        result = cached_result
+                        cache_hit = True
+
+            if not cache_hit:
+                # Delegate the HTTP call to the integration adapter.
+                try:
+                    result = await asyncio.wait_for(
+                        integration.execute_request(
+                            method=rendered["method"],
+                            url=rendered["url"],
+                            params=rendered.get("params"),
+                            body=rendered.get("body"),
+                            headers=rendered.get("headers"),
+                        ),
+                        timeout=timeout_ms / 1000.0,
+                    )
+                except asyncio.TimeoutError:
+                    log.error(
+                        "[api_call] node=%s timed out after %dms (integration=%s %s %s)",
+                        node_id, timeout_ms, integration_name, rendered["method"], rendered["url"],
+                    )
+                    return _record_error(state, cfg, "timeout")
+                except IntegrationNotFound:
+                    log.error(
+                        "[api_call] node=%s got 404 Not Found from %s %s %s",
+                        node_id, integration_name, rendered["method"], rendered["url"],
+                    )
+                    return _record_error(state, cfg, "not_found")
+                except Exception as e:  # noqa: BLE001
+                    log.error(
+                        "[api_call] node=%s raised %s: %s  (integration=%s %s %s)",
+                        node_id, type(e).__name__, e,
+                        integration_name, rendered["method"], rendered["url"],
+                    )
+                    return _record_error(state, cfg, f"any:{e}")
+
+                log.info("[api_call] node=%s completed successfully", node_id)
 
             # Pagination: if `paginate` is configured, fetch remaining pages and
             # merge all items into `result` before response_mapping runs.
-            paginate_cfg = cfg.get("paginate")
+            # Skipped on cache hit — the cached result already has all pages merged.
+            paginate_cfg = cfg.get("paginate") if not cache_hit else None
             if paginate_cfg:
                 p_count_path = paginate_cfg.get("total_count_path", "").lstrip("$").lstrip(".")
                 p_list_path  = paginate_cfg.get("list_path", "").lstrip("$").lstrip(".")
@@ -201,6 +236,11 @@ class ApiCallNode(NodeHandler):
                         target = target.get(part, {})
                 if isinstance(target, dict) and parts:
                     target[parts[-1]] = all_items
+
+            # Store result in cache after successful fetch + pagination.
+            if cache_key and not cache_hit:
+                _NODE_RESPONSE_CACHE[cache_key] = (time.time() + cache_ttl, result)
+                log.info("[api_call] node=%s cached result (key=%.8s ttl=%ds)", node_id, cache_key, cache_ttl)
 
             # Apply response_mapping → populate state.collected
             updates: dict[str, Any] = {}

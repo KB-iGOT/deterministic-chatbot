@@ -165,6 +165,8 @@ nodes:
         pageSize: 100
         filterCriteriaMap: {status: "Active"}
         requestedFields: ["id", "designation"]
+    cache:
+      ttl_seconds: 3600
     paginate:
       total_count_path: "$.result.totalCount"
       list_path: "$.result.data"
