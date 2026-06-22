@@ -74,7 +74,6 @@ class KarmayogiService:
 
         merged_headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "x-authenticated-user-token": self.api_key,
             "Accept": "application/json",
             **(headers or {}),
         }

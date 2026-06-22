@@ -244,9 +244,6 @@ nodes:
     request:
       method: GET
       url: "/api/framework/v1/read/{{ ctx.collected.root_org_id }}_odcs"
-      headers:
-        x-authenticated-user-token: ""
-        x-authenticated-userid: ""
     response_mapping:
       - { from: "$.framework.categories[*].terms[*].code", to: collected.framework_term_codes }
     on_success: branch_mdo_import
@@ -1285,7 +1282,7 @@ nodes:
       method: GET
       url: "/api/data/v2/system/settings/get/cadreConfig"
       headers:
-        x-authenticated-user-token: "{{ ctx.collected._user_token }}"
+        x-authenticated-user-token: "__SESSION_TOKEN__"
     response_mapping:
       - from: "$.response.value"
         to: collected._service_list

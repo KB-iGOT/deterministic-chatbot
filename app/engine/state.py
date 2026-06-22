@@ -87,6 +87,11 @@ class ConversationState(BaseModel):
     # --- LLM usage tracking (cost cap enforcement) ---
     llm_calls_this_session: int = 0
 
+    # --- Auth (not exposed to YAML templates or LLM context) ---
+    # Raw Keycloak JWT for flows that need to forward the user token to privileged APIs.
+    # Access only via the "__SESSION_TOKEN__" sentinel in YAML header values — never via ctx.
+    session_token: str = ""
+
     # --- Misc ---
     last_activity_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

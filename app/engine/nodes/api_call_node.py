@@ -131,6 +131,16 @@ class ApiCallNode(NodeHandler):
                 )
                 return _record_error(state, cfg, f"request_render_failed:{e}")
 
+            # Replace __SESSION_TOKEN__ sentinel with the actual Keycloak JWT from state.
+            # The token is never exposed to Jinja templates — only YAML headers that
+            # explicitly declare this sentinel value receive the user JWT.
+            if rendered.get("headers"):
+                _tok = state.session_token
+                rendered["headers"] = {
+                    k: (_tok if v == "__SESSION_TOKEN__" else v)
+                    for k, v in rendered["headers"].items()
+                }
+
             log.info(
                 "[api_call] node=%s  integration=%s  %s %s  timeout=%dms",
                 node_id, integration_name, rendered["method"], rendered["url"], timeout_ms,
@@ -205,8 +215,12 @@ class ApiCallNode(NodeHandler):
                 p_list_path  = paginate_cfg.get("list_path", "").lstrip("$").lstrip(".")
                 p_page_param = paginate_cfg.get("page_param", "pageNumber")
                 p_page_size  = paginate_cfg.get("page_size", 100)
+                max_pages    = int(paginate_cfg.get("max_pages", 50))
+                if not p_page_size:
+                    log.warning("[api_call] node=%s page_size is 0 — defaulting to 100", node_id)
+                    p_page_size = 100
                 total_count  = _jsonpath_get(result, p_count_path) or 0
-                total_pages  = math.ceil(total_count / p_page_size) if p_page_size else 1
+                total_pages  = min(math.ceil(total_count / p_page_size), max_pages)
                 all_items: list = list(_jsonpath_get(result, p_list_path) or [])
                 for page_num in range(2, total_pages + 1):
                     page_body = {**(rendered.get("body") or {}), p_page_param: page_num}
