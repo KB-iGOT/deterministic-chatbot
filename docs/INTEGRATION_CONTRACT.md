@@ -21,11 +21,10 @@ GET  /ai-chatbot/v1/sessions/list     ← check if user has an active session
     │
     ├─ session found → GET /ai-chatbot/v1/sessions/history/{id}
     │                      │
-    │                      ├─ messages[] non-empty → render full thread
-    │                      │                         last role:bot entry = current prompt
-    │                      │
-    │                      └─ messages[] empty     → POST /ai-chatbot/v1/sessions/create
-    │                                                (equivalent: user hadn't picked a category yet)
+    │                      └─ messages[] always non-empty → render full thread
+    │                                                        last role:bot entry = current prompt
+    │                         (if user opened but hadn't picked a topic yet, history returns
+    │                          the initial greeting + category menu — same as /sessions/create)
     │
     └─ no session   → POST /ai-chatbot/v1/sessions/create        ← start fresh
                             ↓
@@ -84,8 +83,8 @@ GET  /ai-chatbot/v1/sessions/list     ← check if user has an active session
 | # | Endpoint | When to call |
 |---|----------|-------------|
 | 1 | `GET /ai-chatbot/v1/sessions/list` | On app open — check if the user has an active session |
-| 2a | `GET /ai-chatbot/v1/sessions/history/{id}` | Active session found — load full conversation thread; last role:bot entry = current prompt |
-| 2b | `POST /ai-chatbot/v1/sessions/create` | No active session, or history returned empty (user hadn't picked a topic yet) |
+| 2a | `GET /ai-chatbot/v1/sessions/history/{id}` | Active session found — load full conversation thread; last role:bot entry = current prompt. Always returns at least one bot entry (initial greeting if no topic selected yet). |
+| 2b | `POST /ai-chatbot/v1/sessions/create` | No active session (sessions/list returned null) |
 | 3 | `POST /ai-chatbot/v1/sessions/turn/{id}` | On every user action (button tap, text submit, picker selection) |
 
 The frontend **never** calls Karmayogi, Zoho, OTP, or any other backend service directly. All of that happens server-side.
@@ -100,7 +99,7 @@ The frontend **never** calls Karmayogi, Zoho, OTP, or any other backend service 
 | `POST /sessions/create` | Creates a new conversation — allocates session_id, shows greeting + topic menu |
 | `POST /sessions/turn/{id}` | The main conversation driver — every user tap/input goes here; server runs the flow and returns the next bot activities |
 | `GET /sessions/list` | Cross-device resume — Redis maps user_id → session_id so any device can find the active session without the client storing anything |
-| `GET /sessions/history/{id}` | Resume + full thread — returns every message from start of session. The last role:bot entry is the current prompt. If messages[] is empty the user hadn't picked a topic yet — start a new session instead. |
+| `GET /sessions/history/{id}` | Resume + full thread — returns every message from start of session. The last role:bot entry is the current prompt. Always returns at least one bot entry — if the user opened the chat but hadn't picked a topic yet, returns the initial greeting + category menu (same as /sessions/create). |
 | `GET /admin/sessions/{id}/trace` | Debugging — full node-by-node trace of what the engine did (not yet wired) |
 | `DELETE /admin/sessions/{id}` | DPDP compliance — right-to-erasure, deletes all stored conversation data for a user (not yet wired) |
 

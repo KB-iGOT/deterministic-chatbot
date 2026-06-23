@@ -102,7 +102,7 @@
                 "list"
               ]
             },
-            "description": "Call this first on every app open.\n\n**Response \u2014 session found:**\n```json\n{ \"session_id\": \"<uuid>\", \"status\": \"in_flow\", \"flow_id\": \"AUTO_LOGOUT_CRASH\" }\n```\n\u2192 Call GET /sessions/history/{id} next.\n- messages[] non-empty \u2192 render thread, last role:bot entry = current prompt\n- messages[] empty \u2192 call POST /sessions/create/create instead (user hadn't picked a topic yet)\n\n**Response \u2014 no active session:**\n```json\n{ \"session_id\": null }\n```\n\u2192 Call POST /sessions/create to start fresh.\n\nAlways returns 200 \u2014 never errors. Returns null when Redis is unavailable (safe fallback)."
+            "description": "Call this first on every app open.\n\n**Response \u2014 session found:**\n```json\n{ \"session_id\": \"<uuid>\", \"status\": \"in_flow\", \"flow_id\": \"AUTO_LOGOUT_CRASH\" }\n```\n\u2192 Call GET /sessions/history/{id} next.\n- messages[] always non-empty \u2192 render thread, last role:bot entry = current prompt\n  (if user opened but hadn't picked a topic yet, history returns the initial greeting + category menu)\n\n**Response \u2014 no active session:**\n```json\n{ \"session_id\": null }\n```\n\u2192 Call POST /sessions/create to start fresh.\n\nAlways returns 200 \u2014 never errors. Returns null when Redis is unavailable (safe fallback)."
           },
           "response": []
         },
@@ -201,7 +201,7 @@
                 "{{session_id}}"
               ]
             },
-            "description": "WHY: Returns every user action and bot response from the start of the session \u2014 so the UI can render a full scrollable chat thread, not just the last bot message.\n\n{{session_id}} \u2014 from POST /sessions/create/create response (auto-saved).\n\nResponse: messages[] array in chronological order.\n- role 'bot': render activities[] using the same code as a /turn response\n- role 'user': render text as user bubble\n- Last entry is always role 'bot' \u2014 the current state awaiting input\n\nReturns messages: [] for new sessions before any topic is selected, or sessions started before history tracking was added."
+            "description": "WHY: Returns every user action and bot response from the start of the session \u2014 so the UI can render a full scrollable chat thread, not just the last bot message.\n\n{{session_id}} \u2014 from POST /sessions/create/create response (auto-saved).\n\nResponse: messages[] array in chronological order.\n- role 'bot': render activities[] using the same code as a /turn response\n- role 'user': render text as user bubble\n- Last entry is always role 'bot' \u2014 the current state awaiting input\n\nAlways returns at least one bot entry — if the user opened the chat but had not yet picked a topic, returns the initial greeting + category menu (same as /sessions/create)."
           },
           "response": []
         },

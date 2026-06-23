@@ -818,6 +818,29 @@ async def get_session_history(
     # skipping any LangChain BaseMessage objects stored by the engine internals.
     history_entries = [m for m in raw_messages if isinstance(m, dict) and "role" in m]
     entries = [MessageEntry(**m) for m in history_entries]
+
+    # If history is empty but session is active (user opened popup, no topic selected yet),
+    # return the same initial greeting + category menu that POST /sessions/create sends.
+    # This lets the frontend resume correctly without calling create again.
+    if not entries and session_meta:
+        lang = session_meta.get("language", "en")
+        translation_svc = getattr(request.app.state, "services", {}).get("translation")
+        initial_activities = [
+            Activity.markdown(
+                _sys(request, "greeting",
+                     "👋 Hi! I'm the **iGOT Karmayogi** support assistant.\n\nWhat can I help you with today?")
+            ).model_dump(exclude_none=True),
+            Activity.quick_replies(
+                choices=_category_quick_replies(request)
+            ).model_dump(exclude_none=True),
+        ]
+        initial_activities = await _translate_activities(initial_activities, lang, translation_svc)
+        entries = [MessageEntry(
+            role="bot",
+            activities=initial_activities,
+            ts=sv.get("created_at", datetime.utcnow().isoformat()),
+        )]
+
     return HistoryResponse(session_id=session_id, messages=entries)
 
 
