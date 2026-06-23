@@ -763,6 +763,41 @@ async def get_my_session(
 
 
 
+async def _history_initial_or_empty(
+    request: Request,
+    session_id: UUID,
+    session_meta: dict | None,
+) -> HistoryResponse:
+    """Return synthetic initial activities if session is active, else empty messages.
+
+    Called from all early-return paths in get_session_history so the frontend
+    always gets the greeting + category menu for sessions that exist but have
+    no conversation history yet (user opened popup, no topic selected).
+    """
+    if not session_meta:
+        return HistoryResponse(session_id=session_id, messages=[])
+    lang = session_meta.get("language", "en")
+    translation_svc = getattr(request.app.state, "services", {}).get("translation")
+    initial_activities = [
+        Activity.markdown(
+            _sys(request, "greeting",
+                 "👋 Hi! I'm the **iGOT Karmayogi** support assistant.\n\nWhat can I help you with today?")
+        ).model_dump(exclude_none=True),
+        Activity.quick_replies(
+            choices=_category_quick_replies(request)
+        ).model_dump(exclude_none=True),
+    ]
+    initial_activities = await _translate_activities(initial_activities, lang, translation_svc)
+    return HistoryResponse(
+        session_id=session_id,
+        messages=[MessageEntry(
+            role="bot",
+            activities=initial_activities,
+            ts=datetime.utcnow().isoformat(),
+        )],
+    )
+
+
 @router.get("/sessions/history/{session_id}", response_model=HistoryResponse, tags=["chat"])
 async def get_session_history(
     session_id: UUID,
@@ -793,17 +828,17 @@ async def get_session_history(
     graph = graphs.get(flow_id) if flow_id else (next(iter(graphs.values())) if graphs else None)
 
     if graph is None:
-        return HistoryResponse(session_id=session_id, messages=[])
+        return await _history_initial_or_empty(request, session_id, session_meta)
 
     lg_config = {"configurable": {"thread_id": sid}}
     try:
         snapshot = await graph.aget_state(lg_config)
     except Exception as exc:  # noqa: BLE001
         log.warning("[history] aget_state failed for session=%s: %s", sid, exc)
-        return HistoryResponse(session_id=session_id, messages=[])
+        return await _history_initial_or_empty(request, session_id, session_meta)
 
     if not snapshot or not snapshot.values:
-        return HistoryResponse(session_id=session_id, messages=[])
+        return await _history_initial_or_empty(request, session_id, session_meta)
 
     sv = snapshot.values
 
@@ -819,27 +854,8 @@ async def get_session_history(
     history_entries = [m for m in raw_messages if isinstance(m, dict) and "role" in m]
     entries = [MessageEntry(**m) for m in history_entries]
 
-    # If history is empty but session is active (user opened popup, no topic selected yet),
-    # return the same initial greeting + category menu that POST /sessions/create sends.
-    # This lets the frontend resume correctly without calling create again.
     if not entries and session_meta:
-        lang = session_meta.get("language", "en")
-        translation_svc = getattr(request.app.state, "services", {}).get("translation")
-        initial_activities = [
-            Activity.markdown(
-                _sys(request, "greeting",
-                     "👋 Hi! I'm the **iGOT Karmayogi** support assistant.\n\nWhat can I help you with today?")
-            ).model_dump(exclude_none=True),
-            Activity.quick_replies(
-                choices=_category_quick_replies(request)
-            ).model_dump(exclude_none=True),
-        ]
-        initial_activities = await _translate_activities(initial_activities, lang, translation_svc)
-        entries = [MessageEntry(
-            role="bot",
-            activities=initial_activities,
-            ts=sv.get("created_at", datetime.utcnow().isoformat()),
-        )]
+        return await _history_initial_or_empty(request, session_id, session_meta)
 
     return HistoryResponse(session_id=session_id, messages=entries)
 
