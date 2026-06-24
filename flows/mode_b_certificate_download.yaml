@@ -224,7 +224,7 @@ nodes:
         ⚠️ SCORM resources require a stable internet connection and cannot be completed offline.
 
         Please complete all pending resources and recheck certificate availability after successful course completion.
-    next: c1_resolution_check
+    next: satisfied
 
   - id: c1_in_progress
     type: message
@@ -248,7 +248,7 @@ nodes:
         10. Continue until the course completion reaches **100%**.
 
         Please complete all pending resources and recheck certificate availability after successful course completion.
-    next: c1_resolution_check
+    next: satisfied
 
   # --------------------------------------------------------------------------
   # Satisfaction check — if unresolved, auto-raise ticket
