@@ -98,7 +98,7 @@ nodes:
       edu_qual:      edu_qual_steps
       photo:         profile_photo_steps
       cover:         cover_photo_steps
-      pct:           checking_profile
+      pct:           fetch_user_profile
 
   # ═══════════════════════════════════════════════════════════════════════════
   # §1  NAME UPDATE
@@ -1638,12 +1638,6 @@ nodes:
   # ═══════════════════════════════════════════════════════════════════════════
   # §13  PROFILE COMPLETION % — Fetch + Diagnose
   # ═══════════════════════════════════════════════════════════════════════════
-  - id: checking_profile
-    type: message
-    prompt:
-      text: "Let me check your iGOT profile to see what's incomplete..."
-    next: fetch_user_profile
-
   - id: fetch_user_profile
     type: api_call
     integration: karmayogi
@@ -1654,12 +1648,13 @@ nodes:
     # Paths verified against live UAT API (2026-06-02)
     response_mapping:
       - { from: "$.response.firstName",                               to: collected.first_name }
-      - { from: "$.response.avatar",                                  to: collected.avatar_url }
+      - { from: "$.response.profileDetails.profileImageUrl",          to: collected.avatar_url }
       - { from: "$.response.profileCompletionPercentage",             to: collected.completion_pct }
       - { from: "$.response.profileDetails.verifiedKarmayogi",        to: collected.username_verified }
       - { from: "$.response.profileDetails.profileDesignationStatus", to: collected.designation_status }
       - { from: "$.response.profileDetails.profileGroupStatus",       to: collected.group_status }
       - { from: "$.response.profileDetails.profileBannerUrl",         to: collected.banner_url }
+      - { from: "$.response.profileDetails.employmentDetails.aboutme", to: collected.about_me }
       - { from: "$.response.rootOrgId",                                to: collected.root_org_id }
     on_success: diagnose_missing_fields
     on_error:
@@ -1684,26 +1679,28 @@ nodes:
     type: message
     prompt:
       text: |
-        We checked your profile (currently at **{{ ctx.collected.completion_pct or 0 }}%** completion).
+        We have checked your profile and found that certain details are missing. Please update the following details in your profile to achieve 100% profile completion:
 
-        The following mandatory details appear to be incomplete:
         {% if not ctx.collected.avatar_url %}
-        • **Profile Photo** — not uploaded
+        • **Profile Photo**
         {% endif %}
         {% if not ctx.collected.banner_url %}
-        • **Cover Photo** — not uploaded
+        • **Cover Photo**
         {% endif %}
         {% if ctx.collected.username_verified == 'False' or not ctx.collected.username_verified %}
-        • **Username Verification** — not verified
+        • **Username Verification Tick**
+        {% endif %}
+        {% if not ctx.collected.about_me %}
+        • **About Me**
         {% endif %}
         {% if ctx.collected.designation_status != 'VERIFIED' %}
-        • **Designation** — not set in Primary Details
+        • **Designation**
         {% endif %}
         {% if ctx.collected.group_status != 'VERIFIED' %}
-        • **Group** — not set in Primary Details
+        • **Group**
         {% endif %}
 
-        Please update the missing details to reach 100% profile completion. Which field would you like to fix first?
+        The profile completion percentage will reach 100% only after all mandatory fields are updated. Please update the missing details in your profile to complete it to 100%. Which field would you like to fix first?
     quick_replies:
       - { id: photo,       label: "📷 Profile Photo" }
       - { id: cover,       label: "🖼️ Cover Photo" }
