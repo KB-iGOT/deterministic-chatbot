@@ -2,7 +2,9 @@
 
 **Audience:** Web / mobile frontend developers integrating the iGOT Deterministic Chatbot chat widget into the iGOT Karmayogi portal.  
 **Base URL:** Configured per environment (see §12).  
-**Auth:** Every request requires `x-authenticated-user-token: <keycloak_jwt>` — the user's live Keycloak session token.
+**Auth:** Every request requires two headers:
+- `x-authenticated-user-token: <keycloak_jwt>` — the user's live Keycloak session token
+- `Authorization: Bearer <kong_jwt>` — Kong API gateway token (required when calling through Kong in dev/UAT/prod)
 
 ---
 
@@ -19,15 +21,18 @@ GET  /ai-chatbot/v1/sessions/list     ← check if user has an active session
     │
     ├─ session found → GET /ai-chatbot/v1/sessions/history/{id}
     │                      │
-    │                      ├─ messages[] non-empty → render full thread
-    │                      │                         last role:bot entry = current prompt
-    │                      │
-    │                      └─ messages[] empty     → POST /ai-chatbot/v1/sessions/create
-    │                                                (equivalent: user hadn't picked a topic yet)
+    │                      └─ messages[] always non-empty → render full thread
+    │                                                        last role:bot entry = current prompt
+    │                         (if user opened but hadn't picked a topic yet, history returns
+    │                          the initial greeting + category menu — same as /sessions/create)
     │
     └─ no session   → POST /ai-chatbot/v1/sessions/create        ← start fresh
                             ↓
-              POST /ai-chatbot/v1/sessions/turn/{id}       ← one call per user action
+              POST /ai-chatbot/v1/sessions/turn/{id}   ← user picks a category (5 buttons)
+                            ↓
+              POST /ai-chatbot/v1/sessions/turn/{id}   ← user picks a flow within the category
+                            ↓
+              POST /ai-chatbot/v1/sessions/turn/{id}   ← one call per subsequent user action
               (repeat until response contains type:"end")
 ```
 
@@ -50,7 +55,7 @@ GET  /ai-chatbot/v1/sessions/list     ← check if user has an active session
 10. [Complete Worked Examples (curl)](#10-complete-worked-examples-curl)
 11. [Multi-language Support](#11-multi-language-support)
 12. [Environments and Base URLs](#12-environments-and-base-urls)
-13. [Endpoints Summary](#13-endpoints-summary)
+13. [API Reference — Per-Endpoint](#13-api-reference)
 14. [Current Limitations](#14-current-limitations)
 
 ---
@@ -66,6 +71,7 @@ GET  /ai-chatbot/v1/sessions/list     ← check if user has an active session
 | # | What you need | Details |
 |---|---------------|---------|
 | 1 | **Keycloak JWT** | The user's live portal session token. Read it from the browser cookie or `localStorage` where the iGOT portal already stores it. Send it as `x-authenticated-user-token` on every request. |
+| 2 | **Kong JWT** | API gateway token required when calling through Kong (dev/UAT/prod). Send it as `Authorization: Bearer <token>`. Not needed for local direct calls. |
 | 2 | **API base URL** | One URL, configured per environment — see §12. Local dev: `http://localhost:8000` |
 | 3 | **Markdown renderer** | Bot messages use bold, italics, bullet lists, and line breaks. Use `react-markdown` (React/Next.js), `marked` (vanilla JS), `flutter_markdown` (Flutter), or equivalent. |
 | 4 | **Session storage** | `localStorage` (web) or secure storage (mobile). You store exactly one value: the `session_id` UUID from the first API call. |
@@ -77,8 +83,8 @@ GET  /ai-chatbot/v1/sessions/list     ← check if user has an active session
 | # | Endpoint | When to call |
 |---|----------|-------------|
 | 1 | `GET /ai-chatbot/v1/sessions/list` | On app open — check if the user has an active session |
-| 2a | `GET /ai-chatbot/v1/sessions/history/{id}` | Active session found — load full conversation thread; last role:bot entry = current prompt |
-| 2b | `POST /ai-chatbot/v1/sessions/create` | No active session, or history returned empty (user hadn't picked a topic yet) |
+| 2a | `GET /ai-chatbot/v1/sessions/history/{id}` | Active session found — load full conversation thread; last role:bot entry = current prompt. Always returns at least one bot entry (initial greeting if no topic selected yet). |
+| 2b | `POST /ai-chatbot/v1/sessions/create` | No active session (sessions/list returned null) |
 | 3 | `POST /ai-chatbot/v1/sessions/turn/{id}` | On every user action (button tap, text submit, picker selection) |
 
 The frontend **never** calls Karmayogi, Zoho, OTP, or any other backend service directly. All of that happens server-side.
@@ -93,7 +99,7 @@ The frontend **never** calls Karmayogi, Zoho, OTP, or any other backend service 
 | `POST /sessions/create` | Creates a new conversation — allocates session_id, shows greeting + topic menu |
 | `POST /sessions/turn/{id}` | The main conversation driver — every user tap/input goes here; server runs the flow and returns the next bot activities |
 | `GET /sessions/list` | Cross-device resume — Redis maps user_id → session_id so any device can find the active session without the client storing anything |
-| `GET /sessions/history/{id}` | Resume + full thread — returns every message from start of session. The last role:bot entry is the current prompt. If messages[] is empty the user hadn't picked a topic yet — start a new session instead. |
+| `GET /sessions/history/{id}` | Resume + full thread — returns every message from start of session. The last role:bot entry is the current prompt. Always returns at least one bot entry — if the user opened the chat but hadn't picked a topic yet, returns the initial greeting + category menu (same as /sessions/create). |
 | `GET /admin/sessions/{id}/trace` | Debugging — full node-by-node trace of what the engine did (not yet wired) |
 | `DELETE /admin/sessions/{id}` | DPDP compliance — right-to-erasure, deletes all stored conversation data for a user (not yet wired) |
 
@@ -251,9 +257,13 @@ Frontend                          iGOT Deterministic Chatbot API
    |                                  |
    |  POST /ai-chatbot/v1/sessions/create             |  ← start a new session
    |  ─────────────────────────────→  |
-   |  ←─────────────────────────────  |  → [markdown greeting, quick_replies (12 topics)]
+   |  ←─────────────────────────────  |  → [markdown greeting, quick_replies (5 categories)]
    |                                  |
-   |  POST /ai-chatbot/v1/sessions/turn/{id}   |  ← user picks topic
+   |  POST /ai-chatbot/v1/sessions/turn/{id}   |  ← user picks a category
+   |  ─────────────────────────────→  |
+   |  ←─────────────────────────────  |  → [markdown, quick_replies (flows in that category)]
+   |                                  |
+   |  POST /ai-chatbot/v1/sessions/turn/{id}   |  ← user picks a flow
    |  ─────────────────────────────→  |
    |  ←─────────────────────────────  |  → [markdown, quick_replies] or [picker] or [input]
    |                                  |
@@ -276,31 +286,35 @@ Frontend                          iGOT Deterministic Chatbot API
 
 ## 2. Authentication
 
-### Header
+Two integration patterns are supported. Choose based on your client type:
+
+### Pattern A — Kong Direct (mobile / backend)
+
+Two headers required on every request:
 
 ```
-x-authenticated-user-token: <value>
+x-authenticated-user-token: <keycloak_jwt>
+Authorization: Bearer <kong_jwt>
 ```
 
-This is the **only** auth header. Do not use `Authorization: Bearer`.
+- `x-authenticated-user-token` — user's Keycloak JWT (extracted from portal session)
+- `Authorization: Bearer` — Kong API gateway JWT
 
-### Production — Keycloak JWT
+The backend extracts `user_id` from the JWT `sub` claim (`f:<federation-id>:<user-uuid>` → last segment).
 
-```bash
-curl -X POST https://igot-chatbot.example.com/ai-chatbot/v1/sessions \
-  -H "Content-Type: application/json" \
-  -H "x-authenticated-user-token: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..." \
-  -d '{"channel": "web", "language": "en"}'
+### Pattern B — UI Proxy (web frontend)
+
+One header only — the browser session cookie:
+
+```
+cookie: connect.sid=<session_cookie>
 ```
 
-The JWT is the user's existing iGOT portal session token — read it from the browser cookie or `localStorage` where the portal already stores it. **The frontend never passes a user ID explicitly** — the backend extracts it from the JWT `sub` claim.
+The proxy resolves the user session internally — no JWT handling needed in the frontend code. Get `connect.sid` from DevTools → Application → Cookies after logging in to the portal.
 
-**JWT claim extraction (server-side):**
-- `sub`: format `f:<federation-id>:<user-uuid>` → last segment is used as `user_id`
-- `user_roles`: array of role strings
-- `channel`, `organisations`: org information for flow routing
+> See §12 for full base URLs and curl examples for each pattern.
 
-### Dev / `AUTH_DISABLED=true`
+### Local dev (`AUTH_DISABLED=true`)
 
 When `AUTH_DISABLED=true` in `.env`, JWT validation is bypassed entirely:
 
@@ -310,8 +324,7 @@ When `AUTH_DISABLED=true` in `.env`, JWT validation is bypassed entirely:
 | Nothing / empty | `IGOT_TEST_USER_ID` from `.env` |
 
 ```bash
-# Dev mode — pass a UUID directly as the token value
-curl -X POST http://localhost:8000/ai-chatbot/v1/sessions \
+curl -X POST http://localhost:8000/ai-chatbot/v1/sessions/create \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{"channel": "web", "language": "en"}'
@@ -341,13 +354,13 @@ POST /ai-chatbot/v1/sessions/create
 | Field | Type | Description |
 |-------|------|-------------|
 | `session_id` | UUID | **Save this immediately to localStorage** — all subsequent turns use it |
-| `activities` | array | Greeting message + topic picker (12 quick-reply buttons) |
+| `activities` | array | Greeting message + category picker (5 quick-reply buttons) |
 | `status` | string | Always `"awaiting_user"` on session start |
 | `flow_id` | null | No flow selected yet |
 | `current_node` | null | No flow running yet |
 
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/create \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{"channel": "web", "language": "en"}'
@@ -364,18 +377,11 @@ curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
     {
       "type": "quick_replies",
       "choices": [
-        { "id": "CERTIFICATE_DOWNLOAD",            "label": "🎓 Certificate issue" },
-        { "id": "ACCESS_REVOKED",                  "label": "🔒 Access revoked" },
-        { "id": "COURSE_PROGRESS_ISSUE",           "label": "📊 Course progress issue" },
-        { "id": "RESOURCE_NOT_OPENING",            "label": "📂 Resource not opening" },
-        { "id": "FEEDBACK_RATING_ISSUE",           "label": "📝 Feedback / Rating issue" },
-        { "id": "PROFILE_VERIFICATION_DESIGNATION","label": "✅ Designation / Group not verified" },
-        { "id": "LEADERBOARD_ISSUE",               "label": "🏆 Leaderboard issue" },
-        { "id": "BULK_PROFILE_UPDATE",             "label": "📋 Bulk profile update" },
-        { "id": "UNENROLL_REQUEST",                "label": "🚫 Unenroll from a course/program/event" },
-        { "id": "WEEKLY_CLAP_ISSUE",               "label": "👏 Weekly clap not updated / reset" },
-        { "id": "DOWNLOAD_REPORT_ISSUE",           "label": "📑 Unable to download report" },
-        { "id": "KARMA_POINTS_ISSUE",              "label": "⭐ Karma points issue" }
+        { "id": "__cat__Profile & User Management",          "label": "Profile & User Management" },
+        { "id": "__cat__Content Related Issue",              "label": "Content Related Issue" },
+        { "id": "__cat__CA/APAR Issue",                      "label": "CA/APAR Issue" },
+        { "id": "__cat__Recognition & Engagement",           "label": "Recognition & Engagement" },
+        { "id": "__cat__Application Crashing / Not Loading", "label": "Application Crashing / Not Loading" }
       ],
       "disable_input": true
     }
@@ -387,7 +393,7 @@ curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
 }
 ```
 
-> **Frontend:** Save `session_id` to localStorage immediately. Use `GET /sessions/list` on next app open to resume. Hide the free-text input box when `disable_input: true` — the user must pick a button.
+> **Frontend:** Save `session_id` to localStorage immediately. The first `quick_replies` shows **5 top-level categories** — `choice_id` values start with `__cat__`. On selection, the server returns the sub-flows for that category. Only in that second `quick_replies` will `choice_id` be a flow ID (e.g. `CERTIFICATE_DOWNLOAD`). Hide the free-text input box when `disable_input: true` — the user must pick a button.
 
 ---
 
@@ -450,14 +456,15 @@ Use when the bot sent a `quick_replies` activity.
 | `choice_id` | string | ✅ | The `id` from the `choices` array in the `quick_replies` activity |
 
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/550e8400.../turn \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/550e8400... \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{"action": "select_choice", "choice_id": "CERTIFICATE_DOWNLOAD"}'
 ```
 
 **Edge cases:**
-- Sending an unknown `choice_id` at the **topic selection** phase → server re-shows the menu with an error message (no error status, HTTP 200)
+- Sending an unknown `choice_id` at the **category selection** phase → server re-shows the 5 category buttons with an error message (HTTP 200)
+- Sending an unknown `choice_id` at the **flow selection** phase (after picking a category) → server re-shows only the sub-flows for the already-selected category (HTTP 200)
 - Sending an unknown `choice_id` inside an active flow → behaviour depends on the node; usually re-prompts
 
 ---
@@ -479,7 +486,7 @@ Use when the bot sent an `input` activity.
 | `text` | string | ✅ | User-entered text. Validated server-side for email/date formats when `validate_regex` is set in the `input` activity. |
 
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/550e8400.../turn \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/550e8400... \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{"action": "send_message", "text": "user.name@nic.gov.in"}'
@@ -515,7 +522,7 @@ Use when the bot sent a `picker` activity.
 | `item_label` | string | ✅ | The `label` from the chosen `items[]` entry — used in ticket summaries |
 
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/550e8400.../turn \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/550e8400... \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{
@@ -549,7 +556,7 @@ Use when the bot sent a `picker` activity that has `other_option` set, and the u
 | `other_query` | string | ✅ | Free text the user typed |
 
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/550e8400.../turn \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/550e8400... \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{"action": "request_other", "other_query": "My ministry is not listed"}'
@@ -568,7 +575,7 @@ Rarely needed. Equivalent to starting a new session. Use when the user clicks "S
 ```
 
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/550e8400.../turn \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/550e8400... \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{"action": "start"}'
@@ -686,6 +693,7 @@ Same fields as `markdown` but render as plain text — no Markdown parsing.
   "picker_id": "course_picker",
   "placeholder": "Search your course...",
   "search_enabled": true,
+  "total_items": 42,
   "items": [
     {
       "id": "do_1141985687873863681190",
@@ -712,7 +720,8 @@ Same fields as `markdown` but render as plain text — no Markdown parsing.
 | `picker_id` | string | ✅ | Send back in `pick_item.picker_id` |
 | `placeholder` | string | ✅ | Search box hint text |
 | `search_enabled` | bool | ✅ | Show search/filter input if true |
-| `items` | array | ✅ | List of selectable items |
+| `total_items` | integer | ✅ | Total number of items available (before pagination). Use this to show a count badge or pre-emptively detect an empty state. Always ≥ 0; `items[]` may be a page-sized slice. |
+| `items` | array | ✅ | List of selectable items (may be paginated) |
 | `items[].id` | string | ✅ | Internal identifier — send back as `item_id` |
 | `items[].label` | string | ✅ | Primary display text |
 | `items[].meta` | string \| null | ❌ | Sub-label (status, date, progress) |
@@ -721,7 +730,7 @@ Same fields as `markdown` but render as plain text — no Markdown parsing.
 | `other_option.label` | string | ✅ if present | Display text for the "other" option |
 | `disable_input` | bool | ❌ (default true) | Almost always true — user must pick from the list |
 
-**Empty picker:** If `items` is empty and `other_option` is set, only the "other" option is shown. The flow falls back gracefully.
+**Empty state:** When a dynamic picker would have zero items, the server routes to a message node instead — you will **never** receive a `picker` activity with `items: []`. The `total_items` field therefore always reflects the count of a non-empty list. You do not need to handle the zero-item picker case in the UI.
 
 **On selection → send `pick_item`:**
 ```json
@@ -827,6 +836,15 @@ Every turn response (both `StartSessionResponse` and `TurnResponse`) shares thes
 | `ended` | Flow ended — generic | Show neutral banner |
 | `error` | Something went wrong | Show error state with retry option |
 
+**Internal session statuses** (returned by `GET /sessions/list`, not in turn responses):
+
+| `status` | Meaning |
+|----------|---------|
+| `selecting_category` | User is on the top-level category menu |
+| `selecting_topic` | User has picked a category and is on the sub-flow menu |
+| `in_flow` | A flow is actively running |
+| `done` | Session has ended |
+
 ---
 
 ## 7. Error Responses
@@ -864,7 +882,7 @@ All errors follow standard HTTP + JSON pattern:
 
 **Example 401:**
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/create \
   -H "Content-Type: application/json" \
   -d '{"channel": "web", "language": "en"}'
 # → HTTP 401
@@ -873,7 +891,7 @@ curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
 
 **Example 404 (expired session):**
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/nonexistent-uuid/turn \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/nonexistent-uuid \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{"action": "select_choice", "choice_id": "course"}'
@@ -885,35 +903,31 @@ curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/nonexistent-uuid/tu
 
 ## 8. Edge Cases and Guardrails
 
-### Unknown topic at menu
+### Unknown selection at category or flow menu
 
-If the user sends a `choice_id` that doesn't match any active flow:
+The menu is two-level. Invalid selections are handled per level:
 
+**Invalid category** (session is at `selecting_category` phase):
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/$SID/turn \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/$SID \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
-  -d '{"action": "select_choice", "choice_id": "INVALID_FLOW"}'
+  -d '{"action": "select_choice", "choice_id": "BOGUS"}'
 ```
+Response: 5 category buttons re-shown.
 
-Response (HTTP 200 — not an error):
-```json
-{
-  "activities": [
-    { "type": "markdown", "content": "🤔 I didn't catch that — please choose one of the options below." },
-    { "type": "quick_replies", "choices": [...menu again...], "disable_input": true }
-  ],
-  "status": "awaiting_user",
-  "flow_id": null
-}
+**Invalid flow** (session is at `selecting_topic` phase, user already picked a category):
+```bash
+-d '{"action": "select_choice", "choice_id": "BOGUS_FLOW"}'
 ```
+Response: only the sub-flows for the already-selected category are re-shown — not all 16 flows, not the top categories.
 
-The menu is re-shown. Do not treat this as an error.
+Both cases return HTTP 200 — not an error. Do not treat as an error.
 
 ### Validation failure on text input
 
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/$SID/turn \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/$SID \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{"action": "send_message", "text": "not-an-email"}'
@@ -1012,10 +1026,10 @@ curl http://localhost:8000/ai-chatbot/v1/sessions/list \
 { "session_id": null }
 ```
 
-When `session_id` is returned, call `GET /ai-chatbot/v1/sessions/{id}` to restore the conversation:
+When `session_id` is returned, call `GET /ai-chatbot/v1/sessions/history/{id}` to restore the conversation:
 
 ```bash
-curl http://localhost:8000/ai-chatbot/v1/sessions/550e8400-e29b-41d4-a716-446655440000 \
+curl http://localhost:8000/ai-chatbot/v1/sessions/history/550e8400-e29b-41d4-a716-446655440000 \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001"
 ```
 
@@ -1034,7 +1048,7 @@ TTL resets on every user turn. After expiry, `GET /sessions/list` returns `null`
 ### Starting fresh
 
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/create \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: <token>" \
   -d '{"channel": "web", "language": "en"}'
@@ -1116,7 +1130,7 @@ TOKEN=00000000-0000-0000-0000-000000000001   # dev mode: pass UUID directly as t
 #### Step 1 — Start a session
 
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/create \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{"channel": "web", "language": "en"}'
@@ -1141,14 +1155,49 @@ curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
 ```
 
 📋 **Copy:** `session_id` → use it as `{session_id}` in every subsequent request.  
-👀 **Look at:** `quick_replies.choices[].id` — these are the valid `choice_id` values for Step 2.
+👀 **Look at:** `quick_replies.choices[].id` — these are the 5 category buttons. Step 2 picks one.
 
 ---
 
-#### Step 2 — Select topic: CERTIFICATE_DOWNLOAD
+#### Step 2 — Select category: Content Related Issue
 
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/550e8400-e29b-41d4-a716-446655440000/turn \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Content-Type: application/json" \
+  -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
+  -d '{"action": "select_choice", "choice_id": "__cat__Content Related Issue"}'
+```
+
+**Response:**
+```json
+{
+  "session_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "awaiting_user",
+  "flow_id": null,
+  "current_node": null,
+  "activities": [
+    { "type": "markdown", "content": "Please choose the specific issue you're facing:" },
+    { "type": "quick_replies", "disable_input": true, "choices": [
+        { "id": "CERTIFICATE_DOWNLOAD",  "label": "🎓 Certificate issue" },
+        { "id": "COURSE_PROGRESS_ISSUE", "label": "📊 Course progress issue" },
+        { "id": "RESOURCE_NOT_OPENING",  "label": "📂 Resource not opening" },
+        { "id": "FEEDBACK_RATING_ISSUE", "label": "📝 Feedback / Rating issue" },
+        { "id": "FIND_COURSE",           "label": "🔍 Can't find a course or event" },
+        { "id": "UNENROLL_REQUEST",      "label": "🚫 Unenroll from a course/program/event" }
+      ]
+    }
+  ]
+}
+```
+
+👀 **Look at:** sub-flow `choices[].id` — these are now flow IDs. Step 3 picks one.
+
+---
+
+#### Step 3 — Select flow: CERTIFICATE_DOWNLOAD
+
+```bash
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/550e8400-e29b-41d4-a716-446655440000 \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{"action": "select_choice", "choice_id": "CERTIFICATE_DOWNLOAD"}'
@@ -1172,14 +1221,14 @@ curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/550e8400-e29b-41d4-
 }
 ```
 
-👀 **Look at:** the new `quick_replies.choices[].id` values — pass one as `choice_id` in Step 3.
+👀 **Look at:** the new `quick_replies.choices[].id` values — pass one as `choice_id` in Step 4.
 
 ---
 
-#### Step 3 — Pick certificate type: course
+#### Step 4 — Pick certificate type: course
 
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/550e8400-e29b-41d4-a716-446655440000/turn \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/550e8400-e29b-41d4-a716-446655440000 \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{"action": "select_choice", "choice_id": "course"}'
@@ -1205,14 +1254,14 @@ curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/550e8400-e29b-41d4-
 }
 ```
 
-📋 **Copy from `items[]`:** the `id` and `label` of the course you want to select → use them in Step 4.
+📋 **Copy from `items[]`:** the `id` and `label` of the course you want to select → use them in Step 5.
 
 ---
 
-#### Step 4 — Pick a course from the picker
+#### Step 5 — Pick a course from the picker
 
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/550e8400-e29b-41d4-a716-446655440000/turn \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/550e8400-e29b-41d4-a716-446655440000 \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{
@@ -1239,14 +1288,14 @@ curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/550e8400-e29b-41d4-
 }
 ```
 
-👀 **Look at:** the two `choice_id` options. Pick `yes_resolved` (Step 5a) or `no_still_issue` (Step 5b).
+👀 **Look at:** the two `choice_id` options. Pick `yes_resolved` (Step 6a) or `no_still_issue` (Step 6b).
 
 ---
 
-#### Step 5 — Confirm resolved
+#### Step 6 — Confirm resolved
 
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/550e8400-e29b-41d4-a716-446655440000/turn \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/550e8400-e29b-41d4-a716-446655440000 \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{"action": "select_choice", "choice_id": "yes_resolved"}'
@@ -1274,7 +1323,7 @@ curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/550e8400-e29b-41d4-
 #### Step 1 — Start session
 
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/create \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{"channel": "web", "language": "en"}'
@@ -1284,7 +1333,20 @@ curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
 
 ---
 
-#### Step 2 — Select topic: ACCESS_REVOKED
+#### Step 2 — Select category: Profile & User Management
+
+```bash
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/{session_id} \
+  -H "Content-Type: application/json" \
+  -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
+  -d '{"action": "select_choice", "choice_id": "__cat__Profile & User Management"}'
+```
+
+**Response:** sub-flow menu with Access revoked, Profile verification, etc.
+
+---
+
+#### Step 3 — Select flow: ACCESS_REVOKED
 
 ```bash
 curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/{session_id} \
@@ -1310,11 +1372,11 @@ curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/{session_id} \
 }
 ```
 
-👀 **Look at:** `quick_replies.choices[].id` — pick the relevant role for Step 3.
+👀 **Look at:** `quick_replies.choices[].id` — pick the relevant role for Step 4.
 
 ---
 
-#### Step 3 — Select role
+#### Step 4 — Select role
 
 ```bash
 curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/{session_id} \
@@ -1345,7 +1407,7 @@ Continue sending `select_choice` based on `quick_replies.choices` in each respon
 #### Step 1 — Start session
 
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/create \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{"channel": "web", "language": "en"}'
@@ -1355,33 +1417,32 @@ curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
 
 ---
 
-#### Step 2 — Send a garbage choice_id
+#### Step 2 — Send a garbage choice_id (category phase)
 
 ```bash
 curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/{session_id} \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
-  -d '{"action": "select_choice", "choice_id": "BOGUS_FLOW_ID"}'
+  -d '{"action": "select_choice", "choice_id": "BOGUS"}'
 ```
 
-**Response (HTTP 200 — not an error):**
-```json
-{
-  "status": "awaiting_user",
-  "flow_id": null,
-  "current_node": null,
-  "activities": [
-    { "type": "markdown", "content": "🤔 I didn't catch that — please choose one of the options below." },
-    { "type": "quick_replies", "disable_input": true, "choices": [
-        { "id": "CERTIFICATE_DOWNLOAD", "label": "🎓 Certificate issue" },
-        { "id": "ACCESS_REVOKED",        "label": "🔒 Access revoked" }
-      ]
-    }
-  ]
-}
+**Response (HTTP 200 — not an error):** 5 category buttons re-shown.
+
+---
+
+#### Step 3 — Pick a valid category, then send a garbage flow choice_id
+
+```bash
+# First pick a category
+curl ... -d '{"action": "select_choice", "choice_id": "__cat__CA/APAR Issue"}'
+
+# Then send a bad flow id
+curl ... -d '{"action": "select_choice", "choice_id": "BOGUS_FLOW"}'
 ```
 
-The server re-shows the full topic menu. **Do not treat this as an error** — just re-render the menu.
+**Response:** Only the CA/APAR Issue sub-flows are re-shown (not all flows, not top categories).
+
+**Do not treat either case as an error** — just re-render what the server returns.
 
 ---
 
@@ -1390,7 +1451,7 @@ The server re-shows the full topic menu. **Do not treat this as an error** — j
 #### Step 1 — Start session in Hindi
 
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/create \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{"channel": "web", "language": "hi"}'
@@ -1433,7 +1494,7 @@ curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/{session_id} \
 #### Step 1 — Start session
 
 ```bash
-curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/create \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
   -d '{"channel": "web", "language": "en"}'
@@ -1443,13 +1504,20 @@ curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions \
 
 ---
 
-#### Step 2 — Select BULK_PROFILE_UPDATE (flow that asks for email)
+#### Step 2 — Select category, then a flow that asks for email (e.g. COURSE_PROGRESS_ISSUE)
 
 ```bash
+# Pick category
 curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/{session_id} \
   -H "Content-Type: application/json" \
   -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
-  -d '{"action": "select_choice", "choice_id": "BULK_PROFILE_UPDATE"}'
+  -d '{"action": "select_choice", "choice_id": "__cat__Content Related Issue"}'
+
+# Pick flow
+curl -s -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/{session_id} \
+  -H "Content-Type: application/json" \
+  -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
+  -d '{"action": "select_choice", "choice_id": "COURSE_PROGRESS_ISSUE"}'
 ```
 
 **Response:**
@@ -1535,44 +1603,504 @@ All bot messages in `activities` will be in the requested language.
 
 ## 12. Environments and Base URLs
 
-| Environment | Base URL | Auth |
-|-------------|----------|------|
-| Local dev | `http://localhost:8000` | `AUTH_DISABLED=true` → pass UUID as token |
-| UAT | `https://igot-chatbot-uat.karmayogibharat.net` | Real Keycloak JWT required |
-| Production | `https://igot-chatbot.igotkarmayogi.gov.in` | Real Keycloak JWT required |
+There are two ways to call the chatbot API depending on your integration type:
 
-**Keycloak hosts:**
+### Option A — Kong Direct (mobile / backend)
 
-| Env | Keycloak issuer |
-|-----|----------------|
-| UAT | `https://portal.uat.karmayogibharat.net/auth/realms/sunbird` |
-| Production | `https://portal.igotkarmayogi.gov.in/auth/realms/sunbird` |
+Two auth headers required on every request:
 
-The JWT `iss` claim must match the configured `KEYCLOAK_HOST` — mismatches cause `401`.
+| Header | Value |
+|--------|-------|
+| `x-authenticated-user-token` | Keycloak JWT (user's portal session token) |
+| `Authorization` | `Bearer <kong-jwt>` (API gateway token) |
+
+| Environment | Base URL |
+|-------------|----------|
+| Local dev | `http://localhost:8000/ai-chatbot/v1` |
+| Dev | `https://portal.dev.karmayogibharat.net/api/ai/chatbot/v1` |
+
+```bash
+curl -X POST https://portal.dev.karmayogibharat.net/api/ai/chatbot/v1/sessions/create \
+  -H "Content-Type: application/json" \
+  -H "x-authenticated-user-token: <keycloak-jwt>" \
+  -H "Authorization: Bearer <kong-jwt>" \
+  -d '{"channel": "web", "language": "en"}'
+```
 
 ---
 
-## 13. Endpoints Summary
+### Option B — UI Proxy (web frontend)
 
-| Method | Path | Auth | Purpose |
-|--------|------|------|---------|
-| `GET` | `/health` | None | Liveness check |
-| `POST` | `/ai-chatbot/v1/sessions` | JWT | Start a new session |
-| `POST` | `/ai-chatbot/v1/sessions/turn/{id}` | JWT | Send user action, get bot activities |
-| `GET` | `/ai-chatbot/v1/sessions/list` | JWT | Get caller's active session ID (Redis lookup) |
-| `GET` | `/ai-chatbot/v1/sessions/history/{id}` | JWT | Full conversation history + resume (last role:bot entry = current prompt) |
-| `GET` | `/ai-chatbot/v1/admin/sessions/{id}/trace` | JWT | Full conversation trace *(not yet wired)* |
-| `DELETE` | `/ai-chatbot/v1/admin/sessions/{id}` | JWT | DPDP data deletion *(not yet wired)* |
-| `GET` | `/docs` | None | OpenAPI / Swagger UI |
+**Recommended for web team.** Auth is handled automatically via the browser session cookie — no JWT setup needed. The portal proxy resolves the session and forwards requests to the chatbot service internally.
 
-### `/health`
+Only one header required:
+
+| Header | Value |
+|--------|-------|
+| `cookie` | `connect.sid=<session_cookie>` |
+
+**How to get the cookie:**
+1. Open the portal in Chrome and log in
+2. DevTools → Application → Cookies → find `connect.sid`
+3. Copy the value
+
+| Environment | Base URL |
+|-------------|----------|
+| Dev | `https://portal.dev.karmayogibharat.net/apis/proxies/v8/ai/chatbot/v1` |
+| UAT | `https://portal.uat.karmayogibharat.net/apis/proxies/v8/ai/chatbot/v1` |
+
+```bash
+# Create session via UI proxy
+curl -X POST https://portal.dev.karmayogibharat.net/apis/proxies/v8/ai/chatbot/v1/sessions/create \
+  -H "Content-Type: application/json" \
+  -H "cookie: connect.sid=<session_cookie>" \
+  -d '{"channel": "web", "language": "en"}'
+
+# Send a turn
+curl -X POST https://portal.dev.karmayogibharat.net/apis/proxies/v8/ai/chatbot/v1/sessions/turn/<session_id> \
+  -H "Content-Type: application/json" \
+  -H "cookie: connect.sid=<session_cookie>" \
+  -d '{"action": "select_choice", "choice_id": "AUTO_LOGOUT_CRASH", "user_says": "Auto logout / App crash"}'
+```
+
+> **Postman:** Use the `iGOT_Chatbot_WebProxy_API` collection — it has `session_cookie` as a collection variable and all requests pre-configured for the proxy.
+
+---
+
+### Local dev (`AUTH_DISABLED=true`)
+
+No Kong, no cookie. Pass any UUID as `x-authenticated-user-token`:
+
+```bash
+curl -X POST http://localhost:8000/ai-chatbot/v1/sessions/create \
+  -H "Content-Type: application/json" \
+  -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
+  -d '{"channel": "web", "language": "en"}'
+```
+
+---
+
+## 13. API Reference
+
+Complete parameter reference for every endpoint. Each section shows exactly what to send and what you get back.
+
+**All paths are relative to your base URL.** See §12 for base URLs per environment.
+
+**Auth headers at a glance:**
+
+| | Local dev | Kong (dev/UAT) | UI Proxy (web) |
+|--|-----------|----------------|----------------|
+| `Content-Type` | `application/json` | `application/json` | `application/json` |
+| `x-authenticated-user-token` | Any UUID | Keycloak JWT | ❌ Not needed |
+| `Authorization` | ❌ Not needed | `Bearer <kong_jwt>` | ❌ Not needed |
+| `cookie` | ❌ Not needed | ❌ Not needed | `connect.sid=<value>` |
+
+---
+
+### Health check
+
+`GET /health`
+
+No auth required. Returns `{"status": "ok"}` when the server is running. Use for uptime monitoring / k8s liveness probes.
 
 ```bash
 curl http://localhost:8000/health
 # → {"status": "ok"}
 ```
 
-No authentication required. Use for uptime monitoring.
+---
+
+### 1. Start a new session
+
+`POST /ai-chatbot/v1/sessions/create`
+
+**What it does:** Creates a conversation, saves it in Redis, and returns the greeting message + category menu (5 buttons). The user must first pick a category, then pick the specific flow from the sub-menu shown in the next turn.
+
+**When to call:** On app/page open when no active session exists, or when the user taps "Start over".
+
+**Request body:**
+
+| Field | Type | Required? | Default | Allowed values | Description |
+|-------|------|-----------|---------|----------------|-------------|
+| `channel` | string | Optional | `"web"` | `"web"`, `"mobile"`, `"whatsapp"`, `"voice"` | Where the user is accessing from. Affects session TTL (WhatsApp gets 24h instead of 30 min). |
+| `language` | string | Optional | `"en"` | Any BCP-47 code: `"en"`, `"hi"`, etc. | Language for all bot messages in this session. |
+
+**Response fields:**
+
+| Field | Type | Always present? | Description |
+|-------|------|-----------------|-------------|
+| `session_id` | UUID string | ✅ | **Save this immediately.** Pass it in every turn and history call. |
+| `activities` | array | ✅ | Bot messages to render. Always contains one `markdown` greeting + one `quick_replies` topic menu. |
+| `status` | string | ✅ | Always `"awaiting_user"` on session start. |
+| `flow_id` | null | ✅ | Always `null` — no topic selected yet. |
+| `current_node` | null | ✅ | Always `null` — no flow running yet. |
+| `ticket_id` | null | ✅ | Always `null` — no ticket raised yet. |
+
+**Curl — local dev:**
+```bash
+curl -X POST http://localhost:8000/ai-chatbot/v1/sessions/create \
+  -H "Content-Type: application/json" \
+  -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
+  -d '{"channel": "web", "language": "en"}'
+```
+
+**Curl — Kong (dev):**
+```bash
+curl -X POST https://portal.dev.karmayogibharat.net/api/ai/chatbot/v1/sessions/create \
+  -H "Content-Type: application/json" \
+  -H "x-authenticated-user-token: <keycloak-jwt>" \
+  -H "Authorization: Bearer <kong-jwt>" \
+  -d '{"channel": "web", "language": "en"}'
+```
+
+**Curl — UI Proxy (web dev):**
+```bash
+curl -X POST https://portal.dev.karmayogibharat.net/apis/proxies/v8/ai/chatbot/v1/sessions/create \
+  -H "Content-Type: application/json" \
+  -H "cookie: connect.sid=<your-cookie>" \
+  -d '{"channel": "web", "language": "en"}'
+```
+
+**Example response:**
+```json
+{
+  "session_id": "550e8400-e29b-41d4-a716-446655440000",
+  "activities": [
+    {
+      "type": "markdown",
+      "content": "👋 Hi! I'm the **iGOT Karmayogi** support assistant.\n\nWhat can I help you with today?",
+      "disable_input": false
+    },
+    {
+      "type": "quick_replies",
+      "choices": [
+        { "id": "__cat__Profile & User Management",          "label": "Profile & User Management" },
+        { "id": "__cat__Content Related Issue",              "label": "Content Related Issue" },
+        { "id": "__cat__CA/APAR Issue",                      "label": "CA/APAR Issue" },
+        { "id": "__cat__Recognition & Engagement",           "label": "Recognition & Engagement" },
+        { "id": "__cat__Application Crashing / Not Loading", "label": "Application Crashing / Not Loading" }
+      ],
+      "disable_input": true
+    }
+  ],
+  "status": "awaiting_user",
+  "flow_id": null,
+  "current_node": null,
+  "ticket_id": null
+}
+```
+
+> **Next step:** copy `session_id` and store it in `localStorage`. The first turn must send one of the `__cat__*` category `choice_id` values. The server will respond with the sub-flows for that category.
+
+---
+
+### 2. Check for an active session
+
+`GET /ai-chatbot/v1/sessions/list`
+
+**What it does:** Looks up whether the current user already has an active session in Redis. Returns the `session_id` if found, or `null` if not.
+
+**When to call:** On every app open / page load — before deciding whether to resume or start fresh.
+
+**Request body:** None (GET request).
+
+**Path parameters:** None.
+
+**Response fields:**
+
+| Field | Type | Always present? | Description |
+|-------|------|-----------------|-------------|
+| `session_id` | UUID or `null` | ✅ | The active session UUID. `null` when no active session, session expired, or Redis is unavailable. |
+| `status` | string or `null` | Optional | Current session status, e.g. `"in_flow"` or `"selecting_topic"`. Only present when session exists and server has it in memory. |
+| `flow_id` | string or `null` | Optional | The flow currently in progress, e.g. `"CERTIFICATE_DOWNLOAD"`. Only present when a flow is running. |
+
+**What to do with the response:**
+
+| `session_id` value | What to do next |
+|-------------------|-----------------|
+| A UUID | Call `GET /sessions/history/{session_id}` to load the conversation thread, then continue sending turns. |
+| `null` | Call `POST /sessions/create` to start a new session. |
+
+**Curl — local dev:**
+```bash
+curl http://localhost:8000/ai-chatbot/v1/sessions/list \
+  -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001"
+```
+
+**Curl — Kong (dev):**
+```bash
+curl https://portal.dev.karmayogibharat.net/api/ai/chatbot/v1/sessions/list \
+  -H "x-authenticated-user-token: <keycloak-jwt>" \
+  -H "Authorization: Bearer <kong-jwt>"
+```
+
+**Curl — UI Proxy (web dev):**
+```bash
+curl https://portal.dev.karmayogibharat.net/apis/proxies/v8/ai/chatbot/v1/sessions/list \
+  -H "cookie: connect.sid=<your-cookie>"
+```
+
+**Example response — active session exists:**
+```json
+{
+  "session_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "in_flow",
+  "flow_id": "CERTIFICATE_DOWNLOAD"
+}
+```
+
+**Example response — no active session:**
+```json
+{
+  "session_id": null
+}
+```
+
+---
+
+### 3. Send a user action (turn)
+
+`POST /ai-chatbot/v1/sessions/turn/{session_id}`
+
+**What it does:** Sends the user's action (button tap, typed message, or picker selection) to the bot and returns the next set of messages. This is the main call you repeat in a loop until the conversation ends.
+
+**When to call:** Every time the user does something — taps a button, types text, picks from a list.
+
+**Path parameters:**
+
+| Parameter | Type | Required? | Description |
+|-----------|------|-----------|-------------|
+| `session_id` | UUID | ✅ | The session UUID returned by `POST /sessions/create`. |
+
+**Request body:**
+
+The `action` field is always required. The other fields depend on what action you're sending:
+
+| Field | Type | Required? | Used with action | Description |
+|-------|------|-----------|-----------------|-------------|
+| `action` | string | ✅ Always | All | Type of action. Must be one of the values below. |
+| `choice_id` | string | ✅ | `select_choice` | The `id` from `quick_replies.choices[]` that the user tapped. Never the `label` — always the `id`. |
+| `user_says` | string | Optional | `select_choice` | Human-readable label for history display (e.g. `"Certificate issue"`). Not used by the engine. |
+| `text` | string | ✅ | `send_message` | The text the user typed in the input box. |
+| `picker_id` | string | ✅ | `pick_item` | The `picker_id` from the `picker` activity (e.g. `"course_picker"`). |
+| `item_id` | string | ✅ | `pick_item` | The `id` of the item the user tapped in the picker list. |
+| `item_label` | string | ✅ | `pick_item` | The `label` of the selected item. Used in ticket summaries — must match what was shown. |
+| `other_query` | string | ✅ | `request_other` | Free text the user typed after tapping the "My item isn't listed" / "Other" button. |
+
+**Allowed `action` values and when to use each:**
+
+| `action` value | When to send it | What the bot just showed you |
+|---------------|-----------------|------------------------------|
+| `"select_choice"` | User tapped a button | A `quick_replies` activity |
+| `"send_message"` | User typed and submitted text | An `input` activity |
+| `"pick_item"` | User selected an item from a list | A `picker` activity |
+| `"request_other"` | User tapped "My item isn't listed" and typed text | A `picker` activity with `other_option` |
+| `"start"` | User wants to restart from the top menu | Any point in the conversation |
+
+**Request body examples:**
+
+```json
+// Button tap (select_choice)
+{ "action": "select_choice", "choice_id": "CERTIFICATE_DOWNLOAD" }
+
+// Text input (send_message)
+{ "action": "send_message", "text": "admin@example.gov.in" }
+
+// Picker selection (pick_item)
+{
+  "action": "pick_item",
+  "picker_id": "course_picker",
+  "item_id": "do_1141985687873863681190",
+  "item_label": "Foundation Course on AI"
+}
+
+// "Other" free text (request_other)
+{ "action": "request_other", "other_query": "My ministry is not in the list" }
+```
+
+**Response fields:**
+
+| Field | Type | Always present? | Description |
+|-------|------|-----------------|-------------|
+| `session_id` | UUID | ✅ | Same session UUID — useful for confirming you got the right response. |
+| `activities` | array | ✅ | One or more bot activities to render in order (see §5 for all types). |
+| `status` | string | ✅ | Current conversation state. See status table in §6. |
+| `flow_id` | string or `null` | ✅ | Active flow ID (e.g. `"CERTIFICATE_DOWNLOAD"`), `null` before topic selection. |
+| `current_node` | string or `null` | ✅ | Internal YAML node ID — useful for debugging, not for displaying to users. |
+| `ticket_id` | string or `null` | ✅ | Zoho Desk ticket ID. Only set when `status = "ticket_raised"`. Show this in the UI. |
+
+**Curl — local dev:**
+```bash
+# Button tap
+curl -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Content-Type: application/json" \
+  -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
+  -d '{"action": "select_choice", "choice_id": "CERTIFICATE_DOWNLOAD"}'
+
+# Text input
+curl -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Content-Type: application/json" \
+  -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
+  -d '{"action": "send_message", "text": "admin@example.gov.in"}'
+
+# Picker selection
+curl -X POST http://localhost:8000/ai-chatbot/v1/sessions/turn/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Content-Type: application/json" \
+  -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001" \
+  -d '{"action": "pick_item", "picker_id": "course_picker", "item_id": "do_1141985687873863681190", "item_label": "Foundation Course on AI"}'
+```
+
+**Curl — Kong (dev):**
+```bash
+curl -X POST https://portal.dev.karmayogibharat.net/api/ai/chatbot/v1/sessions/turn/<session_id> \
+  -H "Content-Type: application/json" \
+  -H "x-authenticated-user-token: <keycloak-jwt>" \
+  -H "Authorization: Bearer <kong-jwt>" \
+  -d '{"action": "select_choice", "choice_id": "CERTIFICATE_DOWNLOAD"}'
+```
+
+**Curl — UI Proxy (web dev):**
+```bash
+curl -X POST https://portal.dev.karmayogibharat.net/apis/proxies/v8/ai/chatbot/v1/sessions/turn/<session_id> \
+  -H "Content-Type: application/json" \
+  -H "cookie: connect.sid=<your-cookie>" \
+  -d '{"action": "select_choice", "choice_id": "CERTIFICATE_DOWNLOAD"}'
+```
+
+**Example response — conversation continuing:**
+```json
+{
+  "session_id": "550e8400-e29b-41d4-a716-446655440000",
+  "activities": [
+    { "type": "markdown", "content": "Which type of certificate?" },
+    {
+      "type": "quick_replies",
+      "choices": [
+        { "id": "course", "label": "Course certificate" },
+        { "id": "event",  "label": "Event certificate" }
+      ],
+      "disable_input": true
+    }
+  ],
+  "status": "awaiting_user",
+  "flow_id": "CERTIFICATE_DOWNLOAD",
+  "current_node": "ask_cert_type",
+  "ticket_id": null
+}
+```
+
+**Example response — conversation complete (ticket raised):**
+```json
+{
+  "session_id": "550e8400-e29b-41d4-a716-446655440000",
+  "activities": [
+    { "type": "markdown", "content": "✅ Ticket #12345678 raised. L2 team will reach out within 2 business days." },
+    { "type": "end", "outcome": "ticket_raised", "content": "Your ticket has been raised." }
+  ],
+  "status": "ticket_raised",
+  "flow_id": "ACCESS_REVOKED",
+  "current_node": null,
+  "ticket_id": "12345678"
+}
+```
+
+> **When you see `type: "end"` in `activities[]`** — the conversation is over. Show the outcome banner, show a "Start new conversation" button, and stop sending turns to this session.
+
+---
+
+### 4. Get conversation history
+
+`GET /ai-chatbot/v1/sessions/history/{session_id}`
+
+**What it does:** Returns every message in the session from start to the current state, in chronological order. Use this to rebuild the chat thread when resuming a session.
+
+**When to call:** After `GET /sessions/list` returns a `session_id` — load history to render the full thread before continuing.
+
+**Path parameters:**
+
+| Parameter | Type | Required? | Description |
+|-----------|------|-----------|-------------|
+| `session_id` | UUID | ✅ | The session UUID. |
+
+**Request body:** None (GET request).
+
+**Response fields:**
+
+| Field | Type | Always present? | Description |
+|-------|------|-----------------|-------------|
+| `session_id` | UUID | ✅ | The session UUID. |
+| `messages` | array | ✅ | All messages in chronological order. Empty array `[]` if no topic has been selected yet. |
+
+**Each item in `messages[]`:**
+
+| Field | Type | Present when | Description |
+|-------|------|-------------|-------------|
+| `role` | string | ✅ Always | `"user"` or `"bot"`. |
+| `activities` | array | Bot messages only (`role: "bot"`) | The activities to render — same format as any turn response. |
+| `action` | string or `null` | User messages only (`role: "user"`) | The action type the user sent, e.g. `"select_choice"`. |
+| `text` | string or `null` | User messages only | Human-readable display text of what the user did, e.g. `"Certificate issue"`. Render as the user's chat bubble. |
+| `ts` | string | ✅ Always | ISO 8601 UTC timestamp, e.g. `"2026-06-16T10:01:00Z"`. |
+
+**Rendering rules:**
+- `role: "bot"` → pass `activities[]` to your normal activity renderer (same code as for turn responses)
+- `role: "user"` → render `text` as the user's message bubble
+- Entries are in chronological order — render top to bottom
+- The **last entry is always `role: "bot"`** — its `activities[]` contain the current pending prompt waiting for input
+
+**Curl — local dev:**
+```bash
+curl http://localhost:8000/ai-chatbot/v1/sessions/history/550e8400-e29b-41d4-a716-446655440000 \
+  -H "x-authenticated-user-token: 00000000-0000-0000-0000-000000000001"
+```
+
+**Curl — Kong (dev):**
+```bash
+curl https://portal.dev.karmayogibharat.net/api/ai/chatbot/v1/sessions/history/<session_id> \
+  -H "x-authenticated-user-token: <keycloak-jwt>" \
+  -H "Authorization: Bearer <kong-jwt>"
+```
+
+**Curl — UI Proxy (web dev):**
+```bash
+curl https://portal.dev.karmayogibharat.net/apis/proxies/v8/ai/chatbot/v1/sessions/history/<session_id> \
+  -H "cookie: connect.sid=<your-cookie>"
+```
+
+**Example response:**
+```json
+{
+  "session_id": "550e8400-e29b-41d4-a716-446655440000",
+  "messages": [
+    {
+      "role": "user",
+      "action": "select_choice",
+      "text": "Certificate issue",
+      "ts": "2026-06-16T10:01:00Z"
+    },
+    {
+      "role": "bot",
+      "activities": [
+        { "type": "markdown", "content": "Which type of certificate?" },
+        { "type": "quick_replies", "choices": [
+            { "id": "course", "label": "Course certificate" },
+            { "id": "event",  "label": "Event certificate" }
+          ], "disable_input": true
+        }
+      ],
+      "ts": "2026-06-16T10:01:01Z"
+    }
+  ]
+}
+```
+
+**Example — no flow started yet (empty history):**
+```json
+{
+  "session_id": "550e8400-e29b-41d4-a716-446655440000",
+  "messages": []
+}
+```
+When `messages` is empty, the user only saw the greeting and topic menu but never picked a topic. Treat this the same as no session — call `POST /sessions/create` to start fresh.
 
 ---
 

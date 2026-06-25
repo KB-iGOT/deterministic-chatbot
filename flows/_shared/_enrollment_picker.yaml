@@ -13,6 +13,12 @@ fragment_id: enrollment_picker
 #                    "c1_" to store into collected.c1_course_name etc.
 #   next           — Node id to route to after selection
 #
+# Optional params:
+#   on_empty       — Node id to route to when the enrollment list is empty.
+#                    Omit (or leave blank) to fall back to the default "No results
+#                    found." message with no further routing.
+#
+#
 # Stored fields (all prefixed by field_prefix):
 #   collected.<prefix>course_name    — human-readable course name
 #   collected.<prefix>completion_pct — completionPercentage (0–100)
@@ -67,4 +73,5 @@ nodes:
       search:     { enabled: true, placeholder: "Search your enrolled courses..." }
       pagination: { enabled: true, page_size: 10 }
       cache_ttl:  300
+      on_empty:   "{{ params.on_empty | default('') }}"
     next: {{ params.next }}

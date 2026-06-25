@@ -38,7 +38,8 @@ version: 2
 metadata:
   category:         profile
   menu_label:       "✅ Designation / Group not verified"
-  menu_group:       "Profile"
+  menu_group:       "Profile & User Management"
+  menu_group_order: 1
   menu_order:       6
   classification:   Service Request
   default_portal:   Learner Portal
@@ -92,7 +93,7 @@ nodes:
       - { from: "$.response.content[0].profileDetails.professionalDetails[0].designation",         to: collected.current_designation }
       - { from: "$.response.content[0].profileDetails.professionalDetails[0].group",               to: collected.current_group }
       - { from: "$.response.content[0].profileDetails.professionalDetails[0].name",                to: collected.current_dept_name }
-    on_success: branch_on_pending_request
+    on_success: branch_on_verified_status
     on_error:
       any: profile_api_error
     timeout_ms: 5000
@@ -106,6 +107,34 @@ nodes:
         Please try again in a few minutes. If the issue persists, write to
         **support@igotkarmayogi.gov.in** with your registered email and a
         description of the issue.
+    next: resolution_check
+
+  # ===========================================================================
+  # SOP §1.1 / §1.2 — Gate: is the profile already verified?
+  # ===========================================================================
+
+  - id: branch_on_verified_status
+    type: branch
+    rules:
+      - if: "ctx.collected.designation_status != None and ctx.collected.designation_status.lower() == 'verified'"
+        then: show_already_verified
+    default: branch_on_pending_request
+
+  - id: show_already_verified
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that your profile has already been verified
+        and there are no pending verification requests.
+
+        To verify the **Verified Community Badge**:
+
+        1. Go to your profile.
+        2. Check the area next to your name.
+        3. A **green tick mark** should be visible next to your name.
+
+        The green tick indicates that the Verified Community Badge has been
+        successfully assigned to your profile.
     next: resolution_check
 
   # ===========================================================================

@@ -44,10 +44,59 @@ def _has(value: Any) -> bool:
     return bool(value)
 
 
+def _email_domain_valid(email: str | None, approved_domains: list | None) -> bool:
+    """Return True if the domain part of *email* is present in *approved_domains*.
+
+    Comparison is case-insensitive and both sides are stripped of whitespace to
+    handle dirty API data (e.g. trailing spaces in domain entries).
+    Returns False for any None / empty input.
+    """
+    if not email or not approved_domains:
+        return False
+    parts = str(email).strip().rsplit("@", 1)
+    if len(parts) != 2:
+        return False
+    user_domain = parts[1].strip().lower()
+    normalised = [d.strip().lower() for d in approved_domains if isinstance(d, str)]
+    return user_domain in normalised
+
+
+def _compare_enrollment_vs_admin_state_helper(
+    lang_content_status: Any,
+    admin_content_states: Any,
+) -> bool:
+    """Thin wrapper so branch expressions can call compare_enrollment_vs_admin_state().
+
+    Delegates to the canonical implementation in api_call_node.py to avoid
+    duplicating the cross-comparison logic.
+    """
+    from app.engine.nodes.api_call_node import _compare_enrollment_vs_admin_state
+    return _compare_enrollment_vs_admin_state(lang_content_status, admin_content_states)
+
+
+def _extract_incomplete_child_courses(cap_hierarchy_children: Any, all_enrollment_list: Any) -> list[dict]:
+    """Thin wrapper so branch expressions can call extract_incomplete_child_courses()."""
+    from app.engine.nodes.api_call_node import _extract_incomplete_child_courses as _impl
+    return _impl(cap_hierarchy_children, all_enrollment_list)
+
+
+def _check_cap_technical_issue(all_enrollments: Any, admin_states: Any, course_id: Any) -> bool:
+    """Thin wrapper so branch expressions can call check_cap_technical_issue()."""
+    from app.engine.nodes.api_call_node import _check_cap_technical_issue as _impl
+    return _impl(all_enrollments, admin_states, course_id)
+
+
 HELPERS = {
     "hours_since": _hours_since,
     "days_since": _days_since,
     "has": _has,
+    "email_domain_valid": _email_domain_valid,
+    # Admin Content State vs Enrollment API cross-comparison
+    # Used in branch rules: compare_enrollment_vs_admin_state(lang_content_status, admin_content_states)
+    # Returns True if any leaf resource has enrollment status=1 (In-Progress) AND admin status=2 (Completed)
+    "compare_enrollment_vs_admin_state": _compare_enrollment_vs_admin_state_helper,
+    "check_cap_technical_issue": _check_cap_technical_issue,
+    "extract_incomplete_child_courses": _extract_incomplete_child_courses,
     "len": len,
     "str": str,
     "int": int,

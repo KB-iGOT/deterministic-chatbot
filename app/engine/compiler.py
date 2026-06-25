@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ def _get_interrupt_nodes(flow: dict[str, Any]) -> list[str]:
     - ``message`` nodes that have a ``quick_replies`` key
     - all ``collect`` nodes
     - ``resolution`` nodes that have a ``follow_up`` key
+    - ``transfer_llm`` nodes without ``auto_raise: true`` (show confirmation, wait for user)
     """
     result: list[str] = []
     for node in flow.get("nodes", []):
@@ -48,6 +50,8 @@ def _get_interrupt_nodes(flow: dict[str, Any]) -> list[str]:
         elif ntype == "collect":
             result.append(nid)
         elif ntype == "resolution" and "follow_up" in node:
+            result.append(nid)
+        elif ntype == "transfer_llm" and not node.get("auto_raise", False):
             result.append(nid)
     return result
 
@@ -123,9 +127,23 @@ class FlowCompiler:
                     f"could not read fragment {frag_path}: {e}"
                 ) from e
 
-            # Simple string substitution: {{ params.KEY }} → value
+            # String substitution: {{ params.KEY }} → value
+            # Also handles {{ params.KEY | default("fallback") }} — use provided value
+            # when the key is present, or the fallback when it is absent.
             for key, val in params.items():
                 raw_text = raw_text.replace(f"{{{{ params.{key} }}}}", str(val))
+                raw_text = re.sub(
+                    rf'\{{\{{\s*params\.{re.escape(key)}\s*\|\s*default\([^)]*\)\s*\}}\}}',
+                    str(val),
+                    raw_text,
+                )
+            # Replace any remaining {{ params.KEY | default("fallback") }} whose key
+            # was NOT provided by the caller — substitute with the declared default.
+            raw_text = re.sub(
+                r'\{\{\s*params\.\w+\s*\|\s*default\((["\']?)([^)]*)\1\)\s*\}\}',
+                lambda m: m.group(2),
+                raw_text,
+            )
 
             try:
                 frag_data = yaml.load(raw_text)
@@ -297,7 +315,7 @@ class FlowCompiler:
     def get_menu_items(self) -> list[dict[str, Any]]:
         """Return menu items derived from loaded flow metadata.
 
-        Each item: ``{flow_id, menu_label, menu_group, menu_order}``.
+        Each item: ``{flow_id, menu_label, menu_group, menu_group_order, menu_order}``.
         Flows are excluded when any of the following apply:
         - No ``metadata.menu_label`` set
         - ``metadata.menu_hidden: true``   (hides from menu; API still accessible)
@@ -316,12 +334,33 @@ class FlowCompiler:
             if not meta.get("enabled", True):
                 continue
             items.append({
-                "flow_id":    flow_id,
-                "menu_label": label,
-                "menu_group": meta.get("menu_group", "General"),
-                "menu_order": int(meta.get("menu_order", 99)),
+                "flow_id":         flow_id,
+                "menu_label":      label,
+                "menu_group":      meta.get("menu_group", "General"),
+                "menu_group_order": int(meta.get("menu_group_order", 99)),
+                "menu_order":      int(meta.get("menu_order", 99)),
             })
         return sorted(items, key=lambda x: (x["menu_order"], x["flow_id"]))
+
+    def get_categories(self) -> list[str]:
+        """Return ordered distinct category names that have at least one visible flow.
+
+        Order is determined by the minimum ``menu_group_order`` across flows in
+        each category, so the order is fully driven by YAML metadata — no
+        hardcoded list in Python.
+        """
+        items = self.get_menu_items()
+        group_min_order: dict[str, int] = {}
+        for item in items:
+            grp = item["menu_group"]
+            gord = item["menu_group_order"]
+            if grp not in group_min_order or gord < group_min_order[grp]:
+                group_min_order[grp] = gord
+        return sorted(group_min_order, key=lambda g: (group_min_order[g], g))
+
+    def get_flows_for_category(self, category: str) -> list[dict[str, Any]]:
+        """Return visible menu items for a single category, sorted by menu_order."""
+        return [i for i in self.get_menu_items() if i["menu_group"] == category]
 
 
 def _collect_edge_targets(node: dict[str, Any]) -> set[str]:

@@ -36,13 +36,14 @@ class FlowStatus(str, Enum):
 class TicketDraft(BaseModel):
     """LLM-generated or template-generated ticket fields prior to Zoho POST."""
     subject: str
-    description: str
+    description: str          # markdown — shown in chat confirmation preview
     category: str
     sub_category: str | None = None
     classification: str = "Query"
     priority: str = "P3"
     severity: str = "Sev 3"
     portal: str = "Learner Portal"
+    conversation_trail: str = ""  # HTML <ol> — user's readable selections for Zoho body
 
 
 class ConversationState(BaseModel):
@@ -85,6 +86,11 @@ class ConversationState(BaseModel):
 
     # --- LLM usage tracking (cost cap enforcement) ---
     llm_calls_this_session: int = 0
+
+    # --- Auth (not exposed to YAML templates or LLM context) ---
+    # Raw Keycloak JWT for flows that need to forward the user token to privileged APIs.
+    # Access only via the "__SESSION_TOKEN__" sentinel in YAML header values — never via ctx.
+    session_token: str = ""
 
     # --- Misc ---
     last_activity_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

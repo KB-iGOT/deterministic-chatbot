@@ -12,7 +12,10 @@ greeting: |
 
   What can I help you with today?
 
-# Shown when the user sends something unexpected during topic selection
+# Shown after the user picks a category, before the sub-flow menu
+select_issue: "Please choose the specific issue you're facing:"
+
+# Shown when the user sends something unexpected during category or topic selection
 unknown_topic: "🤔 I didn't catch that — please choose one of the options below."
 
 # Shown when the user tries to continue a completed session

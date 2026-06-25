@@ -1,0 +1,467 @@
+# =============================================================================
+# MODE B — DETERMINISTIC + LLM TICKET TAIL
+# =============================================================================
+# Flow: Event Related Issues (SOP)
+# SOP Version: Latest
+#
+# Use Cases:
+#   1. Event Video Missing
+#   2. Event Video Not Playing
+#   3. Event Progress Not Updating
+#   4. Event Certificate Not Generated
+#
+# APIs used:
+#   GET /api/user/private/v1/events/list/{user_id}
+#   GET /api/event/v4/read/{eventId}
+# =============================================================================
+
+flow_id: EVENT_RELATED_ISSUES
+flow_type: deterministic_with_llm_fallback
+version: 1
+
+metadata:
+  category:         event
+  menu_label:       "📅 Event related issues"
+  menu_group:       "Content Related Issue"
+  menu_group_order: 2
+  menu_order:       4
+  classification:   Incident
+  default_portal:   Learner Portal
+  default_priority: P3
+  default_severity: Sev 3
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "event video missing"
+    - "event video not playing"
+    - "event progress not updating"
+    - "event certificate not generated"
+    - "event related issue"
+
+entry_node: ask_event_issue_type
+
+imports:
+  - _terminal
+  - fragment: _zoho_ticket
+    with:
+      cf_category:     event
+      cf_sub_category: event_related_issue
+      cf_flow_id:      EVENT_RELATED_ISSUES
+
+nodes:
+  # ===========================================================================
+  # STEP 1 — Ask user which event issue they are facing
+  # ===========================================================================
+  - id: ask_event_issue_type
+    type: message
+    prompt:
+      text: "Please select the type of issue you are facing with your Event:"
+    quick_replies:
+      - { id: UC1_VIDEO_MISSING,         label: "Video Missing" }
+      - { id: UC2_VIDEO_NOT_PLAYING,     label: "Video Not Playing" }
+      - { id: UC3_PROGRESS_NOT_UPDATING, label: "Progress Not Updating" }
+      - { id: UC4_CERT_NOT_GENERATED,    label: "Certificate Not Generated" }
+    disable_input: true
+    on_reply:
+      UC1_VIDEO_MISSING:         pick_event_from_list_uc1
+      UC2_VIDEO_NOT_PLAYING:     pick_event_from_list_uc2
+      UC3_PROGRESS_NOT_UPDATING: pick_event_from_list_uc3
+      UC4_CERT_NOT_GENERATED:    pick_event_from_list_uc4
+
+  # ===========================================================================
+  # Picker Nodes — Fetch Enrolled Events (SOP 1.1, 2.1, 3.1, 4.1)
+  # ===========================================================================
+  - id: pick_event_from_list_uc1
+    type: collect
+    prompt:
+      text: "Kindly search and select the relevant event from your enrolled events list for which you are unable to view the video."
+    field:
+      name: collected.event_id
+      type: select
+    dynamic_options:
+      source: api
+      integration: karmayogi
+      request:
+        method: GET
+        url: "/api/user/private/v1/events/list/{{ ctx.user_id_hash }}"
+      response_mapping:
+        list_path:   "$.events"
+        id_field:    contentId
+        label_field: event.name
+        extra_fields:
+          - { from: event.name,  to: collected.event_name }
+      search:     { enabled: true, placeholder: "Search your enrolled events..." }
+      pagination: { enabled: true, page_size: 10 }
+      cache_ttl:  300
+      on_empty:   no_events_found
+    next: api_read_event_uc1
+
+  - id: pick_event_from_list_uc2
+    type: collect
+    prompt:
+      text: "Kindly search and select the relevant event from your enrolled events list for which the video is not playing."
+    field:
+      name: collected.event_id
+      type: select
+    dynamic_options:
+      source: api
+      integration: karmayogi
+      request:
+        method: GET
+        url: "/api/user/private/v1/events/list/{{ ctx.user_id_hash }}"
+      response_mapping:
+        list_path:   "$.events"
+        id_field:    contentId
+        label_field: event.name
+        extra_fields:
+          - { from: event.name,  to: collected.event_name }
+      search:     { enabled: true, placeholder: "Search your enrolled events..." }
+      pagination: { enabled: true, page_size: 10 }
+      cache_ttl:  300
+      on_empty:   no_events_found
+    next: api_read_event_uc2
+
+  - id: pick_event_from_list_uc3
+    type: collect
+    prompt:
+      text: "Kindly search and select the relevant event from your enrolled events list for which the progress is not updating."
+    field:
+      name: collected.event_id
+      type: select
+    dynamic_options:
+      source: api
+      integration: karmayogi
+      request:
+        method: GET
+        url: "/api/user/private/v1/events/list/{{ ctx.user_id_hash }}"
+      response_mapping:
+        list_path:   "$.events"
+        id_field:    contentId
+        label_field: event.name
+        extra_fields:
+          - { from: event.name,  to: collected.event_name }
+          - { from: "$", to: collected.time_spent_seconds, transform: extract_event_time_spent }
+      search:     { enabled: true, placeholder: "Search your enrolled events..." }
+      pagination: { enabled: true, page_size: 10 }
+      cache_ttl:  300
+      on_empty:   no_events_found
+    next: branch_uc3_progress
+
+  - id: pick_event_from_list_uc4
+    type: collect
+    prompt:
+      text: "Kindly search and select the relevant event from your enrolled events list for which you are unable to download the certificate."
+    field:
+      name: collected.event_id
+      type: select
+    dynamic_options:
+      source: api
+      integration: karmayogi
+      request:
+        method: GET
+        url: "/api/user/private/v1/events/list/{{ ctx.user_id_hash }}"
+      response_mapping:
+        list_path:   "$.events"
+        id_field:    contentId
+        label_field: event.name
+        extra_fields:
+          - { from: event.name,  to: collected.event_name }
+          - { from: "$", to: collected.time_spent_seconds, transform: extract_event_time_spent }
+          - { from: issuedCertificates, to: collected.certificate_issued, transform: has_issued_certificates }
+      search:     { enabled: true, placeholder: "Search your enrolled events..." }
+      pagination: { enabled: true, page_size: 10 }
+      cache_ttl:  300
+      on_empty:   no_events_found
+    next: branch_uc4_certificate
+
+  # ===========================================================================
+  # Use Case 1: Event Video Missing (SOP 1.2, 1.3)
+  # ===========================================================================
+  - id: api_read_event_uc1
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/event/v4/read/{{ ctx.collected.event_id }}"
+    response_mapping:
+      - { from: "$.event.duration", to: collected.event_duration }
+    on_success: branch_uc1_duration
+    on_error:
+      any: resolution_generic_error
+    timeout_ms: 8000
+
+  - id: branch_uc1_duration
+    type: branch
+    rules:
+      - { if: "ctx.collected.event_duration == None", then: confirm_ticket_uc1 }
+      - { if: "float(ctx.collected.event_duration) < 60.0", then: confirm_ticket_uc1 }
+    default: resolution_uc1_case_b
+
+  - id: confirm_ticket_uc1
+    type: message
+    prompt:
+      text: |
+        We found that the selected event does not contain a valid video. This appears to be a content configuration issue.
+
+        Would you like us to raise a support ticket for further investigation by our technical team?
+    quick_replies:
+      - { id: yes, label: "✅ Yes, raise ticket" }
+      - { id: no,  label: "❌ No" }
+    disable_input: true
+    on_reply:
+      yes: auto_ticket_uc1
+      no:  satisfied
+
+  - id: auto_ticket_uc1
+    type: transfer_llm
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user reported a missing video for an event, and the API confirmed the duration is less than 1 minute.
+        Generate a Zoho support ticket.
+        Subject: "Event Video Missing – Content Configuration Issue — <event_name>"
+        Description: include user_id, event_name, event_id, and mention that the video duration is less than 1 minute.
+      priority_override: P3
+    on_complete: confirm_ticket
+    on_restart: ask_event_issue_type
+
+  - id: resolution_uc1_case_b
+    type: message
+    prompt:
+      text: |
+        We found that the selected event contains a valid video. Kindly access the event and complete it.
+    next: satisfied
+
+  # ===========================================================================
+  # Use Case 2: Event Video Not Playing (SOP 2.2, 2.3)
+  # ===========================================================================
+  - id: api_read_event_uc2
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/event/v4/read/{{ ctx.collected.event_id }}"
+    response_mapping:
+      - { from: "$.event.registrationLink", to: collected.registration_link }
+      - { from: "$.event.registrationLink", to: collected.is_valid_youtube, transform: is_youtube_embed_url }
+    on_success: branch_uc2_validation
+    on_error:
+      any: resolution_generic_error
+    timeout_ms: 8000
+
+  - id: branch_uc2_validation
+    type: branch
+    rules:
+      - { if: "has(ctx.collected.registration_link) == False", then: resolution_uc2_case_a }
+      - { if: "ctx.collected.is_valid_youtube == False", then: resolution_uc2_case_b }
+    default: resolution_uc2_case_c
+
+  - id: resolution_uc2_case_a
+    type: message
+    prompt:
+      text: |
+        We found an issue with the event video configuration. A support ticket needs to be raised for further investigation.
+    next: auto_ticket_uc2
+
+  - id: resolution_uc2_case_b
+    type: message
+    prompt:
+      text: |
+        We found an issue with the configured video URL. A support ticket needs to be raised for further investigation.
+    next: auto_ticket_uc2
+
+  - id: auto_ticket_uc2
+    type: transfer_llm
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user reported an event video is not playing. The API confirmed the registration URL is either missing or an invalid YouTube embed link.
+        Generate a Zoho support ticket.
+        Subject: "Event Video Not Playing – Configuration Issue — <event_name>"
+        Description: include user_id, event_name, event_id, and mention the invalid/missing URL issue.
+      priority_override: P3
+    on_complete: confirm_ticket
+    on_restart: ask_event_issue_type
+
+  - id: resolution_uc2_case_c
+    type: resolution
+    prompt:
+      text: |
+        We verified the event configuration and found that the video setup is correct. Kindly try accessing the event using the steps below.
+    steps:
+      - "If Using Mobile Device:"
+      - "1. Log in to the iGOT Karmayogi portal."
+      - "2. Enable Desktop Mode/Desktop Site in your mobile browser."
+      - "3. Navigate to My Learning."
+      - "4. Open the selected event."
+      - "5. Click on Start Learning or Resume Learning."
+      - "6. Try playing the video again."
+      - "If Using Laptop/Desktop:"
+      - "1. Open the iGOT Karmayogi portal in an Incognito/Private Window."
+      - "2. Log in using your credentials."
+      - "3. Navigate to My Learning."
+      - "4. Open the selected event."
+      - "5. Click on Start Learning or Resume Learning."
+      - "6. Try playing the video again."
+    follow_up:
+      text: "Does the issue persist after following the above steps?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, issue persists" }
+        - { id: no,  label: "❌ No, it's resolved" }
+    on_reply:
+      yes: auto_ticket_uc2_persists
+      no:  satisfied
+
+  - id: auto_ticket_uc2_persists
+    type: transfer_llm
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user reported an event video is not playing, even though the configuration was found correct, and troubleshooting steps failed.
+        Generate a Zoho support ticket.
+        Subject: "Event Video Not Playing — <event_name>"
+        Description: include user_id, event_name, event_id, and mention that standard troubleshooting steps failed.
+      priority_override: P3
+    on_complete: confirm_ticket
+    on_restart: ask_event_issue_type
+
+  # ===========================================================================
+  # Use Case 3: Event Progress Not Updating (SOP 3.2, 3.3)
+  # ===========================================================================
+  - id: branch_uc3_progress
+    type: branch
+    rules:
+      - { if: "float(ctx.collected.time_spent_seconds) < 600.0", then: resolution_uc3_case_a }
+    default: confirm_ticket_uc3
+
+  - id: resolution_uc3_case_a
+    type: message
+    prompt:
+      text: |
+        We found that the selected event is still in progress. Kindly complete the event to successfully complete the learning and become eligible for certificate generation.
+    next: satisfied
+
+  - id: confirm_ticket_uc3
+    type: message
+    prompt:
+      text: |
+        We found that the event completion criteria have been met; however, the progress has not been updated. This appears to be a technical issue.
+
+        Would you like us to raise a support ticket for further investigation?
+    quick_replies:
+      - { id: yes, label: "✅ Yes, please raise a ticket" }
+      - { id: no,  label: "❌ No, thank you" }
+    disable_input: true
+    on_reply:
+      yes: auto_ticket_uc3
+      no:  satisfied
+
+  - id: auto_ticket_uc3
+    type: transfer_llm
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user reported their event progress is not updating. The API confirmed the Time Spent > 600s, indicating a technical issue.
+        Generate a Zoho support ticket.
+        Subject: "Event Progress Not Updating – Technical Issue — <event_name>"
+        Description: include user_id, event_name, event_id, and mention that the user met the completion criteria (> 600s) but progress is stuck.
+      priority_override: P3
+    on_complete: confirm_ticket
+    on_restart: ask_event_issue_type
+
+  # ===========================================================================
+  # Use Case 4: Event Certificate Not Generated (SOP 4.2, 4.3)
+  # ===========================================================================
+  - id: branch_uc4_certificate
+    type: branch
+    rules:
+      - { if: "float(ctx.collected.time_spent_seconds) < 600.0", then: resolution_uc4_case_a }
+      - { if: "ctx.collected.certificate_issued == True", then: resolution_uc4_case_b }
+    default: confirm_ticket_uc4
+
+  - id: resolution_uc4_case_a
+    type: message
+    prompt:
+      text: |
+        We found that the selected event is still in progress. Kindly complete the event to become eligible for certificate generation.
+    next: satisfied
+
+  - id: resolution_uc4_case_b
+    type: message
+    prompt:
+      text: |
+        We found that the event completion criteria have been met. Kindly follow the steps below to access and download your certificate.
+
+        **Steps to Download the Certificate:**
+        - Log in to the iGOT Karmayogi portal.
+        - Navigate to **My Learning**.
+        - Open the completed event.
+        - Complete any pending feedback form, survey, questionnaire, or mandatory activity if available.
+        - Refresh the page.
+        - Click on **Download Certificate**.
+        - Save the certificate to your device.
+    next: satisfied
+
+  - id: confirm_ticket_uc4
+    type: message
+    prompt:
+      text: |
+        We found that the event completion criteria have been met; however, the certificate is currently unavailable. This appears to be a technical issue.
+
+        Would you like us to raise a support ticket for further investigation?
+    quick_replies:
+      - { id: yes, label: "✅ Yes, please raise a ticket" }
+      - { id: no,  label: "❌ No, thank you" }
+    disable_input: true
+    on_reply:
+      yes: auto_ticket_uc4
+      no:  satisfied
+
+  - id: auto_ticket_uc4
+    type: transfer_llm
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user reported an event certificate was not generated. The API confirmed the Time Spent > 600s, but no certificate is available.
+        Generate a Zoho support ticket.
+        Subject: "Event Certificate Not Generated — <event_name>"
+        Description: include user_id, event_name, event_id, and mention that the user met the completion criteria (> 600s) but no certificate was issued.
+      priority_override: P3
+    on_complete: confirm_ticket
+    on_restart: ask_event_issue_type
+
+  # ===========================================================================
+  # Common Error / End Nodes
+  # ===========================================================================
+  - id: no_events_found
+    type: message
+    prompt:
+      text: |
+        You do not have any enrolled events at the moment.
+
+        Please enrol in an event on the iGOT Karmayogi portal and try again.
+    next: satisfied
+
+  - id: resolution_generic_error
+    type: message
+    prompt:
+      text: "We encountered a temporary technical error while fetching the details. Please try again after some time."
+    next: satisfied
+

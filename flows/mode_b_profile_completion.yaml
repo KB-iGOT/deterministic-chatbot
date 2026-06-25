@@ -1,0 +1,2095 @@
+# =============================================================================
+# MODE B — DETERMINISTIC + LLM TAIL
+# =============================================================================
+# Flow: Profile Update / Completion
+# Covers all 13 SOP sections for iGOT profile management.
+#
+# Architecture:
+#   • Intake menu routes to the right SOP section deterministically.
+#   • Simple guidance (photo, cover, edu qual, etc.) is fully deterministic.
+#   • Cases requiring API lookups (MDO details, master-data search, etc.)
+#     route to a transfer_llm node; the LLM fetches data and either guides
+#     the user or drafts a Zoho ticket.
+#   • Dissatisfaction counter → LLM fallback after 2 retries.
+# =============================================================================
+
+flow_id: PROFILE_COMPLETION
+flow_type: deterministic_with_llm_fallback
+version: 2
+
+metadata:
+  category:         profile
+  menu_label:       "👤 Profile update"
+  menu_group:       "Profile & User Management"
+  menu_group_order: 1
+  menu_order:       5
+  classification:   Service Request
+  default_portal:   Learner Portal
+  default_priority: P3
+  default_severity: Sev 3
+
+enabled_channels: [web]
+
+classification:
+  triggers:
+    - "profile not 100"
+    - "profile completion stuck"
+    - "missing profile fields"
+    - "update profile"
+    - "profile photo"
+    - "cover photo"
+    - "designation not found"
+    - "ehrms id"
+    - "mother tongue"
+    - "service history"
+    - "educational qualification"
+    - "name update"
+    - "display name"
+    - "date of retirement"
+
+llm_fallback_policy:
+  max_deterministic_retries: 2
+  triggers:
+    - user_dissatisfied_count_gte: 2
+    - user_says: ["complex", "complicated", "talk to human", "agent"]
+    - api_returns_unexpected_data: true
+
+entry_node: intake_menu
+
+imports:
+  - _terminal
+  - fragment: _zoho_ticket
+    with:
+      cf_category: profile
+      cf_sub_category: profile_update
+      cf_flow_id: PROFILE_COMPLETION
+
+nodes:
+
+  # ── INTAKE MENU ────────────────────────────────────────────────────────────
+  - id: intake_menu
+    type: message
+    prompt:
+      text: "I can help with your iGOT profile. What do you need help with?"
+    quick_replies:
+      - { id: name,          label: "✏️ Name update" }
+      - { id: display_name,  label: "🏷️ Display name / username" }
+      - { id: designation,   label: "💼 Designation not found" }
+      - { id: email_mobile,  label: "📧 Email or mobile update" }
+      - { id: mother_tongue, label: "🗣️ Mother tongue not in list" }
+      - { id: ehrms,         label: "🪪 EHRMS ID" }
+      - { id: retirement,    label: "📅 Date of retirement blank" }
+      - { id: service,       label: "🏛️ Service not found" }
+      - { id: svc_history,   label: "📋 Service history" }
+      - { id: edu_qual,      label: "🎓 Educational qualification" }
+      - { id: photo,         label: "📷 Profile photo" }
+      - { id: cover,         label: "🖼️ Cover photo" }
+      - { id: pct,           label: "📊 Profile completion %" }
+    on_reply:
+      name:          fetch_name_for_guide
+      display_name:  display_name_info
+      designation:   designation_fetch_list
+      email_mobile:  email_mobile_steps
+      mother_tongue: mother_tongue_fetch_languages
+      ehrms:         ehrms_info
+      retirement:    checking_profile_for_retirement
+      service:       service_fetch_cadre_config
+      svc_history:   svc_history_ask
+      edu_qual:      edu_qual_steps
+      photo:         profile_photo_steps
+      cover:         cover_photo_steps
+      pct:           checking_profile
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # §1  NAME UPDATE
+  # ═══════════════════════════════════════════════════════════════════════════
+  - id: fetch_name_for_guide
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.response.firstName",                               to: collected.current_first_name }
+      - { from: "$.response.lastName",                                to: collected.current_last_name }
+      - { from: "$.response.profileDetails.personalDetails.surname",  to: collected.pd_surname }
+    on_success: name_update_steps
+    on_error:
+      any: name_update_steps
+    timeout_ms: 5000
+
+  - id: name_update_steps
+    type: resolution
+    prompt:
+      text: |
+        {% if ctx.collected.current_first_name %}
+        Your current name on iGOT:
+        • **First Name:** {{ ctx.collected.current_first_name }}
+        • **Last Name:** {{ ctx.collected.pd_surname or ctx.collected.current_last_name or '(not set)' }}
+
+        {% endif %}
+        Here's how to update your name on iGOT:
+    steps:
+      - "Click on **View Profile**."
+      - "Navigate to the **Name** section."
+      - "Click on the **Edit Profile**."
+      - "Update the Name as required."
+      - "Click on **Save / Submit** to update the details."
+    next: satisfied
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # §2  DISPLAY NAME
+  # ═══════════════════════════════════════════════════════════════════════════
+  - id: display_name_info
+    type: message
+    prompt:
+      text: |
+        The **Display Name / Username** shown next to your profile name is **system-generated** and **cannot be manually updated** at this time.
+
+        We appreciate your understanding. Let me know if you have any other profile concern!
+    next: satisfied
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # §3  DESIGNATION NOT FOUND
+  # ═══════════════════════════════════════════════════════════════════════════
+  # ── §3A  Fetch designation list → source:context picker ─────────────────────
+  - id: designation_fetch_list
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/apis/public/v8/designation/search"
+      body:
+        pageNumber: 1
+        pageSize: 100
+        filterCriteriaMap: {status: "Active"}
+        requestedFields: ["id", "designation"]
+    cache:
+      ttl_seconds: 3600
+    paginate:
+      total_count_path: "$.result.totalCount"
+      list_path: "$.result.data"
+      page_param: pageNumber
+      page_size: 100
+    response_mapping:
+      - from: "$.result.data"
+        to: collected._designation_list
+    on_success: designation_search_and_pick
+    on_error:
+      any: designation_no_match_options
+
+  - id: designation_search_and_pick
+    type: collect
+    prompt:
+      text: "Please select your designation from the list below:"
+    field:
+      name: collected.designation_selected_id
+      type: select
+    dynamic_options:
+      source: context
+      context_key: collected._designation_list
+      response_mapping:
+        id_field: id
+        label_field: designation
+        extra_fields:
+          - { from: designation, to: collected.designation_selected_name }
+      search: { enabled: true, placeholder: "Search designations..." }
+      empty_message: "No matching designations found."
+    on_empty: designation_no_match_options
+    next: confirm_designation_selection
+
+  - id: designation_no_match_options
+    type: message
+    prompt:
+      text: "No matching designation was found in the list. You can search again or request to add your designation if it doesn't exist."
+    quick_replies:
+      - { id: retry,  label: "🔄 Search again" }
+      - { id: ticket, label: "➕ Request to add this designation" }
+    on_reply:
+      retry:  designation_fetch_list
+      ticket: designation_no_match_collect_org
+
+  - id: confirm_designation_selection
+    type: message
+    prompt:
+      text: "You've selected: **{{ ctx.collected.designation_selected_name }}**. Is this the correct designation?"
+    quick_replies:
+      - { id: yes,  label: "✅ Yes, this is my designation" }
+      - { id: retry, label: "🔄 Try a different designation" }
+      - { id: none, label: "❌ None of these match" }
+    on_reply:
+      yes:   fetch_user_for_desig
+      retry: designation_search_and_pick
+      none:  designation_no_match_collect_org
+
+  # ── §3B  Match found — check MDO import ─────────────────────────────────────
+  - id: fetch_user_for_desig
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.response.rootOrgId",                                    to: collected.root_org_id }
+      - { from: "$.response.profileDetails.profileDesignationStatus",      to: collected.profile_desig_status }
+    on_success: check_mdo_import
+    on_error:
+      any: escalate_api_error
+    timeout_ms: 5000
+
+  - id: check_mdo_import
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/framework/v1/read/{{ ctx.collected.root_org_id }}_odcs"
+    response_mapping:
+      - { from: "$.framework.categories[*].terms[*].code", to: collected.framework_term_codes }
+    on_success: branch_mdo_import
+    on_error:
+      any: escalate_api_error
+    timeout_ms: 8000
+
+  - id: branch_mdo_import
+    type: branch
+    rules:
+      - { if: "ctx.collected.designation_selected_id in (ctx.collected.framework_term_codes or [])",
+          then: designation_update_steps }
+    default: lookup_mdo_for_desig
+
+  - id: designation_update_steps
+    type: resolution
+    prompt:
+      text: "✅ **{{ ctx.collected.designation_selected_name }}** is available in your MDO. Here's how to update it:"
+    steps:
+      - "Click **View Profile**."
+      - "Navigate to **Primary Details**."
+      - "Click the **Edit (✏️)** icon."
+      - "Search for **{{ ctx.collected.designation_selected_name }}** in the Designation field."
+      - "Select it and click **Save**."
+    follow_up:
+      text: "Were you able to update your designation?"
+      quick_replies:
+        - { id: yes,   label: "✅ Yes, updated" }
+        - { id: stuck, label: "❌ Still stuck" }
+    on_reply:
+      yes:   satisfied
+      stuck: track_dissatisfaction
+
+  - id: lookup_mdo_for_desig
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            rootOrgId: "{{ ctx.collected.root_org_id }}"
+            organisations.roles: ["MDO_ADMIN"]
+            status: 1
+          limit: 1
+    response_mapping:
+      - { from: "$.response.content[0].profileDetails.personalDetails.firstname",    to: collected.mdo_admin_name }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail", to: collected.mdo_admin_email }
+    on_success: show_mdo_contact_desig
+    on_error:
+      any: show_mdo_contact_desig
+    timeout_ms: 5000
+
+  - id: show_mdo_contact_desig
+    type: message
+    prompt:
+      text: |
+        **{{ ctx.collected.designation_selected_name }}** is available in the iGOT master data but has **not been imported** by your MDO yet.
+
+        {% if ctx.collected.mdo_admin_name or ctx.collected.mdo_admin_email %}
+        Kindly reach out to your MDO admin and request them to import the designation. Once imported through the MDO portal, it will be available for you to select.
+
+        {% if ctx.collected.mdo_admin_name %}
+        • **MDO Name:** {{ ctx.collected.mdo_admin_name }}
+        {% endif %}
+        {% if ctx.collected.mdo_admin_email %}
+        • **MDO Email:** {{ ctx.collected.mdo_admin_email }}
+        {% endif %}
+        {% if ctx.collected.mdo_admin_email %}
+        Please send an email to **{{ ctx.collected.mdo_admin_email }}** requesting them to import the designation **{{ ctx.collected.designation_selected_name }}** into the MDO portal.
+        {% endif %}
+        {% else %}
+        As the MDO Admin for your organisation is currently not available in the system, we are unable to provide direct contact details.
+        Kindly contact the **Young Professional (YP)** assigned to your state/department/organisation for further clarification.
+        {% endif %}
+    next: satisfied
+
+  # ── §3C  No match — raise ticket ────────────────────────────────────────────
+  - id: designation_no_match_collect_org
+    type: collect
+    prompts:
+      - field: collected.designation_requested
+        text: "Please type the exact designation (in full form) you would like added:"
+        placeholder: "e.g. Senior Administrative Officer"
+      - field: collected.designation_org_name
+        text: "Please share your **Organisation Name**:"
+        placeholder: "e.g. Ministry of Finance"
+    next: confirm_designation_ticket
+
+  - id: confirm_designation_ticket
+    type: message
+    prompt:
+      text: |
+        Here are the details I'll submit for adding a new designation:
+        • **Organisation:** {{ ctx.collected.designation_org_name }}
+        • **Designation (full form):** {{ ctx.collected.designation_requested }}
+
+        Shall I raise this request?
+    quick_replies:
+      - { id: confirm, label: "✅ Yes, raise ticket" }
+      - { id: retry,   label: "🔄 Try a different designation" }
+    on_reply:
+      confirm: raise_designation_ticket
+      retry:   designation_search_and_pick
+
+  - id: raise_designation_ticket
+    type: transfer_llm
+    llm_context:
+      include_messages: true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user needs a new designation added to the iGOT master data.
+
+        Details confirmed by user:
+        - Organisation Name: {{ ctx.collected.designation_org_name }}
+        - Designation (full form): {{ ctx.collected.designation_requested }}
+
+        Steps:
+        1. Raise a Zoho ticket to add this designation to the master data.
+        2. Add Randhir in CC (Randhir verifies new designations before they are added;
+           adding him in CC expedites the process).
+        3. Include Organisation Name and exact Designation in the ticket.
+        Keep to 1 turn.
+      priority_override: P3
+      ticket_tags: [designation_not_found, new_designation_request]
+    on_complete: confirm_ticket
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # §4  EMAIL / MOBILE UPDATE
+  # ═══════════════════════════════════════════════════════════════════════════
+  - id: email_mobile_steps
+    type: message
+    prompt:
+      text: "What best describes your situation with **Email ID / Mobile Number** update?"
+    quick_replies:
+      - { id: guide,            label: "📋 I need help with the update steps" }
+      - { id: no_otp,           label: "❌ Not receiving OTP" }
+      - { id: multiple_account, label: "👥 Multiple account issue / Invalid domain" }
+    on_reply:
+      guide:            email_mobile_guide_steps
+      no_otp:           fetch_mdo_for_email
+      multiple_account: email_mobile_multiple_account
+
+  - id: email_mobile_guide_steps
+    type: resolution
+    prompt:
+      text: |
+        To update your **Email ID or Mobile Number**, OTP verification is mandatory.
+        Follow these steps:
+    steps:
+      - "Go to **View Profile → Edit Profile** and locate the Email or Mobile field."
+      - "Enter the new Email ID / Mobile Number."
+      - "Click **Send OTP** — ensure you have access to your current registered email/phone."
+      - "Enter the OTP received and click **Verify & Save**."
+    next: satisfied
+
+  - id: email_mobile_multiple_account
+    type: message
+    prompt:
+      text: "Taking you to the **Multiple Account / Email Conflict** section…"
+    next: ma_ask_identifier_type
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # §4a  MULTIPLE ACCOUNT — EMAIL / MOBILE CONFLICT (inlined from MULTIPLE_ACCOUNT flow)
+  #   Nodes prefixed ma_ to avoid ID collisions with the rest of the profile flow.
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  - id: ma_ask_identifier_type
+    type: message
+    prompt:
+      text: |
+        I can help you with updating your Email ID or Mobile Number.
+
+        Are you trying to update your **Email ID** or **Mobile Number**?
+    quick_replies:
+      - { id: EMAIL,  label: "📧 Email ID" }
+      - { id: MOBILE, label: "📱 Mobile Number" }
+    disable_input: true
+    on_reply:
+      save_to: collected.update_type
+      EMAIL:  ma_collect_new_email
+      MOBILE: ma_collect_new_mobile
+
+  - id: ma_collect_new_email
+    type: collect
+    prompt:
+      text: "Please share the **Email ID** you are trying to update to:"
+    field:
+      name: collected.new_identifier
+      type: email
+      validation:
+        pattern:   "^[\\w.+\\-]+@[\\w\\-]+\\.[a-z]{2,}(\\.[a-z]{2,})?$"
+        error_msg: "That doesn't look like a valid email address. Please try again."
+    next: ma_validate_email_domain
+
+  - id: ma_collect_new_mobile
+    type: collect
+    prompt:
+      text: "Please share the **Mobile Number** you are trying to update to:"
+    field:
+      name: collected.new_identifier
+      type: text
+      validation:
+        pattern:   "^[6-9][0-9]{9}$"
+        error_msg: "Please enter a valid 10-digit Indian mobile number (without country code)."
+    next: ma_check_registration
+
+  - id: ma_validate_email_domain
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/v1/email/approvedDomains"
+    response_mapping:
+      - { from: "$.domains", to: collected.approved_domains }
+    on_success: ma_branch_domain_check
+    on_error:
+      any: ma_check_registration
+    timeout_ms: 5000
+
+  - id: ma_branch_domain_check
+    type: branch
+    rules:
+      - { if: "ctx.collected.approved_domains == None or len(ctx.collected.approved_domains) == 0",
+          then: ma_domain_invalid_fetch_user_profile }
+      - { if: "email_domain_valid(ctx.collected.new_identifier, ctx.collected.approved_domains) == False",
+          then: ma_domain_invalid_fetch_user_profile }
+    default: ma_check_registration
+
+  - id: ma_domain_invalid_fetch_user_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.response.rootOrgId", to: collected.root_org_id }
+      - { from: "$.response.channel",   to: collected.org_channel }
+    on_success: ma_domain_invalid_lookup_mdo
+    on_error:
+      any: ma_domain_invalid_no_mdo
+    timeout_ms: 5000
+
+  - id: ma_domain_invalid_lookup_mdo
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            channel: "{{ ctx.collected.org_channel }}"
+            organisations.roles: ["MDO_LEADER"]
+            status: 1
+          limit: 1
+    response_mapping:
+      - { from: "$.response.count",                                                    to: collected.mdo_leader_count }
+      - { from: "$.response.content[0].profileDetails.personalDetails.firstname",      to: collected.mdo_leader_name }
+      - { from: "$.response.content[0].profileDetails.personalDetails.surname",        to: collected.mdo_leader_surname }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail",   to: collected.mdo_leader_email }
+      - { from: "$.response.content[0].firstName",                                     to: collected.mdo_leader_name_fallback }
+      - { from: "$.response.content[0].email",                                         to: collected.mdo_leader_email_fallback }
+    on_success: ma_branch_domain_invalid_mdo_found
+    on_error:
+      any: ma_domain_invalid_yp_lookup
+    timeout_ms: 5000
+
+  - id: ma_branch_domain_invalid_mdo_found
+    type: branch
+    rules:
+      - { if: "ctx.collected.mdo_leader_count != None and ctx.collected.mdo_leader_count > 0",
+          then: ma_domain_invalid_show_mdo }
+    default: ma_domain_invalid_yp_lookup
+
+  - id: ma_domain_invalid_show_mdo
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        The Email ID **{{ ctx.collected.new_identifier }}** cannot be updated because its domain is **not whitelisted** on the iGOT Karmayogi platform.
+
+        Kindly contact your **MDO Leader** for further clarification and to request domain addition:
+
+        👤 **{{ ctx.collected.mdo_leader_name or ctx.collected.mdo_leader_name_fallback }} {{ ctx.collected.mdo_leader_surname or '' }}**
+        📧 {{ ctx.collected.mdo_leader_email or ctx.collected.mdo_leader_email_fallback }}
+
+  - id: ma_domain_invalid_yp_lookup
+    type: data_lookup
+    service: yp_lookup
+    key: "{{ ctx.collected.org_channel }}"
+    response_mapping:
+      - { from: name,     to: collected.yp_name }
+      - { from: email,    to: collected.yp_email }
+      - { from: mobile,   to: collected.yp_mobile }
+      - { from: cc_email, to: collected.yp_cc_email }
+    on_success: ma_yp_found_result
+    on_error:
+      any: ma_domain_invalid_no_mdo
+
+  - id: ma_yp_found_result
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        The Email ID **{{ ctx.collected.new_identifier }}** cannot be updated because its domain is **not whitelisted** on the iGOT Karmayogi platform.
+
+        Please contact your assigned **Young Professional (YP)** for further assistance:
+
+        👤 **{{ ctx.collected.yp_name }}**
+        📧 {{ ctx.collected.yp_email }}
+        📞 {{ ctx.collected.yp_mobile }}
+
+  - id: ma_yp_not_found
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        The Email ID **{{ ctx.collected.new_identifier }}** cannot be updated because its domain is **not whitelisted** on the iGOT Karmayogi platform.
+
+        Kindly contact the **Young Professional (YP)** assigned to your state/department/organisation for further clarification.
+
+  - id: ma_domain_invalid_no_mdo
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        The Email ID **{{ ctx.collected.new_identifier }}** cannot be updated because its domain is **not whitelisted** on the iGOT Karmayogi platform.
+
+        Kindly contact your **MDO Leader** or the **Young Professional (YP)** assigned to your organisation for further assistance.
+
+  - id: ma_check_registration
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            "{{ 'email' if ctx.collected.update_type == 'EMAIL' else 'mobile' }}": "{{ ctx.collected.new_identifier }}"
+    response_mapping:
+      - { from: "$.response.count",                    to: collected.conflict_count }
+      - { from: "$.response.content[0].id",            to: collected.conflict_user_id }
+      - { from: "$.response.content[0].channel",       to: collected.conflict_org_name }
+      - { from: "$.response.content[0].rootOrgId",     to: collected.conflict_root_org_id }
+    on_success: ma_branch_registration
+    on_error:
+      any: ma_registration_check_error
+    timeout_ms: 15000
+
+  - id: ma_registration_check_error
+    type: message
+    prompt:
+      text: |
+        ⚠️ We were unable to verify whether the **{{ ctx.collected.new_identifier }}** is already registered due to a temporary issue.
+
+        Please try again in a moment.
+    quick_replies:
+      - { id: retry, label: "🔄 Try again" }
+    disable_input: true
+    on_reply:
+      retry: ma_check_registration
+
+  - id: ma_branch_registration
+    type: branch
+    rules:
+      - { if: "ctx.collected.conflict_count != None and ctx.collected.conflict_count > 0",
+          then: ma_fetch_conflict_enrollments }
+    default: ma_guide_self_service_update
+
+  - id: ma_guide_self_service_update
+    type: message
+    prompt:
+      text: |
+        The **{{ ctx.collected.new_identifier }}** is not registered to any other account on the platform.
+
+        Kindly follow the below steps to update your {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }}:
+
+        1. Go to **View Profile**
+        2. Open **Other Details**
+        3. Click the ✏️ **Edit (Pen) Icon** next to the {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} field
+        4. Enter the new {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }}
+        5. Click **Request OTP**
+        6. Enter the OTP received
+        7. Verify the OTP
+        8. Click **Save Changes**
+
+        Your {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} will be updated successfully after OTP verification.
+    quick_replies:
+      - { id: done,    label: "✅ Updated successfully" }
+      - { id: no_otp,  label: "❌ Did not receive OTP" }
+      - { id: error,   label: "⚠️ Still getting an error" }
+    disable_input: true
+    on_reply:
+      done:   satisfied
+      no_otp: ma_otp_not_received_fetch_profile
+      error:  ma_guide_self_service_update
+
+  - id: ma_otp_not_received_fetch_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.response.rootOrgId", to: collected.root_org_id }
+      - { from: "$.response.channel",   to: collected.org_channel }
+    on_success: ma_otp_not_received_lookup_mdo
+    on_error:
+      any: ma_otp_no_mdo_fallback
+    timeout_ms: 5000
+
+  - id: ma_otp_not_received_lookup_mdo
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            channel: "{{ ctx.collected.org_channel }}"
+            organisations.roles: ["MDO_LEADER"]
+            status: 1
+          limit: 1
+    response_mapping:
+      - { from: "$.response.count",                                                    to: collected.mdo_leader_count }
+      - { from: "$.response.content[0].profileDetails.personalDetails.firstname",      to: collected.mdo_leader_name }
+      - { from: "$.response.content[0].profileDetails.personalDetails.surname",        to: collected.mdo_leader_surname }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail",   to: collected.mdo_leader_email }
+      - { from: "$.response.content[0].firstName",                                     to: collected.mdo_leader_name_fallback }
+      - { from: "$.response.content[0].email",                                         to: collected.mdo_leader_email_fallback }
+    on_success: ma_branch_otp_mdo_found
+    on_error:
+      any: ma_otp_yp_data_lookup
+    timeout_ms: 5000
+
+  - id: ma_branch_otp_mdo_found
+    type: branch
+    rules:
+      - { if: "ctx.collected.mdo_leader_count != None and ctx.collected.mdo_leader_count > 0",
+          then: ma_otp_show_mdo_contact }
+    default: ma_otp_yp_data_lookup
+
+  - id: ma_otp_show_mdo_contact
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        If you are not receiving the OTP, kindly connect with the below contact for further assistance:
+
+        👤 **{{ ctx.collected.mdo_leader_name or ctx.collected.mdo_leader_name_fallback }} {{ ctx.collected.mdo_leader_surname or '' }}**
+        📧 {{ ctx.collected.mdo_leader_email or ctx.collected.mdo_leader_email_fallback }}
+
+  - id: ma_otp_yp_data_lookup
+    type: data_lookup
+    service: yp_lookup
+    key: "{{ ctx.collected.org_channel }}"
+    response_mapping:
+      - { from: name,     to: collected.yp_name }
+      - { from: email,    to: collected.yp_email }
+      - { from: mobile,   to: collected.yp_mobile }
+      - { from: cc_email, to: collected.yp_cc_email }
+    on_success: ma_otp_show_yp_contact
+    on_error:
+      any: ma_otp_no_mdo_fallback
+
+  - id: ma_otp_show_yp_contact
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        If you are not receiving the OTP, kindly connect with the below contact for further assistance:
+
+        👤 **{{ ctx.collected.yp_name }}**
+        📧 {{ ctx.collected.yp_email }}
+        📞 {{ ctx.collected.yp_mobile }}
+
+  - id: ma_otp_no_mdo_fallback
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        If you are not receiving the OTP, kindly contact the **Young Professional (YP)** or **MDO Leader** assigned to your organisation for further assistance.
+
+  - id: ma_fetch_conflict_enrollments
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/course/private/v4/user/enrollment/list/{{ ctx.collected.conflict_user_id }}"
+      body:
+        request:
+          retiredCoursesEnabled: true
+    response_mapping:
+      - { from: "$.userCourseEnrolmentInfo.coursesInProgress", to: collected.conflict_inprogress }
+      - { from: "$.userCourseEnrolmentInfo.certificatesIssued", to: collected.conflict_completed }
+    on_success: ma_show_conflict_details
+    on_error:
+      any: ma_show_conflict_details
+    timeout_ms: 8000
+
+  - id: ma_show_conflict_details
+    type: message
+    prompt:
+      text: |
+        ⚠️ The {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} **{{ ctx.collected.new_identifier }}** is already registered with another account.
+
+        **Details of the registered account:**
+        🏢 **Organisation:** {{ ctx.collected.conflict_org_name or "Unknown" }}
+        📚 **Total Enrollments:** {{ (ctx.collected.conflict_inprogress or 0) + (ctx.collected.conflict_completed or 0) }}
+        🔄 **In Progress:** {{ ctx.collected.conflict_inprogress or "—" }}
+        ✅ **Completed:** {{ ctx.collected.conflict_completed or "—" }}
+
+        Would you like to proceed?
+    quick_replies:
+      - { id: no,       label: "❌ No, don't proceed" }
+      - { id: merge,    label: "🔗 Can we merge both accounts?" }
+      - { id: proceed,  label: "⚠️ Yes, I want to proceed" }
+    disable_input: true
+    on_reply:
+      save_to: collected.conflict_decision
+      no:      ma_case_a_no_proceed
+      merge:   ma_case_b_merge_not_possible
+      proceed: ma_case_c_fetch_profile
+
+  - id: ma_case_a_no_proceed
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        Understood. No changes have been made to your account.
+
+        Please feel free to reach out if you require any further assistance.
+
+  - id: ma_case_b_merge_not_possible
+    type: end
+    outcome: self_served
+    prompt:
+      text: |
+        Unfortunately, **account merging is currently not supported** on the iGOT Karmayogi platform.
+
+        Please feel free to reach out if you require any further assistance.
+
+  - id: ma_case_c_fetch_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.response.profileDetails.personalDetails.primaryEmail", to: collected.current_email }
+      - { from: "$.response.profileDetails.personalDetails.mobile",       to: collected.current_phone }
+    on_success: ma_case_c_fetch_current_enrollments
+    on_error:
+      any: ma_case_c_fetch_current_enrollments
+    timeout_ms: 5000
+
+  - id: ma_case_c_fetch_current_enrollments
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/course/private/v4/user/enrollment/list/{{ ctx.user_id_hash }}"
+      body:
+        request:
+          retiredCoursesEnabled: true
+    response_mapping:
+      - { from: "$.userCourseEnrolmentInfo.coursesInProgress", to: collected.current_inprogress }
+      - { from: "$.userCourseEnrolmentInfo.certificatesIssued", to: collected.current_completed }
+    on_success: ma_case_c_show_impact
+    on_error:
+      any: ma_case_c_show_impact
+    timeout_ms: 8000
+
+  - id: ma_case_c_show_impact
+    type: message
+    prompt:
+      text: |
+        ⚠️ Please review the following before confirming:
+
+        **Your current account enrollments:**
+        📚 **Total Enrollments:** {{ (ctx.collected.current_inprogress or 0) + (ctx.collected.current_completed or 0) }}
+        🔄 **In Progress:** {{ ctx.collected.current_inprogress or "—" }}
+        ✅ **Completed:** {{ ctx.collected.current_completed or "—" }}
+
+        **Impact if you proceed:**
+        - The account currently associated with **{{ ctx.collected.new_identifier }}** will be **deactivated**.
+        - Access to that account will **no longer be available**.
+
+        Kindly review the below details and confirm whether they are correct:
+
+        📧 **Current {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }}:** {{ (ctx.collected.current_email or "(your registered identifier)") if ctx.collected.update_type == 'EMAIL' else (ctx.collected.current_phone or "(your registered identifier)") }}
+        📧 **{{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} to be Updated:** {{ ctx.collected.new_identifier }}
+
+        Please confirm whether you would like us to proceed with this change.
+    quick_replies:
+      - { id: yes, label: "✅ Yes, proceed" }
+      - { id: no,  label: "❌ No, start over" }
+    disable_input: true
+    on_reply:
+      save_to: collected.final_confirmation
+      yes: ma_raise_support_ticket
+      no:  ma_restart_flow
+
+  - id: ma_restart_flow
+    type: message
+    prompt:
+      text: |
+        No problem. Let's start over.
+
+        Please share the **Email ID or Mobile Number** you wish to update.
+    next: ma_ask_identifier_type
+
+  - id: ma_raise_support_ticket
+    type: transfer_llm
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user has confirmed they want to update their {{ ctx.collected.update_type or 'Email/Mobile' }} to an identifier already registered to another account.
+        Generate a Zoho support ticket for L2 manual processing.
+
+        Subject: "Multiple Account Conflict — {{ ctx.collected.update_type }} Update Request"
+        Description: Include:
+          - User ID (ctx.user_id_hash)
+          - Current identifier (ctx.collected.current_identifier if available)
+          - New identifier to be updated (ctx.collected.new_identifier)
+          - Conflict account organisation (ctx.collected.conflict_org_name)
+          - Conflict account enrollment stats: in_progress={{ ctx.collected.conflict_inprogress }}, completed={{ ctx.collected.conflict_completed }}, total={{ (ctx.collected.conflict_inprogress or 0) + (ctx.collected.conflict_completed or 0) }}
+          - Current account enrollment stats: in_progress={{ ctx.collected.current_inprogress }}, completed={{ ctx.collected.current_completed }}, total={{ (ctx.collected.current_inprogress or 0) + (ctx.collected.current_completed or 0) }}
+          - User confirmation: YES (user explicitly confirmed proceeding with deactivation)
+          - Validation status: identifier verified as already registered via /api/private/user/v1/search
+          - Action required: Deactivate the conflicting account and update the user's identifier.
+        This is a P3 ticket requiring manual L2 account deactivation. Do NOT auto-apply any changes.
+      priority_override: P3
+    on_complete: confirm_ticket
+    on_restart: ma_ask_identifier_type
+
+  - id: email_mobile_invalid_domain
+    type: resolution
+    prompt:
+      text: |
+        Your email domain may not be in the **approved list** for iGOT registration. Only official government email domains are permitted.
+    steps:
+      - "Ensure you are using an official government email ID (e.g. **.gov.in**, **.nic.in**, **.ac.in**)."
+      - "If your organisation uses a different domain, your **MDO admin** can request domain whitelisting."
+      - "Contact your MDO admin and share your email domain for approval."
+      - "Once the domain is whitelisted, retry the Email ID update."
+    next: satisfied
+
+  - id: fetch_mdo_for_email
+    type: message
+    prompt:
+      text: "Let me find your MDO's contact details..."
+    next: fetch_root_org_for_email
+
+  - id: fetch_root_org_for_email
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.response.rootOrgId",                                          to: collected.root_org_id }
+      - { from: "$.response.profileDetails.personalDetails.primaryEmail",        to: collected.user_email }
+      - { from: "$.response.profileDetails.personalDetails.mobile",              to: collected.user_mobile }
+    on_success: lookup_mdo_for_email
+    on_error:
+      any: show_mdo_contact_email
+    timeout_ms: 5000
+
+  - id: lookup_mdo_for_email
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            rootOrgId: "{{ ctx.collected.root_org_id }}"
+            organisations.roles: ["MDO_ADMIN"]
+            status: 1
+          limit: 1
+    response_mapping:
+      - { from: "$.response.content[0].profileDetails.personalDetails.firstname",    to: collected.mdo_admin_name }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail", to: collected.mdo_admin_email }
+    on_success: show_mdo_contact_email
+    on_error:
+      any: show_mdo_contact_email
+    timeout_ms: 5000
+
+  - id: show_mdo_contact_email
+    type: message
+    prompt:
+      text: |
+        OTP verification is mandatory to update Email ID / Mobile Number. Without OTP, the update cannot be completed directly.
+
+        {% if ctx.collected.mdo_admin_name or ctx.collected.mdo_admin_email %}
+        Please contact your MDO admin who can perform the update on your behalf:
+        {% if ctx.collected.mdo_admin_name %}
+        • **MDO Name:** {{ ctx.collected.mdo_admin_name }}
+        {% endif %}
+        {% if ctx.collected.mdo_admin_email %}
+        • **MDO Email:** {{ ctx.collected.mdo_admin_email }}
+        {% endif %}
+        When contacting your MDO, please share:
+        {% if ctx.collected.user_email %}
+        • Your registered **Email ID:** {{ ctx.collected.user_email }}
+        {% endif %}
+        {% if ctx.collected.user_mobile %}
+        • Your registered **Mobile:** {{ ctx.collected.user_mobile }}
+        {% endif %}
+        {% if not ctx.collected.user_email and not ctx.collected.user_mobile %}
+        • Your existing registered **Email ID / Mobile Number**
+        {% endif %}
+        • The **new Email ID / Mobile Number** you want updated
+        {% else %}
+        As the MDO Admin for your organisation is currently not available in the system, we are unable to provide direct contact details.
+        Kindly contact the **Young Professional (YP)** assigned to your state/department/organisation for further clarification.
+        {% endif %}
+    next: satisfied
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # §5  MOTHER TONGUE
+  # ═══════════════════════════════════════════════════════════════════════════
+  - id: mother_tongue_fetch_languages
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/masterData/v1/languages"
+    response_mapping:
+      - { from: "$.languages", to: collected._language_list }
+    on_success: mother_tongue_pick
+    on_error:
+      any: mother_tongue_ticket
+
+  - id: mother_tongue_pick
+    type: collect
+    prompt:
+      text: "Please select your **mother tongue** from the list:"
+    field:
+      name: collected.mother_tongue_verified
+      type: select
+    dynamic_options:
+      source: context
+      context_key: collected._language_list
+      response_mapping:
+        id_field: name
+        label_field: name
+      search: { enabled: true, placeholder: "Search languages..." }
+      empty_message: "No languages found."
+    on_empty: mother_tongue_ticket
+    next: confirm_mother_tongue_selection
+
+  - id: confirm_mother_tongue_selection
+    type: message
+    prompt:
+      text: |
+        ✅ **{{ ctx.collected.mother_tongue_verified }}** is already available in the iGOT system.
+    next: mother_tongue_guide
+
+  - id: mother_tongue_guide
+    type: resolution
+    prompt:
+      text: "Follow these steps to update your Mother Tongue to **{{ ctx.collected.mother_tongue_verified }}**:"
+    steps:
+      - "Click on **View Profile**."
+      - "Navigate to **Other Details**."
+      - "Click on the **Edit (✏️)** icon."
+      - "Locate the **Mother Tongue** field."
+      - "Select **{{ ctx.collected.mother_tongue_verified }}** from the list."
+      - "Click on **Save / Update Details**."
+    next: satisfied
+
+  - id: mother_tongue_ticket
+    type: message
+    prompt:
+      text: |
+        We were unable to load the language list at this time.
+
+        I can raise a support request on your behalf to get your mother tongue added or updated.
+        Shall I submit this request?
+    quick_replies:
+      - { id: yes, label: "✅ Yes, raise request" }
+      - { id: no,  label: "❌ No, not now" }
+    on_reply:
+      yes: raise_mother_tongue_ticket
+      no:  satisfied
+
+  - id: raise_mother_tongue_ticket
+    type: transfer_llm
+    llm_context:
+      include_messages: true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        Raise a Zoho ticket to request that the user's mother tongue be added or updated in the iGOT system. Include any relevant details shared by the user. Keep to 1 turn.
+      priority_override: P3
+      ticket_tags: [mother_tongue_missing, profile_update]
+    on_complete: confirm_ticket
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # §6  EHRMS ID
+  # ═══════════════════════════════════════════════════════════════════════════
+  - id: ehrms_info
+    type: resolution
+    prompt:
+      text: "**Individual users cannot update the EHRMS ID directly.** Only your MDO / Nodal Officer can update this field."
+    steps:
+      - "Contact your **MDO / Nodal Officer** and share:"
+      - "• Your registered **Email ID**"
+      - "• Your registered **Mobile Number**"
+      - "• Your correct **EHRMS ID**"
+      - "The MDO will update the External System ID in your profile."
+    follow_up:
+      text: "Would you like me to look up your MDO's contact details?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, get MDO details" }
+        - { id: no,  label: "✅ No, I already have their contact" }
+    on_reply:
+      yes: fetch_mdo_for_ehrms
+      no:  satisfied
+
+  - id: fetch_mdo_for_ehrms
+    type: message
+    prompt:
+      text: "Let me find your MDO's contact details..."
+    next: fetch_root_org_for_ehrms
+
+  - id: fetch_root_org_for_ehrms
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.response.rootOrgId",                                     to: collected.root_org_id }
+      - { from: "$.response.profileDetails.personalDetails.primaryEmail",  to: collected.user_email }
+      - { from: "$.response.profileDetails.personalDetails.mobile",        to: collected.user_mobile }
+    on_success: lookup_mdo_for_ehrms
+    on_error:
+      any: show_mdo_contact_ehrms
+    timeout_ms: 5000
+
+  - id: lookup_mdo_for_ehrms
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            rootOrgId: "{{ ctx.collected.root_org_id }}"
+            organisations.roles: ["MDO_ADMIN"]
+            status: 1
+          limit: 1
+    response_mapping:
+      - { from: "$.response.content[0].profileDetails.personalDetails.firstname",    to: collected.mdo_admin_name }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail", to: collected.mdo_admin_email }
+    on_success: show_mdo_contact_ehrms
+    on_error:
+      any: show_mdo_contact_ehrms
+    timeout_ms: 5000
+
+  - id: show_mdo_contact_ehrms
+    type: message
+    prompt:
+      text: |
+        {% if ctx.collected.mdo_admin_name or ctx.collected.mdo_admin_email %}
+        Here are your MDO's contact details:
+        {% if ctx.collected.mdo_admin_name %}
+        • **MDO Name:** {{ ctx.collected.mdo_admin_name }}
+        {% endif %}
+        {% if ctx.collected.mdo_admin_email %}
+        • **MDO Email:** {{ ctx.collected.mdo_admin_email }}
+        {% endif %}
+        Please contact your MDO / Nodal Officer and share:
+        {% if ctx.collected.user_email %}
+        • Your registered **Email ID:** {{ ctx.collected.user_email }}
+        {% else %}
+        • Your registered **Email ID**
+        {% endif %}
+        {% if ctx.collected.user_mobile %}
+        • Your registered **Mobile Number:** {{ ctx.collected.user_mobile }}
+        {% else %}
+        • Your registered **Mobile Number**
+        {% endif %}
+        • Your correct **EHRMS ID**
+        {% else %}
+        As the MDO Admin for your organisation is currently not available in the system, we are unable to provide direct contact details.
+        Kindly contact the **Young Professional (YP)** assigned to your state/department/organisation for further clarification.
+        {% endif %}
+    next: satisfied
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # §7  DATE OF RETIREMENT
+  # ═══════════════════════════════════════════════════════════════════════════
+  - id: checking_profile_for_retirement
+    type: message
+    prompt:
+      text: "Let me check your profile to see if your EHRMS ID is set..."
+    next: fetch_user_profile_retirement
+
+  - id: fetch_user_profile_retirement
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+      params:
+        fields: "profileDetails"
+    response_mapping:
+      - { from: "$.response.profileDetails.additionalProperties.externalSystemId", to: collected.has_ehrms_id }
+    on_success: retirement_branch
+    on_error:
+      any: transfer_to_llm
+    timeout_ms: 5000
+
+  - id: retirement_branch
+    type: branch
+    rules:
+      - { if: "ctx.collected.has_ehrms_id", then: retirement_ehrms_present }
+    default: retirement_no_ehrms
+
+  - id: retirement_ehrms_present
+    type: message
+    prompt:
+      text: |
+        Your **EHRMS ID is set** in your profile. ✅
+
+        The **Date of Retirement** is auto-fetched from the EHRMS portal — it **cannot be edited on iGOT** directly.
+
+        Please visit the **EHRMS portal** and update your Date of Retirement there. Once updated, it will automatically reflect on iGOT within 24 hours.
+    next: satisfied
+
+  - id: retirement_no_ehrms
+    type: resolution
+    prompt:
+      text: "Your **EHRMS ID is not set** in your profile. The Date of Retirement is linked to EHRMS and cannot appear until your EHRMS ID is added by your MDO."
+    steps:
+      - "Your MDO / Nodal Officer needs to update the **EHRMS ID** in your profile first."
+      - "Once the EHRMS ID is set, the Date of Retirement will be pulled automatically from the EHRMS portal."
+      - "Ensure the Date of Retirement is also correct in the **EHRMS portal** itself."
+    next: fetch_mdo_for_retirement
+
+  - id: fetch_mdo_for_retirement
+    type: message
+    prompt:
+      text: "Let me find your MDO's contact details..."
+    next: fetch_root_org_for_retirement
+
+  - id: fetch_root_org_for_retirement
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.response.rootOrgId",                                    to: collected.root_org_id }
+      - { from: "$.response.profileDetails.personalDetails.primaryEmail", to: collected.user_email }
+      - { from: "$.response.profileDetails.personalDetails.mobile",       to: collected.user_mobile }
+    on_success: lookup_mdo_for_retirement
+    on_error:
+      any: show_mdo_contact_retirement
+    timeout_ms: 5000
+
+  - id: lookup_mdo_for_retirement
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            rootOrgId: "{{ ctx.collected.root_org_id }}"
+            organisations.roles: ["MDO_ADMIN"]
+            status: 1
+          limit: 1
+    response_mapping:
+      - { from: "$.response.content[0].profileDetails.personalDetails.firstname",    to: collected.mdo_admin_name }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail", to: collected.mdo_admin_email }
+    on_success: show_mdo_contact_retirement
+    on_error:
+      any: show_mdo_contact_retirement
+    timeout_ms: 5000
+
+  - id: show_mdo_contact_retirement
+    type: message
+    prompt:
+      text: |
+        {% if ctx.collected.mdo_admin_name or ctx.collected.mdo_admin_email %}
+        Here are your MDO's contact details:
+        {% if ctx.collected.mdo_admin_name %}
+        • **MDO Name:** {{ ctx.collected.mdo_admin_name }}
+        {% endif %}
+        {% if ctx.collected.mdo_admin_email %}
+        • **MDO Email:** {{ ctx.collected.mdo_admin_email }}
+        {% endif %}
+        Please reach out to your MDO / Nodal Officer and request them to:
+        • **Add your EHRMS ID** to your iGOT profile
+        • Ensure your **Date of Retirement** is correctly set in the EHRMS portal
+
+        Once both are updated, the Date of Retirement will automatically reflect on iGOT.
+        {% else %}
+        As the MDO Admin for your organisation is currently not available in the system, we are unable to provide direct contact details.
+        Kindly contact the **Young Professional (YP)** assigned to your state/department/organisation for further clarification.
+        {% endif %}
+    next: satisfied
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # §8  SERVICE NOT FOUND
+  #
+  # Flow:
+  #   service_fetch_cadre_config (user JWT forwarded via headers)
+  #     → service_picker → service_found_confirm → service_update_steps  (found)
+  #     → service_nudge_search → service_not_found_collect               (not found)
+  #     → service_not_found_collect (on_error fallback)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  - id: service_fetch_cadre_config
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/data/v2/system/settings/get/cadreConfig"
+      headers:
+        x-authenticated-user-token: "__SESSION_TOKEN__"
+    response_mapping:
+      - from: "$.response.value"
+        to: collected._service_list
+        transform: flatten_cadre_services
+    on_success: service_picker
+    on_error:
+      any: service_not_found_collect
+
+  - id: service_picker
+    type: collect
+    prompt:
+      text: "Please select your service from the list below:"
+    field:
+      name: collected.service_selected_name
+      type: select
+    dynamic_options:
+      source: context
+      context_key: collected._service_list
+      response_mapping:
+        id_field: name
+        label_field: name
+      search: { enabled: true, placeholder: "Search services..." }
+      empty_message: "No services found."
+    on_empty: service_not_found_collect
+    next: service_found_confirm
+
+  - id: service_found_confirm
+    type: message
+    prompt:
+      text: "You've selected: **{{ ctx.collected.service_selected_name }}**. Is this your service?"
+    quick_replies:
+      - { id: yes,       label: "✅ Yes, that's my service" }
+      - { id: retry,     label: "🔄 Search again" }
+      - { id: not_found, label: "❌ My service is not in the list" }
+    on_reply:
+      yes:       fetch_user_for_service_check
+      retry:     service_picker
+      not_found: service_nudge_search
+
+  - id: service_nudge_search
+    type: message
+    prompt:
+      text: |
+        The service you are looking for **may already be available** in the system.
+
+        Please try searching again using the full name (e.g. *Indian Administrative Service*, not *IAS*). If it still does not appear, you can raise a request to add it.
+    quick_replies:
+      - { id: search,    label: "🔍 Search again" }
+      - { id: not_found, label: "❌ Still not found — raise a request" }
+    on_reply:
+      search:    service_picker
+      not_found: service_not_found_collect
+
+  - id: service_not_found_collect
+    type: collect
+    prompts:
+      - field: collected.service_requested
+        text: |
+          Please share the **exact service name in full form** — avoid abbreviations.
+
+          *Example: Indian Administrative Service (not IAS)*
+        placeholder: "Type the full service name..."
+      - field: collected.service_cadre_authority
+        text: "Please share the **Cadre Controlling Authority** for this service (the ministry or department that controls your cadre)."
+        placeholder: "e.g. Department of Personnel and Training, Ministry of Finance..."
+    next: confirm_service_ticket
+
+  - id: fetch_user_for_service_check
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.response.profileDetails.cadreDetails.civilServiceName", to: collected.user_service_name }
+    on_success: branch_service_profile_match
+    on_error:
+      any: service_update_steps
+    timeout_ms: 5000
+
+  - id: branch_service_profile_match
+    type: branch
+    rules:
+      - { if: "ctx.collected.user_service_name and ctx.collected.user_service_name == ctx.collected.service_selected_name",
+          then: service_already_linked }
+    default: service_update_steps
+
+  - id: service_already_linked
+    type: resolution
+    prompt:
+      text: |
+        Your service **{{ ctx.collected.service_selected_name }}** is already mapped in your iGOT profile. ✅
+
+        Here's how to update it in the profile UI:
+    steps:
+      - "Click on **View Profile**."
+      - "Navigate to **Other Details**."
+      - "Locate the **Service** field."
+      - "Select the exact service name from the list."
+      - "Click on **Save / Update Details**."
+    next: satisfied
+
+  - id: service_update_steps
+    type: resolution
+    prompt:
+      text: "✅ **{{ ctx.collected.service_selected_name }}** is available in the system. Here's how to update it:"
+    steps:
+      - "Click **View Profile**."
+      - "Navigate to **Other Details** → click **Edit**."
+      - "Find the **Service** field and select **{{ ctx.collected.service_selected_name }}**."
+      - "Click **Save / Update Details**."
+    follow_up:
+      text: "Were you able to update your service?"
+      quick_replies:
+        - { id: yes, label: "✅ Yes, updated" }
+    on_reply:
+      yes: satisfied
+
+  - id: confirm_service_ticket
+    type: message
+    prompt:
+      text: |
+        I'll raise a request to add this service to iGOT:
+        • **Service Name:** {{ ctx.collected.service_requested }}
+        • **Cadre Controlling Authority:** {{ ctx.collected.service_cadre_authority }}
+
+        Shall I submit this request?
+    quick_replies:
+      - { id: yes, label: "✅ Yes, submit" }
+      - { id: no,  label: "❌ No, cancel" }
+    on_reply:
+      yes: raise_service_ticket
+      no:  satisfied
+
+  - id: raise_service_ticket
+    type: transfer_llm
+    llm_context:
+      include_messages: true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        Raise a Zoho support ticket to add a missing service to iGOT master data.
+        Service Name: {{ ctx.collected.service_requested }}
+        Cadre Controlling Authority: {{ ctx.collected.service_cadre_authority }}
+        Keep to 1 turn.
+      priority_override: P3
+      ticket_tags: [service_not_found, new_service_request, profile_update]
+    on_complete: confirm_ticket
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # §9  SERVICE HISTORY
+  # ═══════════════════════════════════════════════════════════════════════════
+  - id: svc_history_ask
+    type: message
+    prompt:
+      text: "What would you like to do with your Service History?"
+    quick_replies:
+      - { id: edit, label: "❌ Can't edit / wrong organisation shown" }
+      - { id: add,  label: "➕ Add previous employment history" }
+    on_reply:
+      edit: svc_history_edit_branch
+      add:  svc_history_add_steps
+
+  - id: svc_history_edit_branch
+    type: message
+    prompt:
+      text: "Let me check your profile details..."
+    next: fetch_user_for_svc_history
+
+  - id: fetch_user_for_svc_history
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.response.channel",                                             to: collected.svc_history_org }
+      - { from: "$.response.rootOrgId",                                           to: collected.root_org_id }
+      - { from: "$.response.profileDetails.professionalDetails[0].designation",   to: collected.svc_designation }
+    on_success: show_svc_history_details
+    on_error:
+      any: escalate_api_error
+    timeout_ms: 5000
+
+  - id: show_svc_history_details
+    type: message
+    prompt:
+      text: |
+        Based on your profile, our records show:
+        • **Organisation:** {{ ctx.collected.svc_history_org or '(not set)' }}
+        • **Designation:** {{ ctx.collected.svc_designation or '(not set)' }}
+
+        The service history entry is auto-populated from your current organisation and designation. Is this information correct?
+    quick_replies:
+      - { id: yes, label: "✅ Yes, that's correct" }
+      - { id: no,  label: "❌ No, it's wrong" }
+    on_reply:
+      yes: svc_history_correct
+      no:  svc_history_transfer_request_steps
+
+  - id: svc_history_correct
+    type: message
+    prompt:
+      text: |
+        The service history entry reflects your current organisation and designation. This entry is auto-populated and will update automatically whenever your organisation or designation is updated in your profile.
+    next: satisfied
+
+  - id: svc_history_transfer_request_steps
+    type: resolution
+    prompt:
+      text: |
+        The service history entry is a **default value** based on the organisation and designation currently mapped to your profile.
+
+        To update the organisation or designation, you need to submit a **Transfer Request**:
+    steps:
+      - "Click **View Profile**."
+      - "Click **Transfer Request**."
+      - "Enter the correct **Organisation** and **Designation**."
+      - "Click **Submit for Approval**."
+    next: lookup_mdo_for_svc_history
+
+  - id: lookup_mdo_for_svc_history
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            rootOrgId: "{{ ctx.collected.root_org_id }}"
+            organisations.roles: ["MDO_ADMIN"]
+            status: 1
+          limit: 1
+    response_mapping:
+      - { from: "$.response.content[0].profileDetails.personalDetails.firstname",    to: collected.mdo_admin_name }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail", to: collected.mdo_admin_email }
+    on_success: show_mdo_contact_svc_history
+    on_error:
+      any: show_mdo_contact_svc_history
+    timeout_ms: 5000
+
+  - id: show_mdo_contact_svc_history
+    type: message
+    prompt:
+      text: |
+        The Transfer Request will be approved by your **Department MDO**. Once approved, the service history will automatically update in your profile.
+
+        {% if ctx.collected.mdo_admin_name or ctx.collected.mdo_admin_email %}
+        Here are your MDO's contact details:
+        {% if ctx.collected.mdo_admin_name %}
+        • **MDO Name:** {{ ctx.collected.mdo_admin_name }}
+        {% endif %}
+        {% if ctx.collected.mdo_admin_email %}
+        • **MDO Email:** {{ ctx.collected.mdo_admin_email }}
+        {% endif %}
+        Please connect with your MDO if you need help with the approval.
+        {% else %}
+        As the MDO Admin for your organisation is currently not available in the system, we are unable to provide direct contact details.
+        Kindly contact the **Young Professional (YP)** assigned to your state/department/organisation for further clarification.
+        {% endif %}
+    next: satisfied
+
+  - id: svc_history_add_steps
+    type: resolution
+    prompt:
+      text: "Here's how to add previous employment to your **Service History**:"
+    steps:
+      - "Click **View Profile**."
+      - "Navigate to **Service History**."
+      - "Click the **Plus (+)** icon."
+      - |
+        Enter the required details such as:
+          • **Organisation / Employment Name**
+          • **Start Date**
+          • **End Date**
+          • Other required fields
+      - "Click **Save** to add the service history entry."
+    next: satisfied
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # §10  EDUCATIONAL QUALIFICATION
+  # ═══════════════════════════════════════════════════════════════════════════
+  - id: edu_qual_steps
+    type: resolution
+    prompt:
+      text: "Here's how to add your **Educational Qualification** on iGOT:"
+    steps:
+      - |
+        Navigate to the qualification section:
+            - Click **View Profile**.
+            - Navigate to the **Educational Qualification** section.
+            - Click the **Plus (+)** icon to add a new qualification.
+      - |
+        In the **Degree Name** field, select the degree as per your requirement.
+            - If the degree is not in the list, select **Other**.
+            - A free-text field will appear — enter the degree name.
+      - "In the **Field of Study** section, enter the relevant field of study (free-text)."
+      - |
+        In the **Institute Name** field, select the institute as per your requirement.
+            - If the institute is not in the list, select **Other**.
+            - A new free-text field will appear — enter the correct college or institute name.
+      - |
+        Enter the **Duration** of the qualification:
+            - Start Year
+            - End Year
+      - "Click **Add** to save the educational qualification."
+    next: edu_qual_success
+
+  - id: edu_qual_success
+    type: message
+    prompt:
+      text: "Once completed, the educational qualification will be successfully added to your profile."
+    next: satisfied
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # §11  PROFILE PHOTO
+  # ═══════════════════════════════════════════════════════════════════════════
+  - id: profile_photo_steps
+    type: resolution
+    prompt:
+      text: "Here's how to update your **Profile Photo**:"
+    steps:
+      - "Click **View Profile**."
+      - "Click the **three dots (⋮)** menu next to your profile name / username."
+      - "Click **Edit Profile**."
+      - "Click the **Profile Photo** section and select your photo."
+      - "Photo requirements: ≤ **1 MB** and ≤ **180 × 180 pixels**."
+      - "Adjust the photo → click **Apply Changes** → **Save Changes**."
+    follow_up:
+      text: "Did that update your profile photo?"
+      quick_replies:
+        - { id: yes,    label: "✅ Yes, updated" }
+        - { id: remove, label: "🔄 Need to remove & re-upload" }
+    on_reply:
+      yes:    satisfied
+      remove: profile_photo_remove_steps
+
+  - id: profile_photo_remove_steps
+    type: resolution
+    prompt:
+      text: "To **remove and re-upload** your profile photo:"
+    steps:
+      - "Click **View Profile** → **three dots (⋮)** → **Edit Profile**."
+      - "**Delete** the existing profile photo."
+      - "Click the **Profile Photo** section and upload the new photo."
+      - "Ensure the new photo is ≤ **1 MB** and ≤ **180 × 180 pixels**."
+      - "Click **Apply Changes** → **Save Changes**."
+    next: satisfied
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # §12  COVER PHOTO
+  # ═══════════════════════════════════════════════════════════════════════════
+  - id: cover_photo_steps
+    type: resolution
+    prompt:
+      text: "Here's how to update your **Cover Photo**:"
+    steps:
+      - "Click **View Profile**."
+      - "Click the **three dots (⋮)** at the top-right of the profile section."
+      - "Click **Edit Cover Photo**."
+      - "Select **Change Cover Photo** and choose the photo from your device."
+      - "Click **Apply Changes**."
+    next: satisfied
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # §13  PROFILE COMPLETION % — Fetch + Diagnose
+  # ═══════════════════════════════════════════════════════════════════════════
+  - id: checking_profile
+    type: message
+    prompt:
+      text: "Let me check your iGOT profile to see what's incomplete..."
+    next: fetch_user_profile
+
+  - id: fetch_user_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+    # karmayogi.py unwraps only result → data is under $.response.*
+    # Paths verified against live UAT API (2026-06-02)
+    response_mapping:
+      - { from: "$.response.firstName",                               to: collected.first_name }
+      - { from: "$.response.avatar",                                  to: collected.avatar_url }
+      - { from: "$.response.profileCompletionPercentage",             to: collected.completion_pct }
+      - { from: "$.response.profileDetails.verifiedKarmayogi",        to: collected.username_verified }
+      - { from: "$.response.profileDetails.profileDesignationStatus", to: collected.designation_status }
+      - { from: "$.response.profileDetails.profileGroupStatus",       to: collected.group_status }
+      - { from: "$.response.profileDetails.profileBannerUrl",         to: collected.banner_url }
+      - { from: "$.response.rootOrgId",                                to: collected.root_org_id }
+    on_success: diagnose_missing_fields
+    on_error:
+      any: escalate_api_error
+    timeout_ms: 5000
+
+  - id: diagnose_missing_fields
+    type: branch
+    rules:
+      # completion_pct may be float or string (e.g. "100.0" or 100.0) from the API
+      - { if: "ctx.collected.completion_pct != None and float(ctx.collected.completion_pct) >= 100.0",
+          then: already_complete }
+    default: show_missing_summary
+
+  - id: already_complete
+    type: message
+    prompt:
+      text: "Good news — your profile is already at **100%**! 🎉 Nothing more to do here."
+    next: satisfied
+
+  - id: show_missing_summary
+    type: message
+    prompt:
+      text: |
+        We checked your profile (currently at **{{ ctx.collected.completion_pct or 0 }}%** completion).
+
+        The following mandatory details appear to be incomplete:
+        {% if not ctx.collected.avatar_url %}
+        • **Profile Photo** — not uploaded
+        {% endif %}
+        {% if not ctx.collected.banner_url %}
+        • **Cover Photo** — not uploaded
+        {% endif %}
+        {% if ctx.collected.username_verified == 'False' or not ctx.collected.username_verified %}
+        • **Username Verification** — not verified
+        {% endif %}
+        {% if ctx.collected.designation_status != 'VERIFIED' %}
+        • **Designation** — not set in Primary Details
+        {% endif %}
+        {% if ctx.collected.group_status != 'VERIFIED' %}
+        • **Group** — not set in Primary Details
+        {% endif %}
+
+        Please update the missing details to reach 100% profile completion. Which field would you like to fix first?
+    quick_replies:
+      - { id: photo,       label: "📷 Profile Photo" }
+      - { id: cover,       label: "🖼️ Cover Photo" }
+      - { id: username,    label: "✔️ Username Verification" }
+      - { id: designation, label: "💼 Designation" }
+      - { id: group,       label: "🏛️ Group" }
+      - { id: about,       label: "📝 About Me" }
+    on_reply:
+      photo:       show_profile_photo_steps
+      cover:       show_cover_photo_steps
+      username:    show_username_tick_steps
+      designation: show_designation_steps
+      group:       show_group_steps
+      about:       show_about_me_steps
+
+  # — §13 per-field resolution nodes —
+
+  - id: show_profile_photo_steps
+    type: resolution
+    prompt:
+      text: "Your **profile photo** is missing. Here's how to add it:"
+    steps:
+      - "Click **View Profile** → **three dots (⋮)** → **Edit Profile**."
+      - "Click the **Profile Photo** section and upload your photo."
+      - "Requirements: ≤ **1 MB**, ≤ **180 × 180 pixels**."
+      - "Click **Apply Changes** → **Save Changes**."
+    follow_up:
+      text: "Done?"
+      quick_replies:
+        - { id: yes,   label: "✅ Yes, updated" }
+        - { id: more,  label: "❌ Another field is missing" }
+    on_reply:
+      yes:   satisfied
+      more:  re_diagnose_skip_photo
+
+  - id: show_cover_photo_steps
+    type: resolution
+    prompt:
+      text: "Your **cover photo** is missing."
+    steps:
+      - "Click **View Profile** → **three dots (⋮)** → **Edit Cover Photo**."
+      - "Select **Change Cover Photo** → choose file → **Apply Changes**."
+    follow_up:
+      text: "Done?"
+      quick_replies:
+        - { id: yes,   label: "✅ Yes" }
+        - { id: more,  label: "❌ Another field" }
+    on_reply:
+      yes:   satisfied
+      more:  re_diagnose_skip_cover
+
+  - id: show_username_tick_steps
+    type: resolution
+    prompt:
+      text: "Your **Username Verification Tick** is missing. This appears once your MDO admin verifies your profile."
+    steps:
+      - "Go to **View Profile → Primary Details → Edit (✏️)**."
+      - "Ensure **Group** and **Designation** are filled in and saved."
+      - "Once primary details are complete, your MDO admin verifies your profile — the tick appears automatically."
+      - "If it has been more than **2 working days**, contact your MDO admin directly."
+    follow_up:
+      text: "Has it been more than 2 working days without the tick appearing?"
+      quick_replies:
+        - { id: yes,  label: "✅ Got it, I'll wait" }
+        - { id: more, label: "❌ Another field missing" }
+        - { id: mdo,  label: "⏰ Yes, more than 2 days" }
+    on_reply:
+      yes:  satisfied
+      more: re_diagnose_skip_tick
+      mdo:  lookup_mdo_for_tick
+
+  - id: lookup_mdo_for_tick
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/private/user/v1/search"
+      body:
+        request:
+          filters:
+            rootOrgId: "{{ ctx.collected.root_org_id }}"
+            organisations.roles: ["MDO_ADMIN"]
+            status: 1
+          limit: 1
+    response_mapping:
+      - { from: "$.response.content[0].profileDetails.personalDetails.firstname",    to: collected.mdo_admin_name }
+      - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail", to: collected.mdo_admin_email }
+    on_success: show_mdo_contact_tick
+    on_error:
+      any: show_mdo_contact_tick
+    timeout_ms: 5000
+
+  - id: show_mdo_contact_tick
+    type: message
+    prompt:
+      text: |
+        {% if ctx.collected.mdo_admin_name or ctx.collected.mdo_admin_email %}
+        Since it has been more than **2 working days**, please contact your **MDO Admin** directly and request them to verify your profile.
+
+        Here are your MDO's contact details:
+        {% if ctx.collected.mdo_admin_name %}
+        • **MDO Name:** {{ ctx.collected.mdo_admin_name }}
+        {% endif %}
+        {% if ctx.collected.mdo_admin_email %}
+        • **MDO Email:** {{ ctx.collected.mdo_admin_email }}
+        {% endif %}
+        {% else %}
+        As the MDO Admin for your organisation is currently not available in the system, we are unable to provide direct contact details.
+        Kindly contact the **Young Professional (YP)** assigned to your state/department/organisation for further clarification.
+        {% endif %}
+    next: satisfied
+
+  - id: show_about_me_steps
+    type: resolution
+    prompt:
+      text: "Your **About Me** section is empty."
+    steps:
+      - "Click **View Profile → Edit Profile → About Me**."
+      - "Write a short introduction (at least 30 characters)."
+      - "Click **Save**."
+    follow_up:
+      text: "Done?"
+      quick_replies:
+        - { id: yes,   label: "✅ Yes" }
+        - { id: more,  label: "❌ Another field" }
+    on_reply:
+      yes:   satisfied
+      more:  re_diagnose_skip_about
+
+  - id: show_group_steps
+    type: resolution
+    prompt:
+      text: "Your **Group** is not set in Primary Details."
+    steps:
+      - "Click **View Profile → Primary Details → Edit (✏️)**."
+      - "Select your **Group** from the dropdown."
+      - "Click **Save**."
+    follow_up:
+      text: "Done?"
+      quick_replies:
+        - { id: yes,   label: "✅ Yes" }
+        - { id: more,  label: "❌ Another field" }
+    on_reply:
+      yes:   satisfied
+      more:  re_diagnose_skip_group
+
+  - id: show_designation_steps
+    type: resolution
+    prompt:
+      text: "Your **Designation** is not set in Primary Details."
+    steps:
+      - "Click **View Profile → Primary Details → Edit (✏️)**."
+      - "Search for your designation in full form (e.g. Section Officer)."
+      - "Select the matching designation and click **Save**."
+    follow_up:
+      text: "Did that work?"
+      quick_replies:
+        - { id: yes,  label: "✅ Designation set" }
+        - { id: more, label: "❌ Another field missing" }
+    on_reply:
+      yes:  satisfied
+      more: re_diagnose_skip_desig
+
+  - id: show_general_steps
+    type: resolution
+    prompt:
+      text: "The **mandatory fields** for 100% profile completion are:"
+    steps:
+      - "1. **Profile Photo** — three dots (⋮) → Edit Profile → Photo section (≤1 MB, ≤180×180 px)"
+      - "2. **Cover Photo** — three dots (⋮) → Edit Cover Photo"
+      - "3. **Username Verification Tick** — auto-set after MDO verifies your Primary Details"
+      - "4. **About Me** — Edit Profile → About Me (min 30 chars)"
+      - "5. **Group** — Primary Details → Edit"
+      - "6. **Designation** — Primary Details → Edit"
+    follow_up:
+      text: "Which one do you need help with?"
+      quick_replies:
+        - { id: go_photo, label: "📷 Profile photo" }
+        - { id: go_cover, label: "🖼️ Cover photo" }
+        - { id: go_tick,  label: "✓ Verification tick" }
+        - { id: go_about, label: "📝 About Me" }
+        - { id: go_group, label: "👥 Group" }
+        - { id: go_desig, label: "💼 Designation" }
+    on_reply:
+      go_photo: show_profile_photo_steps
+      go_cover: show_cover_photo_steps
+      go_tick:  show_username_tick_steps
+      go_about: show_about_me_steps
+      go_group: show_group_steps
+      go_desig: show_designation_steps
+
+  # — Re-diagnose pick-list (avoids re-fetching API for same missing field) —
+  - id: re_diagnose
+    type: message
+    prompt:
+      text: "Which profile field do you need help with?"
+    quick_replies:
+      - { id: go_photo,   label: "📷 Profile photo" }
+      - { id: go_cover,   label: "🖼️ Cover photo" }
+      - { id: go_tick,    label: "✓ Username verification tick" }
+      - { id: go_about,   label: "📝 About Me / bio" }
+      - { id: go_group,   label: "👥 Group" }
+      - { id: go_desig,   label: "💼 Designation" }
+      - { id: go_general, label: "❓ Something else" }
+    on_reply:
+      go_photo:   show_profile_photo_steps
+      go_cover:   show_cover_photo_steps
+      go_tick:    show_username_tick_steps
+      go_about:   show_about_me_steps
+      go_group:   show_group_steps
+      go_desig:   show_designation_steps
+      go_general: show_general_steps
+
+  - id: re_diagnose_skip_photo
+    type: message
+    prompt:
+      text: "Which other profile field do you need help with?"
+    quick_replies:
+      - { id: go_cover,  label: "🖼️ Cover photo" }
+      - { id: go_tick,   label: "✓ Username verification tick" }
+      - { id: go_about,  label: "📝 About Me / bio" }
+      - { id: go_group,  label: "👥 Group" }
+      - { id: go_desig,  label: "💼 Designation" }
+    on_reply:
+      go_cover:  show_cover_photo_steps
+      go_tick:   show_username_tick_steps
+      go_about:  show_about_me_steps
+      go_group:  show_group_steps
+      go_desig:  show_designation_steps
+
+  - id: re_diagnose_skip_cover
+    type: message
+    prompt:
+      text: "Which other profile field do you need help with?"
+    quick_replies:
+      - { id: go_photo,  label: "📷 Profile photo" }
+      - { id: go_tick,   label: "✓ Username verification tick" }
+      - { id: go_about,  label: "📝 About Me / bio" }
+      - { id: go_group,  label: "👥 Group" }
+      - { id: go_desig,  label: "💼 Designation" }
+    on_reply:
+      go_photo:  show_profile_photo_steps
+      go_tick:   show_username_tick_steps
+      go_about:  show_about_me_steps
+      go_group:  show_group_steps
+      go_desig:  show_designation_steps
+
+  - id: re_diagnose_skip_tick
+    type: message
+    prompt:
+      text: "Which other profile field do you need help with?"
+    quick_replies:
+      - { id: go_photo,  label: "📷 Profile photo" }
+      - { id: go_cover,  label: "🖼️ Cover photo" }
+      - { id: go_about,  label: "📝 About Me / bio" }
+      - { id: go_group,  label: "👥 Group" }
+      - { id: go_desig,  label: "💼 Designation" }
+    on_reply:
+      go_photo:  show_profile_photo_steps
+      go_cover:  show_cover_photo_steps
+      go_about:  show_about_me_steps
+      go_group:  show_group_steps
+      go_desig:  show_designation_steps
+
+  - id: re_diagnose_skip_about
+    type: message
+    prompt:
+      text: "Which other profile field do you need help with?"
+    quick_replies:
+      - { id: go_photo,  label: "📷 Profile photo" }
+      - { id: go_cover,  label: "🖼️ Cover photo" }
+      - { id: go_tick,   label: "✓ Username verification tick" }
+      - { id: go_group,  label: "👥 Group" }
+      - { id: go_desig,  label: "💼 Designation" }
+    on_reply:
+      go_photo:  show_profile_photo_steps
+      go_cover:  show_cover_photo_steps
+      go_tick:   show_username_tick_steps
+      go_group:  show_group_steps
+      go_desig:  show_designation_steps
+
+  - id: re_diagnose_skip_group
+    type: message
+    prompt:
+      text: "Which other profile field do you need help with?"
+    quick_replies:
+      - { id: go_photo,  label: "📷 Profile photo" }
+      - { id: go_cover,  label: "🖼️ Cover photo" }
+      - { id: go_tick,   label: "✓ Username verification tick" }
+      - { id: go_about,  label: "📝 About Me / bio" }
+      - { id: go_desig,  label: "💼 Designation" }
+    on_reply:
+      go_photo:  show_profile_photo_steps
+      go_cover:  show_cover_photo_steps
+      go_tick:   show_username_tick_steps
+      go_about:  show_about_me_steps
+      go_desig:  show_designation_steps
+
+  - id: re_diagnose_skip_desig
+    type: message
+    prompt:
+      text: "Which other profile field do you need help with?"
+    quick_replies:
+      - { id: go_photo,  label: "📷 Profile photo" }
+      - { id: go_cover,  label: "🖼️ Cover photo" }
+      - { id: go_tick,   label: "✓ Username verification tick" }
+      - { id: go_about,  label: "📝 About Me / bio" }
+      - { id: go_group,  label: "👥 Group" }
+    on_reply:
+      go_photo:  show_profile_photo_steps
+      go_cover:  show_cover_photo_steps
+      go_tick:   show_username_tick_steps
+      go_about:  show_about_me_steps
+      go_group:  show_group_steps
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # DISSATISFACTION HANDLING
+  # ═══════════════════════════════════════════════════════════════════════════
+  - id: track_dissatisfaction
+    type: increment_and_branch
+    counter: dissatisfaction_count
+    rules:
+      - { if: "ctx.counters.dissatisfaction_count < 2",  then: ask_reclassify }
+      - { if: "ctx.counters.dissatisfaction_count >= 2", then: transfer_to_llm }
+    default: transfer_to_llm
+
+  - id: ask_reclassify
+    type: message
+    prompt:
+      text: "Let me try again. What specifically is still not working?"
+    quick_replies:
+      - { id: photo,   label: "Photo upload fails" }
+      - { id: save,    label: "Save button not working" }
+      - { id: missing, label: "I don't see the field to edit" }
+      - { id: human,   label: "🆘 I need to talk to someone" }
+    disable_input: false
+    on_reply:
+      save_to: collected.reclassify_choice
+      photo:   re_diagnose
+      save:    track_dissatisfaction
+      missing: re_diagnose
+      human:   transfer_to_llm
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # LLM TRANSFER — general fallback + ticket creation
+  # ═══════════════════════════════════════════════════════════════════════════
+  - id: transfer_to_llm
+    type: transfer_llm
+    llm_context:
+      include_messages: true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user needs help with their iGOT profile. They've been through deterministic
+        guidance and are still stuck (or have a complex issue requiring API data).
+
+        Your job:
+        1. Acknowledge their concern briefly (one sentence, no over-apology).
+        2. Identify the specific issue from the conversation history.
+        3. If MDO contact details are needed, fetch them via the API.
+        4. If a ticket is needed: draft a clear Zoho ticket, confirm with user, then create it.
+        Keep to under 3 turns.
+      priority_override: P3
+      ticket_tags: [fallback_from_deterministic, profile_update]
+    on_complete: confirm_ticket
+
+  # ── API ERROR ESCALATION ──────────────────────────────────────────────────
+  - id: escalate_api_error
+    type: message
+    prompt:
+      text: "I couldn't fetch your profile data right now. Let me raise a ticket so the team can investigate."
+    next: transfer_to_llm
+
+  # terminal nodes (satisfied, ticket_raised_end) are injected from _terminal fragment

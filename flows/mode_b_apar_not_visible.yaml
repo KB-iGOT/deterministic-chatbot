@@ -29,7 +29,8 @@ version: 1
 metadata:
   category:         course
   menu_label:       "📋 Training plan / APAR not visible"
-  menu_group:       "Learning"
+  menu_group:       "CA/APAR Issue"
+  menu_group_order: 3
   menu_order:       6
   classification:   Query
   default_portal:   Learner Portal
@@ -98,7 +99,7 @@ nodes:
           or (ctx.collected.org_name or '').lower() in ('igot',)
           or 'prarambh' in (ctx.collected.org_name or '').lower()
         then: show_wrong_org_message
-    default: fetch_cbp_plan
+    default: fetch_cbp_plan 
 
   - id: user_not_found_fallback
     type: message
@@ -145,8 +146,27 @@ nodes:
           or 'prarambh' in (ctx.collected.org_name or '').lower()
         then: show_wrong_org_message
       - { if: "ctx.collected.cbp_total_count != None and ctx.collected.cbp_total_count > 0",
-          then: show_plan_summary }
+          then: fetch_all_enrollments }
     default: validate_user_org   # count==0 or missing → no plan assigned
+
+  # ===========================================================================
+  # Step 3.5 — Fetch enrollments for status calculation
+  # ===========================================================================
+  - id: fetch_all_enrollments
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/course/private/v4/user/enrollment/list/{{ ctx.collected.fetched_user_id }}"
+      body:
+        request:
+          retiredCoursesEnabled: true
+    response_mapping:
+      - { from: "$.courses", to: collected.all_enrollment_list }
+    on_success: show_plan_summary
+    on_error:
+      any: show_plan_summary
+
 
   # ===========================================================================
   # Step 4 — Show plan summary + navigation steps  (SOP Step 2.2)
@@ -155,18 +175,7 @@ nodes:
     type: message
     prompt:
       text: |
-        {%- set apar_list = ctx.collected.all_courses | selectattr('isApar', 'equalto', true) | list -%}
-        {%- set non_apar_list = ctx.collected.all_courses | selectattr('isApar', 'equalto', false) | list -%}
-        {%- set apar_ns = namespace(count=0) -%}
-        {%- set non_apar_ns = namespace(count=0) -%}
-        {%- for plan in apar_list -%}{%- for item in (plan.contentList or []) -%}{%- if item.contentType == 'Course' -%}{%- set apar_ns.count = apar_ns.count + 1 -%}{%- endif -%}{%- endfor -%}{%- endfor -%}
-        {%- for plan in non_apar_list -%}{%- for item in (plan.contentList or []) -%}{%- if item.contentType == 'Course' -%}{%- set non_apar_ns.count = non_apar_ns.count + 1 -%}{%- endif -%}{%- endfor -%}{%- endfor %}
         Upon checking, we found that the training plan has been assigned to your profile.
-
-        | Course Type | Course Count | Last Date |
-        |---|---|---|
-        | **APAR** | {{ apar_ns.count }} Courses | {{ (apar_list | first).endDate | date('%d/%m/%Y') if apar_list else '—' }} |
-        | **Non-APAR** | {{ non_apar_ns.count }} Courses | {{ (non_apar_list | first).endDate | date('%d/%m/%Y') if non_apar_list else '—' }} |
 
         To view the training plan courses, please follow the steps below:
 
@@ -219,19 +228,40 @@ nodes:
     prompt:
       text: |
         {%- set apar_plans = ctx.collected.all_courses | selectattr('isApar', 'equalto', true) | list %}
-        {%- set ns = namespace(count=0) %}
+        {%- set total = namespace(count=0) %}
         🟢 **APAR Training Plan Courses**
-
-        | # | Course Name |
-        |---|---|
         {% for plan in apar_plans %}
-        {% for item in (plan.contentList or []) %}
-        {% if item.contentType == 'Course' %}
-        {% set ns.count = ns.count + 1 %}| {{ ns.count }} | {{ item.name }} |
+        {%- set plan_end = plan.get('endDate') -%}
+        {%- set courses = (plan.get('contentList') or []) | selectattr('contentType', 'equalto', 'Course') | list | sort(attribute='name') -%}
+        {%- if courses %}
+        **Plan {{ loop.index }}** — Last Date: {{ (plan_end | date('%d/%m/%Y')) if plan_end else '—' }}
+
+        {%- set ns = namespace(count=0) %}
+        {% for item in courses %}
+        {% set ns.count = ns.count + 1 %}
+        {% set total.count = total.count + 1 %}
+        {%- set enrolls = ctx.collected.all_enrollment_list or [] -%}
+        {%- set course_status = namespace(text='Not Started') -%}
+        {%- set matching_enroll = enrolls | selectattr('courseId', 'equalto', item.identifier) | first -%}
+        {%- if matching_enroll -%}
+          {%- if matching_enroll.status == 2 or matching_enroll.status == 'Completed' -%}
+            {%- set course_status.text = 'Completed' -%}
+          {%- elif matching_enroll.status == 1 or matching_enroll.status == 'In-Progress' -%}
+            {%- set progress = matching_enroll.get('progress', 0) -%}
+            {%- set leafNodes = matching_enroll.get('leafNodesCount', 1) -%}
+            {%- if leafNodes == 0 %}{% set leafNodes = 1 %}{% endif -%}
+            {%- set percentage = ((progress / leafNodes) * 100) | round | int -%}
+            {%- if percentage > 100 %}{% set percentage = 100 %}{% endif -%}
+            {%- set course_status.text = 'Incomplete (' ~ percentage ~ '%)' -%}
+          {%- endif -%}
+        {%- endif %}
+        {{ ns.count }}. [{{ item.name }}](https://portal.uat.karmayogibharat.net/app/toc/{{ item.get('identifier') }}/overview)
+           **Status:** {{ course_status.text }}
+        {% endfor %}
+
         {% endif %}
         {% endfor %}
-        {% endfor %}
-        {% if ns.count == 0 %}
+        {% if total.count == 0 %}
         No APAR courses were found in your training plan.
         {% endif %}
     next: satisfied
@@ -245,19 +275,40 @@ nodes:
     prompt:
       text: |
         {%- set non_apar_plans = ctx.collected.all_courses | selectattr('isApar', 'equalto', false) | list %}
-        {%- set ns = namespace(count=0) %}
+        {%- set total = namespace(count=0) %}
         📘 **Non-APAR Training Plan Courses**
-
-        | # | Course Name |
-        |---|---|
         {% for plan in non_apar_plans %}
-        {% for item in (plan.contentList or []) %}
-        {% if item.contentType == 'Course' %}
-        {% set ns.count = ns.count + 1 %}| {{ ns.count }} | {{ item.name }} |
+        {%- set plan_end = plan.get('endDate') -%}
+        {%- set courses = (plan.get('contentList') or []) | selectattr('contentType', 'equalto', 'Course') | list | sort(attribute='name') -%}
+        {%- if courses %}
+        **Plan {{ loop.index }}** — Last Date: {{ (plan_end | date('%d/%m/%Y')) if plan_end else '—' }}
+
+        {%- set ns = namespace(count=0) %}
+        {% for item in courses %}
+        {% set ns.count = ns.count + 1 %}
+        {% set total.count = total.count + 1 %}
+        {%- set enrolls = ctx.collected.all_enrollment_list or [] -%}
+        {%- set course_status = namespace(text='Not Started') -%}
+        {%- set matching_enroll = enrolls | selectattr('courseId', 'equalto', item.identifier) | first -%}
+        {%- if matching_enroll -%}
+          {%- if matching_enroll.status == 2 or matching_enroll.status == 'Completed' -%}
+            {%- set course_status.text = 'Completed' -%}
+          {%- elif matching_enroll.status == 1 or matching_enroll.status == 'In-Progress' -%}
+            {%- set progress = matching_enroll.get('progress', 0) -%}
+            {%- set leafNodes = matching_enroll.get('leafNodesCount', 1) -%}
+            {%- if leafNodes == 0 %}{% set leafNodes = 1 %}{% endif -%}
+            {%- set percentage = ((progress / leafNodes) * 100) | round | int -%}
+            {%- if percentage > 100 %}{% set percentage = 100 %}{% endif -%}
+            {%- set course_status.text = 'Incomplete (' ~ percentage ~ '%)' -%}
+          {%- endif -%}
+        {%- endif %}
+        {{ ns.count }}. [{{ item.name }}](https://portal.uat.karmayogibharat.net/app/toc/{{ item.get('identifier') }}/overview)
+           **Status:** {{ course_status.text }}
+        {% endfor %}
+
         {% endif %}
         {% endfor %}
-        {% endfor %}
-        {% if ns.count == 0 %}
+        {% if total.count == 0 %}
         No Non-APAR courses were found in your training plan.
         {% endif %}
     next: satisfied
@@ -650,7 +701,6 @@ nodes:
 
   - id: raise_ticket
     type: transfer_llm
-    auto_raise: true
     llm_context:
       include_messages:  true
       include_collected: true
@@ -663,6 +713,7 @@ nodes:
         Description: The CBP plan API returned no data for this user. Include user email ({{ ctx.collected.user_email }}) and rootOrgId ({{ ctx.collected.root_org_id }}).
       priority_override: P3
     on_complete: ticket_confirmed
+    on_restart: fetch_user_profile
 
   - id: ticket_confirmed
     type: message
@@ -790,29 +841,10 @@ nodes:
             )
             and (item.get('status') == 2 or item.get('completionPercentage') == 100)
           ]) > 0
-        then: ec1_completed_check_apar
+        then: ec1_course_completed
     default: ec1_course_not_completed      # SOP 3.3 — in plan but not completed
 
-  # EC1 Step 3.2 — Completed: check APAR flag before showing SOP 3.2 message
-  - id: ec1_completed_check_apar
-    type: branch
-    rules:
-      - if: >
-          len([
-            1
-            for plan in (ctx.collected.all_courses or [])
-            for item in (plan.get('contentList') or [])
-            if plan.get('isApar') == True
-            and item.get('contentType') == 'Course'
-            and (
-              (ctx.collected.ec1_course_name or '').strip().lower() in (item.get('name') or '').lower()
-              or (item.get('name') or '').lower() in (ctx.collected.ec1_course_name or '').strip().lower()
-            )
-          ]) > 0
-        then: ec1_course_completed          # SOP 3.2 — completed + APAR
-    default: ec1_course_not_completed       # completed but non-APAR → SOP 3.3 message
-
-  # EC1 Step 3.2 — Course completed AND is APAR (SOP 3.2)
+  # EC1 Step 3.2 — Course completed (APAR or Non-APAR)
   - id: ec1_course_completed
     type: message
     prompt:

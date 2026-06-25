@@ -2,28 +2,39 @@
 # MODE B — DETERMINISTIC + LLM TICKET TAIL
 # =============================================================================
 # Flow: Course / Program / Event Progress Issue (UC-01)
+# SOP Version: Latest (Certificate + Technical Issue + Assessment Limit + Engineering Excel Remarks)
 #
 # Mode B pattern:
-#   1. User picks affected course from their enrollment list
-#   2. Check completion percentage and incomplete resource IDs
-#   3. Fetch resource metadata (name, mimeType) → SCORM vs Non-SCORM guidance
-#   4. If user says still not resolved → transfer_llm (auto_raise:true)
-#      generates ticket summary → Zoho ticket created automatically
+#   1. User picks affected course/program/event from their enrollment list
+#   2. Call Enrollment API → validate certificateIssued field
+#   3. Identify content type (Course / Program / Event)
+#      - If Program: call Hierarchy Read API to fetch child Course DO_IDs
+#   4. Call Admin Content State API → compare status per leaf resource
+#      - Enrollment API status=1 AND Admin Content State status=2 → Technical Issue
+#   5. If technical issue → confirm with user → raise ticket + update Engineering Excel
+#   6. If no technical issue → identify pending resources → route by resource type
+#      - SCORM / Non-SCORM / Assessment flows
+#   7. If all resources complete but no certificate → revalidate from Step 2
+#   8. Engineering Excel remarks handling (Success / Sync Completed / Failed)
 #
 # APIs used:
 #   POST /api/course/private/v4/user/enrollment/list/{user_id}
+#   GET  /api/content/v1/hierarchy/{program_id}
 #   GET  /api/content/v1/read/{course_id}
 #   POST /api/content/v1/search
+#   POST /api/admin/content/state/read          (Admin Content State API)
+#   GET  /api/assessment/v1/attempts/{user_id}/{content_id}  (Assessment Limit API)
 # =============================================================================
 
 flow_id: COURSE_PROGRESS_ISSUE
 flow_type: deterministic_with_llm_fallback
-version: 2
+version: 3
 
 metadata:
   category:         course
   menu_label:       "📊 Course progress issue"
-  menu_group:       "Learning"
+  menu_group:       "Content Related Issue"
+  menu_group_order: 2
   menu_order:       3
   classification:   Incident
   default_portal:   Learner Portal
@@ -41,7 +52,11 @@ classification:
     - "progress issue"
     - "course progress problem"
     - "program progress not updating"
-    - "event progress stuck"
+    - "program progress not updating"
+    - "certificate not generated"
+    - "certificate not issued"
+    - "progress not updating"
+    - "resource not completing"
 
 entry_node: pick_course_from_list
 
@@ -52,44 +67,366 @@ imports:
       cf_category:     course
       cf_sub_category: course_progress
       cf_flow_id:      COURSE_PROGRESS_ISSUE
-  - fragment: _enrollment_picker
-    with:
-      node_id:       pick_course_from_list
-      prompt_text:   "Here are your enrolled courses. Please select the one you are having trouble with:"
-      field_name:    course_id
-      field_prefix:  ""
-      next:          branch_on_completion
 
 nodes:
 
-  # pick_course_from_list — injected from _shared/_enrollment_picker.yaml
+
+  # ---------------------------------------------------------------------------
+  # Picker A — Courses & Programs (same enrollment list API, no filter needed)
+  # Both Course and Program appear in $.courses with different primaryCategory.
+  # primaryCategory is captured via extra_fields → used downstream in
+  # branch_on_content_type to decide whether to call the hierarchy API.
+  # ---------------------------------------------------------------------------
+  - id: pick_course_from_list
+    type: collect
+    prompt:
+      text: "Kindly search and select the relevant **Course / Program** for which you are facing the progress update or certificate generation issue:"
+    field:
+      name: collected.course_id
+      type: select
+    dynamic_options:
+      source: api
+      integration: karmayogi
+      request:
+        method: POST
+        url: "/api/course/private/v4/user/enrollment/list/{{ ctx.user_id_hash }}"
+        body:
+          request:
+            retiredCoursesEnabled: true
+            status: ["In-Progress", "Completed"]
+      response_mapping:
+        list_path:       "$.courses"
+        id_field:        courseId
+        label_field:     courseName
+        sub_label_field: completionPercentage
+        extra_fields:
+          - { from: courseName,           to: collected.course_name }
+          - { from: completionPercentage, to: collected.completion_pct }
+          - { from: langContentStatus,    to: collected.completed_ids,        transform: extract_completed_ids }
+          - { from: langContentStatus,    to: collected.incomplete_ids,       transform: extract_incomplete_ids }
+          - { from: langContentStatus,    to: collected.lang_content_status }
+          - { from: status,               to: collected.enrollment_status,    transform: enrollment_status_to_int }
+          - { from: completedOn,          to: collected.completed_on_iso,     transform: unix_ms_to_iso }
+          - { from: issuedCertificates,   to: collected.issued_certificates }
+          # Derive the boolean used by branch_on_certificate_issued directly from
+          # the picker response — avoids a redundant second Enrollment API call.
+          - { from: issuedCertificates,   to: collected.certificate_issued,   transform: has_issued_certificates }
+          # batchId resolution: completed courses often return it at the top level;
+          # in-progress courses nest it inside batches[0].batchId.
+          # Both mappings target the same field; the collect_node only writes
+          # non-None values, so whichever source resolves first wins and the
+          # other is silently ignored when it returns None.
+          - { from: batchId,              to: collected.batch_id }
+          - { from: batches,              to: collected.batch_id,              transform: extract_batch_id }
+          - { from: primaryCategory,      to: collected.primary_category }
+          # contentId is needed by the ticket-raise node (content_do_id field).
+          - { from: contentId,            to: collected.content_do_id }
+      search:     { enabled: true, placeholder: "Search your enrolled courses and programs..." }
+      pagination: { enabled: true, page_size: 10 }
+      cache_ttl:  300
+      on_empty:   no_courses_found
+    # Skip api_enrollment_check — all required fields are already captured above.
+    # api_enrollment_check used $.result.enrollments[0] which is the wrong response
+    # path; the API actually returns data under $.courses[*] (matching list_path above).
+    next: branch_on_certificate_issued
+
+
+
+
+
 
   # ===========================================================================
-  # 2. Branch on completion percentage and incomplete resource IDs
+  # STEP 2 — Validate Certificate Generation Status
+  # NOTE: api_enrollment_check below is DEPRECATED and no longer reachable.
+  # pick_course_from_list now routes directly to branch_on_certificate_issued
+  # because all fields are already captured via extra_fields in the picker.
+  # The old api_enrollment_check used $.result.enrollments[0] which was the
+  # wrong JSON path — the API returns data under $.courses[*].
+  # This node is retained only for reference; it will never be executed.
   # ===========================================================================
-  - id: branch_on_completion
+  - id: api_enrollment_check
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/course/private/v4/user/enrollment/list/{{ ctx.user_id_hash }}"
+      body:
+        request:
+          filters:
+            courseId: "{{ ctx.collected.course_id }}"
+          fields: ["id", "courseId", "contentId", "status", "completionPercentage",
+                   "issuedCertificates", "contentType", "primaryCategory"]
+    response_mapping:
+      - { from: "$.result.enrollments[0].issuedCertificates", to: collected.certificate_issued,
+          transform: has_issued_certificates }
+      - { from: "$.result.enrollments[0].completionPercentage", to: collected.completion_pct }
+      - { from: "$.result.enrollments[0].primaryCategory",   to: collected.primary_category }
+      - { from: "$.result.enrollments[0].contentId",         to: collected.content_do_id }
+      - { from: "$.result.enrollments[0].status",            to: collected.enrollment_status }
+    on_success: branch_on_certificate_issued
+    on_error:
+      any: resolution_generic_error
+    timeout_ms: 8000
+
+  # Branch: if certificate is already issued, inform the user and close
+  - id: branch_on_certificate_issued
     type: branch
     rules:
-      - { if: "ctx.collected.completion_pct == 100",
-          then: resolution_already_complete }
-    default: api_read_course_content
+      - { if: "ctx.collected.certificate_issued == True",
+          then: resolution_certificate_already_issued }
+    default: api_read_content_type
 
-  # Resolution: already complete
-  - id: resolution_already_complete
+  # Resolution: certificate already generated
+  - id: resolution_certificate_already_issued
     type: message
     prompt:
       text: |
-        Our records show that **{{ ctx.collected.course_name }}** is already marked as **100% complete** for your account.
+        Your certificate for **{{ ctx.collected.course_name }}** has already been generated. 🎉
 
-        If your progress isn't reflecting correctly in the UI, try logging out and back in to refresh your view.
-    next: progress_resolution_check
+        Kindly check your profile under the **Certificates** section.
+    next: satisfied
 
   # ===========================================================================
-  # 2b. Cross-check leaf nodes from content/read API
-  # API: GET /api/content/v1/read/{course_id}
-  # Computes true incomplete_ids = leafNodes − completed_ids (from enrollment).
-  # This catches resources the user has never opened (absent from langContentStatus).
-  # Falls back to enrollment-based incomplete_ids on error.
+  # STEP 3 — Identify Content Type
+  # certificateIssued == False → call Private Content Read API to get
+  # primaryCategory authoritatively (Course / Program / Event).
+  # DO_ID used: the course_id selected by the user from the enrollment list.
+  # API: GET /api/content/v1/read/{do_id}
+  # ===========================================================================
+  - id: api_read_content_type
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/content/v1/read/{{ ctx.collected.course_id }}"
+    response_mapping:
+      # KarmayogiService unwraps the result envelope: returns data["result"] directly.
+      # Correct path is $.content.primaryCategory, NOT $.result.content.primaryCategory.
+      - { from: "$.content.primaryCategory", to: collected.primary_category }
+    on_success: branch_on_content_type
+    on_error:
+      any: resolution_generic_error
+    timeout_ms: 8000
+
+  # Branch on the freshly fetched primaryCategory
+  # Course / Event → proceed directly with the selected DO_ID
+  # Program        → call Hierarchy Read API to fetch child Course DO_IDs first
+  - id: branch_on_content_type
+    type: branch
+    rules:
+      - { if: "ctx.collected.primary_category == 'Program'",
+          then: api_fetch_program_hierarchy }
+    default: api_admin_content_state
+
+  # Fetch child Course DO_IDs for Programs via Hierarchy Read API
+  # API: GET /api/private/content/v3/hierarchy/{program_id}?mode=edit
+  # Using v3 private endpoint with mode=edit to retrieve full child course structure.
+  - id: api_fetch_program_hierarchy
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/private/content/v3/hierarchy/{{ ctx.collected.course_id }}?mode=edit"
+    response_mapping:
+      - { from: "$.content.children[*].identifier",
+          to:   collected.child_course_ids,
+          transform: extract_all_identifiers }
+    on_success: api_admin_content_state_loop
+    on_error:
+      any: resolution_generic_error
+    timeout_ms: 8000
+
+  # ===========================================================================
+  # STEP 4 (Program path) — Admin Content State loop across ALL child courses
+  #
+  # Programs have multiple child Course DO_IDs. The Admin Content State API
+  # only accepts one courseId per call. We loop through every child course using
+  # increment_and_branch so that ALL child-course consumption records are
+  # accumulated into collected.admin_content_states before the technical-issue
+  # comparison runs.
+  #
+  # Loop mechanics:
+  #   ctx.counters.child_loop_idx starts at 0 (unset counter default).
+  #   api_admin_content_state_loop calls with child_course_ids[child_loop_idx].
+  #   loop_child_course increments the counter, then:
+  #     - if child_loop_idx < len(child_course_ids) → loop back
+  #     - else                                       → branch_on_technical_issue
+  #
+  # Transform: append_consumption_records accumulates records across iterations
+  # (requires transform_ctx_key: collected.admin_content_states).
+  # ===========================================================================
+  - id: api_admin_content_state_loop
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/admin/content/state/read"
+      body:
+        request:
+          userId:   "{{ ctx.user_id_hash }}"
+          courseId: "{{ ctx.collected.child_course_ids[ctx.counters.child_loop_idx] }}"
+          batchId:  "{{ ctx.collected.batch_id }}"
+    response_mapping:
+      - { from: "$.consumptionRecords[*]",
+          to:   collected.admin_content_states,
+          transform: append_consumption_records,
+          transform_ctx_key: collected.admin_content_states }
+    on_success: loop_child_course
+    on_error:
+      # Skip on error (e.g. missing batchId for one child course) and still
+      # advance the loop counter so remaining child courses are checked.
+      any: loop_child_course
+    timeout_ms: 8000
+
+  - id: loop_child_course
+    type: increment_and_branch
+    counter: child_loop_idx
+    rules:
+      - { if: "ctx.counters.child_loop_idx < len(ctx.collected.child_course_ids)",
+          then: api_admin_content_state_loop }
+    default: branch_on_technical_issue
+
+  # ===========================================================================
+  # STEP 4 — Call Admin Content State API
+  # Must always be called using Course DO_ID(s).
+  # For Programs → handled above by api_admin_content_state_loop + loop_child_course.
+  # For Course / Event → use course_id directly (this node).
+  #
+  # API: POST /api/admin/content/state/read
+  # Request body fields:
+  #   userId   — the learner's user ID
+  #   courseId — the Course DO_ID (singular; not the Program DO_ID)
+  #   batchId  — the batch ID captured from the Enrollment API
+  #
+  # Response (after KarmayogiService unwraps the result envelope):
+  #   consumptionRecords[*] each record contains:
+  #   contentid — leaf resource DO_ID
+  #   language  — content language (e.g. "english")
+  #   status    — 0 = not started, 1 = in-progress, 2 = completed
+  # ===========================================================================
+  - id: api_admin_content_state
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/admin/content/state/read"
+      body:
+        request:
+          userId:   "{{ ctx.user_id_hash }}"
+          # Inline if-else instead of [0]|default(): Jinja2 NativeEnvironment
+          # converts ""[0] (from _DotDict's missing-key fallback) into an
+          # Undefined object that | default() does not catch, causing
+          # TypeError: Object of type Undefined is not JSON serializable.
+          # The inline if-else tests truthiness first ("" is falsy, a
+          # non-empty list is truthy) and never evaluates [0] on a missing list.
+          courseId: "{{ ctx.collected.child_course_ids[0] if ctx.collected.child_course_ids else ctx.collected.course_id }}"
+          batchId:  "{{ ctx.collected.batch_id }}"
+    response_mapping:
+      # KarmayogiService unwraps result → correct path is $.consumptionRecords[*]
+      - { from: "$.consumptionRecords[*]",
+          to:   collected.admin_content_states,
+          transform: extract_consumption_records }
+    on_success: branch_on_technical_issue
+    on_error:
+      # batchId may be null/undefined for in-progress courses that haven't been
+      # assigned to a batch yet — fall through to the next documented step rather
+      # than dead-ending the conversation.
+      any: api_read_course_content
+    timeout_ms: 8000
+
+  # ===========================================================================
+  # STEP 5 — Check for Technical Issues
+  #
+  # Cross-reference logic:
+  #   Enrollment API  → langContentStatus.<language>.<do_id> : status_value
+  #                     status 1 = In-Progress, 2 = Completed
+  #   Admin Content State API → consumptionRecords[].contentid + .language + .status
+  #                             status 2 = completed on backend
+  #
+  # A TECHNICAL ISSUE exists when, for a given leaf DO_ID:
+  #   - Enrollment langContentStatus shows status = 1  (In-Progress for the learner)
+  #   - Admin Content State shows    status = 2  (completed on the server)
+  #   meaning the backend has recorded completion but the portal hasn't reflected it.
+  #
+  # Transform: compare_enrollment_vs_admin_state
+  #   Inputs:
+  #     ctx.collected.lang_content_status  — raw langContentStatus object from Enrollment API
+  #                                          e.g. { "english": { "do_xxx": 1, "do_yyy": 2 } }
+  #     ctx.collected.admin_content_states — list from consumptionRecords
+  #                                          e.g. [{ contentid, language, status }, ...]
+  #   Returns: True if any resource has enrollment_status=1 AND admin_status=2
+  # ===========================================================================
+  - id: branch_on_technical_issue
+    type: branch
+    rules:
+      - { if: "compare_enrollment_vs_admin_state(ctx.collected.lang_content_status, ctx.collected.admin_content_states) == True",
+          then: confirm_technical_issue }
+      - { if: "ctx.collected.completion_pct == 100",
+          then: branch_certificate_not_generated }
+    default: api_read_course_content
+
+  # ===========================================================================
+  # STEP 6 — Technical Issue Found → Obtain User Confirmation (SOP 6.1.1)
+  # ===========================================================================
+  - id: confirm_technical_issue
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found some **technical issues** affecting one or more resources under the selected **Course / Program / Event**.
+
+        We can raise a support ticket for further investigation.
+
+        Kindly confirm whether you would like us to proceed.
+    quick_replies:
+      - { id: yes, label: "✅ Yes, please raise a ticket" }
+      - { id: no,  label: "❌ No, thank you" }
+    disable_input: true
+    on_reply:
+      yes: technical_issue_auto_ticket
+      no:  technical_issue_declined
+
+  # User declined — close the conversation politely (SOP 6.3)
+  - id: technical_issue_declined
+    type: message
+    prompt:
+      text: |
+        Understood. Please feel free to reach out if you require any further assistance.
+    next: satisfied
+
+  # Collect email before raising ticket for technical issue
+  - id: technical_issue_auto_ticket
+    type: transfer_llm
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        A technical issue has been detected for this user's course/program/event progress.
+        Enrollment API status = 1 and Admin Content State API status = 2 for one or more resources.
+        Generate a Zoho support ticket AND update the Engineering Excel with:
+          - User ID: {{ ctx.user_id_hash }}
+          - Program / Course / Event DO_ID: {{ ctx.collected.course_id }}
+          - Content DO_ID: {{ ctx.collected.content_do_id }}
+        Subject: "Technical Issue – Progress Not Updating — <course_name>"
+        Description: include user_id, course_name, course_id, content_do_id,
+          admin_content_states mismatch details, and user_email.
+      engineering_excel_update:
+        user_id:        "{{ ctx.user_id_hash }}"
+        do_id:          "{{ ctx.collected.course_id }}"
+        content_do_id:  "{{ ctx.collected.content_do_id }}"
+      priority_override: P3
+    on_complete: confirm_ticket
+    on_restart: pick_course_from_list
+    # NOTE: confirm_ticket is provided by the imported _zoho_ticket fragment.
+    # It POSTs to Zoho Desk → maps $.ticketNumber → collected.ticket_id
+    # → routes to ticket_confirmation which displays: "✅ Ticket #XXXXX raised."
+
+  # ===========================================================================
+  # STEP 7 — No Technical Issue Found
+  # 7.1 Identify the pending resource(s)
+  # 7.2 Proceed to determine the resource type (SCORM / Non-SCORM / Assessment)
+  # Cross-check leaf nodes using content/read API against completed_ids
   # ===========================================================================
   - id: api_read_course_content
     type: api_call
@@ -98,26 +435,144 @@ nodes:
       method: GET
       url: "/api/content/v1/read/{{ ctx.collected.course_id }}"
     response_mapping:
-      - from: "$.content.leafNodes"
-        to: collected.incomplete_ids
-        transform: diff_leaf_nodes
-        transform_ctx_key: collected.completed_ids
+      # Path is $.content.leafNodes — KarmayogiService DOES unwrap the result
+      # envelope (returns data["result"] directly), so $.result.* paths are
+      # WRONG. The unwrapped response shape is: {"content": {"leafNodes": [...]}}
+      # hence $.content.leafNodes is the correct path after unwrapping.
+      - { from: "$.content.leafNodes",
+          to:   collected.incomplete_ids,
+          transform: diff_leaf_nodes,
+          transform_ctx_key: collected.completed_ids }
     on_success: branch_on_leaf_ids_available
     on_error:
       any: api_fetch_resource_metadata
     timeout_ms: 8000
 
-  # Branch: if leaf-node diff yields nothing to do, the course is actually complete
   - id: branch_on_leaf_ids_available
     type: branch
     rules:
       - { if: "len(ctx.collected.incomplete_ids) == 0",
-          then: resolution_already_complete }
+          then: branch_certificate_not_generated }
     default: api_fetch_resource_metadata
 
   # ===========================================================================
-  # 3. Fetch resource metadata for incomplete resources
-  # API: POST /api/content/v1/search
+  # STEP 12 — All resources complete but certificate not generated → Revalidate
+  # ===========================================================================
+  - id: branch_certificate_not_generated
+    type: message
+    prompt:
+      text: |
+        It appears all resources under **{{ ctx.collected.course_name }}** have been completed. However, the certificate has not yet been generated.
+
+        We will now re-validate your completion status. Please wait a moment…
+    next: api_enrollment_revalidate
+
+  # Revalidate: re-call Enrollment API (Step 2 repeated)
+  # langContentStatus is re-fetched here so that branch_revalidate_technical_issue
+  # compares FRESH enrollment status against fresh Admin Content State status
+  # (SOP Section 12.1 — "Compare the Enrollment API status with the Admin Content State API status").
+  - id: api_enrollment_revalidate
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/course/private/v4/user/enrollment/list/{{ ctx.user_id_hash }}"
+      body:
+        request:
+          filters:
+            courseId: "{{ ctx.collected.course_id }}"
+          fields: ["id", "courseId", "contentId", "status", "completionPercentage",
+                   "issuedCertificates", "contentType", "primaryCategory",
+                   "langContentStatus"]
+    response_mapping:
+      - { from: "$.courses[0].issuedCertificates", to: collected.certificate_issued,
+          transform: has_issued_certificates }
+      - { from: "$.courses[0].completionPercentage", to: collected.completion_pct }
+      - { from: "$.courses[0].status",            to: collected.enrollment_status }
+      # Refresh langContentStatus so the revalidation comparison uses up-to-date
+      # enrollment-side resource statuses (required by SOP 12.1).
+      - { from: "$.courses[0].langContentStatus", to: collected.lang_content_status }
+    on_success: branch_revalidate_certificate
+    on_error:
+      any: resolution_generic_error
+    timeout_ms: 8000
+
+  - id: branch_revalidate_certificate
+    type: branch
+    rules:
+      - { if: "ctx.collected.certificate_issued == True",
+          then: resolution_certificate_already_issued }
+    default: api_admin_content_state_revalidate
+
+  # Re-call Admin Content State API for revalidation
+  - id: api_admin_content_state_revalidate
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/admin/content/state/read"
+      body:
+        request:
+          userId:   "{{ ctx.user_id_hash }}"
+          # Same inline if-else fix as api_admin_content_state — see comment there.
+          courseId: "{{ ctx.collected.child_course_ids[0] if ctx.collected.child_course_ids else ctx.collected.course_id }}"
+          batchId:  "{{ ctx.collected.batch_id }}"
+    response_mapping:
+      # KarmayogiService unwraps result → correct path is $.consumptionRecords[*]
+      - { from: "$.consumptionRecords[*]",
+          to:   collected.admin_content_states,
+          transform: extract_consumption_records }
+    on_success: branch_revalidate_technical_issue
+    on_error:
+      # Same fallback as the primary api_admin_content_state — if batchId is
+      # unavailable during revalidation, skip the technical-issue cross-check
+      # and proceed directly to internal escalation (SOP 12.3).
+      any: resolution_escalate_internally
+    timeout_ms: 8000
+
+  # SOP 12.2 — If a technical issue is identified during revalidation → Section 6
+  # (enrollment status ≠ Admin Content State status for one or more resources)
+  # SOP 12.3 — If no technical issue is identified → escalate internally
+  # Both comparisons now use FRESH langContentStatus fetched by api_enrollment_revalidate.
+  - id: branch_revalidate_technical_issue
+    type: branch
+    rules:
+      - { if: "compare_enrollment_vs_admin_state(ctx.collected.lang_content_status, ctx.collected.admin_content_states) == True",
+          then: confirm_technical_issue }
+    default: resolution_escalate_internally
+
+  # SOP 12.3 — No technical issue identified on revalidation → escalate internally
+  # (all resources show as completed on both Enrollment API and Admin Content State API
+  #  but certificate has still not been generated — escalate to the support team)
+  - id: resolution_escalate_internally
+    type: message
+    prompt:
+      text: |
+        We have completed re-validation of your progress for **{{ ctx.collected.course_name }}**.
+
+        No technical issue was identified, but the certificate has still not been generated.
+
+        We are escalating this issue internally to the concerned team for further investigation.
+
+        Please feel free to reach out if you require any further assistance.
+    next: satisfied
+
+  # ===========================================================================
+  # STEP 8 — Identify Resource Type (SOP 8.1)
+  #
+  # 8.1 Content Search by incomplete resource IDs.
+  #     POST /api/content/v1/search
+  #     filters.identifier = incomplete_ids[] — the API returns ONLY the pending
+  #     resources (identified in Step 7 via the leaf-node diff). No client-side
+  #     filtering is required; non-filtered transforms are used directly.
+  #     KarmayogiService unwraps {result:{...}} → content accessible at $.content[*]
+  #
+  # Routing decision (priority order):
+  #   Priority 1: all incomplete resources have primaryCategory "Course Assessment"
+  #               → Assessment guidance
+  #   Priority 2: any incomplete resource has mimeType "application/vnd.ekstep.html-archive"
+  #               → SCORM guidance
+  #   Priority 3: default → Standard guidance
   # ===========================================================================
   - id: api_fetch_resource_metadata
     type: api_call
@@ -128,26 +583,60 @@ nodes:
       body:
         request:
           filters:
+            # Query directly by incomplete resource IDs (from Step 7 leaf-node diff).
+            # The API returns metadata only for the pending resources; no client-side
+            # filtering against incomplete_ids is needed.
             identifier: "{{ ctx.collected.incomplete_ids }}"
+            # Explicitly include all statuses so that resources in Draft / Review /
+            # Retired state (common for leaf nodes the user has never opened) are
+            # returned. Without this filter the API defaults to Live-only and the
+            # content array comes back empty → blank resource name in the message.
+            status:
+              - "Live"
+              - "Review"
+              - "Draft"
+              - "Retired"
           isSecureSettingsDisabled: true
           sort_by:
             createdOn: "desc"
-          fields: ["identifier", "name", "mimeType", "status", "duration", "primaryCategory"]
-          facets: ["status"]
+          fields:
+            - "identifier"
+            - "name"
+            - "mimeType"
+            - "status"
+            - "duration"
+            - "primaryCategory"
+          facets:
+            - "status"
           limit: 1000
     response_mapping:
-      - { from: "$.content[*].name",  to: collected.incomplete_resource_names,    transform: extract_all_names }
-      - { from: "$.content[*].mimeType", to: collected.has_scorm_resources,        transform: detect_scorm }
-      - { from: "$.content[*]",        to: collected.scorm_resource_name,          transform: extract_scorm_resource_name }
-      - { from: "$.content[*]",        to: collected.scorm_resource_duration_min,  transform: extract_scorm_duration_minutes }
-      - { from: "$.content[*]",        to: collected.all_resources_assessment,     transform: detect_assessment_only }
+      # Priority 1 — Check if ALL pending resources are Course Assessments
+      - { from: "$.content[*]", to: collected.all_resources_assessment,
+          transform: detect_assessment_only }
+      # Priority 2 — Check if any resource has SCORM mimeType
+      - { from: "$.content[*].mimeType", to: collected.has_scorm_resources,
+          transform: detect_scorm }
+      # Surface incomplete resource names for display in resolution messages
+      - { from: "$.content[*].name", to: collected.incomplete_resource_names,
+          transform: extract_all_names }
+      # SCORM-specific: first SCORM resource name + duration (minutes)
+      - { from: "$.content[*]", to: collected.scorm_resource_name,
+          transform: extract_scorm_resource_name }
+      - { from: "$.content[*]", to: collected.scorm_resource_duration_min,
+          transform: extract_scorm_duration_minutes }
     on_success: branch_on_resource_type
     on_error:
       any: resolution_generic_error
     timeout_ms: 8000
 
+
   # ===========================================================================
-  # 4. Route to SCORM or standard guidance
+  # STEP 8.1 — Branch on Resource Type
+  #
+  # Decision order (per SOP 8.1):
+  #   1. primaryCategory = "Course Assessment" (8.1.2) → resolution_assessment_guidance
+  #   2. primaryCategory = "Course" + mimeType = "application/vnd.ekstep.html-archive" (8.1.1) → resolution_scorm_guidance
+  #   3. primaryCategory = "Course" + other mimeType (8.1.1) → resolution_non_scorm_guidance
   # ===========================================================================
   - id: branch_on_resource_type
     type: branch
@@ -156,36 +645,40 @@ nodes:
       - { if: "ctx.collected.has_scorm_resources == true",      then: resolution_scorm_guidance }
     default: resolution_non_scorm_guidance
 
-  # Resolution — SCORM resource
+
+  # ===========================================================================
+  # STEP 9 — SCORM Resource Flow
+  #
+  # 9.1.1 Share the pending resource details (exact SOP wording)
+  # 9.2   SCORM-specific completion instructions
+  # 9.3   Navigation steps to locate and complete the pending resource
+  # ===========================================================================
   - id: resolution_scorm_guidance
     type: resolution
     prompt:
       text: |
-        We see that you have enrolled in **{{ ctx.collected.course_name }}**.
+        We found that the resource **“{{ ctx.collected.scorm_resource_name }}”** is still **In Progress / Not Started**.
 
-        The resource titled **“{{ ctx.collected.scorm_resource_name }}”** is still **In Progress** or **Not Started**.
+        This resource is in **SCORM format**.
 
-        The resource is in **SCORM format**.
+        Kindly follow the below instructions carefully:
 
-        Please note the following:
-        - The course is meant to be understood and completed in **one session**.
-        - If you try to increase the playback speed, your progress may **not be recorded correctly**.
-        - This may cause issues while generating your **course certificate**.
+        - Complete the resource in **one continuous session**.
+        - **Do not increase the playback speed** while viewing the content.
+        - Complete **at least 60% of the total duration** of the resource.
+        - **Do not switch browser tabs or move to another application** while the SCORM resource is playing, as doing so may interrupt progress tracking and prevent completion from being recorded.
+        - After completing the resource, click the **Next** button.
 
-        **Additional Instruction:**
-        If the resource duration is **{{ ctx.collected.scorm_resource_duration_min }} minutes**, you must spend at least **{{ ctx.collected.scorm_resource_duration_min }} minutes** on that resource.
-
-        At the end, click the **“Next”** button in the upper-right corner to move to the next resource. Only then will the progress reflect as completed.
+        Progress will be updated only after the above steps are completed successfully.
     steps:
-      - "Go to **Profile**"
-      - "Click on **My Learning**"
-      - "Open the **In Progress** section under Contents"
-      - "Locate and select **{{ ctx.collected.course_name }}**"
-      - "Click on **Resume**"
-      - "Expand each module by clicking the **plus (+) icon**"
-      - "Check for content items **without a blue tick mark**"
-      - "All modules must show a **blue tick** to complete the course 100%"
-      - "Resume and complete the pending videos or content from the **top-right corner** until all items are marked complete"
+      - "Go to **Profile**."
+      - "Open **My Learning**."
+      - "Navigate to **In Progress**."
+      - "Select the relevant **Course / Program / Event**."
+      - "Click **Resume**."
+      - "Expand each module using the **“+” icon**."
+      - "Check for content items that **do not have a blue tick mark**."
+      - "Complete all pending resources until every item displays a **blue tick**."
     follow_up:
       text: "Has your issue been resolved? Please let us know if you need any further assistance."
       quick_replies:
@@ -194,28 +687,33 @@ nodes:
         - { id: PENDING, label: "🕐 I'll try and come back" }
     on_reply:
       YES:     progress_updated_end
-      NO:      progress_collect_email
+      NO:      progress_auto_ticket
       PENDING: progress_pending_end
 
-  # Resolution — Non-SCORM resource
+  # ===========================================================================
+  # STEP 10 — Non-SCORM Resource Flow
+  #
+  # 10.1.1 Messaging: resource is still incomplete — revisit and complete
+  # 10.2   Same navigation steps as Section 9.3
+  # ===========================================================================
   - id: resolution_non_scorm_guidance
     type: resolution
     prompt:
       text: |
-        We see that you have enrolled in **{{ ctx.collected.course_name }}**.
-
-        The following resources are still **In Progress** or **Not Started**:
+        We found that the following resource(s) under **{{ ctx.collected.course_name }}** are still **incomplete**:
 
         {{ ctx.collected.incomplete_resource_names }}
 
-        Kindly revisit the course and complete the above resources to update your progress.
+        Kindly revisit and complete the pending resource(s).
     steps:
-      - "Go to **Profile** → **My Learning** → **In Progress**"
-      - "Locate **{{ ctx.collected.course_name }}** and click **Resume**"
-      - "Expand each module (click the **+** icon)"
-      - "Check for content items **without a blue tick mark**"
-      - "All modules must show a **blue tick** to complete the course 100%"
-      - "Resume and complete the pending videos or content from the **top-right corner** until all items are marked complete"
+      - "Go to **Profile**."
+      - "Open **My Learning**."
+      - "Navigate to **In Progress**."
+      - "Select the relevant **Course / Program / Event**."
+      - "Click **Resume**."
+      - "Expand each module using the **“+” icon**."
+      - "Check for content items that **do not have a blue tick mark**."
+      - "Complete all pending resources until every item displays a **blue tick**."
     follow_up:
       text: "Has your issue been resolved? Please let us know if you need any further assistance."
       quick_replies:
@@ -224,25 +722,25 @@ nodes:
         - { id: PENDING, label: "🕐 I'll try and come back" }
     on_reply:
       YES:     progress_updated_end
-      NO:      progress_collect_email
+      NO:      progress_auto_ticket
       PENDING: progress_pending_end
 
   # ===========================================================================
-  # 5. Assessment guidance path
+  # STEP 11 — Assessment Flow
   # ===========================================================================
-
-  # Resolution — Assessment pending
   - id: resolution_assessment_guidance
     type: resolution
     prompt:
       text: |
-        We checked your course progress for **{{ ctx.collected.course_name }}** and found that all learning resources have been completed. However, the **assessment** is still pending.
+        We found that all learning resources have been completed successfully.
 
-        Kindly complete the assessment to achieve 100% course completion.
+        However, the assessment is still pending.
+
+        Kindly complete the assessment to achieve 100% completion.
     steps:
       - "Go to **Profile** → **My Learning** → **In Progress**"
       - "Open **{{ ctx.collected.course_name }}** → click **Resume**"
-      - "Expand each module (click the **+** icon) and locate the pending assessment"
+      - "Expand each module using the **+ icon** and locate the pending assessment"
       - "Complete the assessment — all modules must show a **blue tick** for 100% completion"
     follow_up:
       text: "Were you able to complete the assessment?"
@@ -255,54 +753,269 @@ nodes:
       NO:      assessment_issue_check
       PENDING: progress_pending_end
 
-  # Ask what kind of issue the user faces with the assessment
+  # Ask what kind of issue the user faces with the assessment (Section 11.3)
   - id: assessment_issue_check
     type: message
     prompt:
-      text: "I'm sorry to hear that. Could you tell me more about the issue you're facing?"
+      text: "I'm sorry to hear that. Could you tell me more about the issue you're facing with the assessment?"
     quick_replies:
-      - { id: error_msg,      label: "⚠️ Seeing an error message" }
-      - { id: limit_exceeded, label: "🚫 Assessment attempt limit exceeded" }
-      - { id: mobile,         label: "📱 Accessing through mobile" }
+      - { id: mobile,         label: "Unable to complete the assessment from Mobile." }
+      - { id: limit_exceeded, label: "Assessment Limit Exceeded." }
+      - { id: other_error,    label: "Any Other Error." }
     disable_input: true
     on_reply:
-      error_msg:      progress_collect_email
-      limit_exceeded: progress_collect_email
       mobile:         assessment_mobile_guidance
+      limit_exceeded: api_assessment_limit_check
+      other_error:    assessment_other_error_collect
 
-  # Guidance when user is on mobile
+  # Section 11.4 — Mobile guidance
   - id: assessment_mobile_guidance
+    type: resolution
+    prompt:
+      text: |
+        Kindly try completing the assessment through the web portal by following the below steps.
+    steps:
+      - "Open Google Chrome or any web browser."
+      - "Search for iGOT Karmayogi."
+      - "Open the iGOT Karmayogi Portal."
+      - "From the browser menu, enable Desktop Site."
+      - "Log in using your credentials."
+      - "Navigate to My Learning."
+      - "Open the relevant Course / Program / Event."
+      - "Click Resume."
+      - "Open the assessment and complete it."
+    next: satisfied
+
+  # Section 11.5 — Assessment Limit Exceeded: call Assessment Limit API
+  - id: api_assessment_limit_check
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/admin/assesment/retake/count?assessmentIdentifier={{ ctx.collected.content_do_id }}&userId={{ ctx.user_id_hash }}&editMode=false"
+    response_mapping:
+      - { from: "$.result",                 to: collected.remaining_attempts, transform: calculate_remaining_attempts }
+      - { from: "$.result.attemptsAllowed", to: collected.max_attempts }
+      - { from: "$.result.attemptsMade",    to: collected.used_attempts }
+    on_success: branch_on_assessment_attempts
+    on_error:
+      any: resolution_generic_error
+    timeout_ms: 8000
+
+  - id: branch_on_assessment_attempts
+    type: branch
+    rules:
+      - { if: "ctx.collected.remaining_attempts > 0",
+          then: resolution_attempts_available }
+    default: assessment_limit_auto_ticket   # Limit actually exceeded → raise ticket
+
+  # Attempts still available → inform user
+  - id: resolution_attempts_available
     type: message
     prompt:
       text: |
-        Kindly try completing the assessment through the **web portal** at [iGOT Karmayogi](https://www.igotkarmayogi.gov.in), as some assessment-related issues may occur on mobile devices.
-    quick_replies:
-      - { id: yes, label: "✅ Yes, completed successfully" }
-      - { id: no,  label: "❌ No, still facing issue" }
-    disable_input: true
-    on_reply:
-      yes: progress_updated_end
-      no:  progress_collect_email
+        Upon verification, you still have {{ ctx.collected.remaining_attempts }} attempt(s) remaining.
 
-  # Generic API error fallback
-  - id: resolution_generic_error
+        Kindly retry the assessment.
+    next: satisfied
+
+  - id: assessment_limit_auto_ticket
+    type: transfer_llm
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user has exceeded their assessment attempt limit.
+        Generate a Zoho support ticket.
+        Subject: "Assessment Limit Exceeded — <course_name>"
+        Description: include user_id, course_name, course_id, content_do_id, and user_email.
+      priority_override: P3
+    on_complete: assessment_limit_ticket_confirm
+    on_restart: pick_course_from_list
+
+  - id: assessment_limit_ticket_confirm
     type: message
     prompt:
       text: |
-        I'm having trouble fetching your course details right now. Please try again in a few minutes.
+        We have verified that the assessment attempt limit has been exceeded.
 
-        If the issue persists, I can raise a support ticket for you.
+        A support ticket (Ticket ID: #{{ ctx.collected.ticket_id }}) has been raised and shared with the concerned team for further investigation.
+    next: satisfied
+
+  # Section 11.6 — Any Other Error: capture error, raise ticket
+  - id: assessment_other_error_collect
+    type: collect
+    prompt:
+      text: "Please describe the error you are seeing (and share a screenshot if available):"
+    field:
+      name: collected.error_description
+      type: text
+    next: assessment_other_error_ticket
+
+  - id: assessment_other_error_ticket
+    type: transfer_llm
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user encountered an error while attempting an assessment.
+        Generate a Zoho support ticket.
+        Subject: "Assessment Error — <course_name>"
+        Description: include user_id, course_name, course_id, content_do_id,
+          error_description, and user_email.
+      priority_override: P3
+    on_complete: assessment_other_error_ticket_confirm
+    on_restart: pick_course_from_list
+
+  - id: assessment_other_error_ticket_confirm
+    type: message
+    prompt:
+      text: |
+        We have captured the reported error and raised a support ticket (Ticket ID: #{{ ctx.collected.ticket_id }}) for further investigation.
+    next: satisfied
+  # ===========================================================================
+  # SECTION 13 — Engineering Excel Remarks Handling
+  # Triggered after Engineering Team updates remarks in the backend.
+  # Entry point: engineering_excel_remarks_check
+  # ===========================================================================
+  - id: engineering_excel_remarks_check
+    type: branch
+    rules:
+      - { if: "ctx.collected.engineering_remark == 'Success, Certificate Issued'",
+          then: remark_certificate_issued }
+      - { if: "ctx.collected.engineering_remark == 'Sync Completed, Course is Incomplete'",
+          then: remark_sync_completed_revalidate }
+      - { if: "ctx.collected.engineering_remark == 'Failed'",
+          then: remark_failed }
+    default: remark_failed
+
+  # Remark 1 — Success, Certificate Issued (Section 13.1)
+  - id: remark_certificate_issued
+    type: message
+    prompt:
+      text: |
+        Your certificate has been generated successfully. 🎉
+
+        Kindly check your profile under the **Certificates** section.
+    next: satisfied
+
+  # Remark 2 — Sync Completed, Course is Incomplete (Section 13.2)
+  # Restart validation from Step 2
+  - id: remark_sync_completed_revalidate
+    type: message
+    prompt:
+      text: |
+        The engineering team has completed the sync. We will now re-validate your progress. Please wait a moment…
+    next: api_enrollment_revalidate_remark
+
+  - id: api_enrollment_revalidate_remark
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/course/private/v4/user/enrollment/list/{{ ctx.user_id_hash }}"
+      body:
+        request:
+          filters:
+            courseId: "{{ ctx.collected.course_id }}"
+          fields: ["id", "courseId", "contentId", "status", "completionPercentage",
+                   "issuedCertificates", "contentType", "primaryCategory"]
+    response_mapping:
+      - { from: "$.result.enrollments[0].issuedCertificates", to: collected.certificate_issued,
+          transform: has_issued_certificates }
+      - { from: "$.result.enrollments[0].completionPercentage", to: collected.completion_pct }
+      - { from: "$.result.enrollments[0].status",            to: collected.enrollment_status }
+    on_success: branch_remark_revalidate_certificate
+    on_error:
+      any: resolution_generic_error
+    timeout_ms: 8000
+
+  - id: branch_remark_revalidate_certificate
+    type: branch
+    rules:
+      - { if: "ctx.collected.certificate_issued == True",
+          then: remark_certificate_issued }
+    default: api_admin_content_state_remark
+
+  - id: api_admin_content_state_remark
+    type: api_call
+    integration: karmayogi
+    request:
+      method: POST
+      url: "/api/admin/content/state/read"
+      body:
+        request:
+          userId:   "{{ ctx.user_id_hash }}"
+          # Same inline if-else fix as api_admin_content_state — avoids Jinja2
+          # NativeEnvironment Undefined error when child_course_ids is absent.
+          courseId: "{{ ctx.collected.child_course_ids[0] if ctx.collected.child_course_ids else ctx.collected.course_id }}"
+          batchId:  "{{ ctx.collected.batch_id }}"
+    response_mapping:
+      # KarmayogiService unwraps result → correct path is $.consumptionRecords[*]
+      - { from: "$.consumptionRecords[*]",
+          to:   collected.admin_content_states,
+          transform: extract_consumption_records }
+    on_success: branch_remark_technical_issue
+    on_error:
+      any: api_read_course_content
+    timeout_ms: 8000
+
+  # Remark 2 — Scenario A: Technical issue found again (Section 13.2.2)
+  - id: branch_remark_technical_issue
+    type: branch
+    rules:
+      - { if: "compare_enrollment_vs_admin_state(ctx.collected.lang_content_status, ctx.collected.admin_content_states) == True",
+          then: remark_revalidate_tech_issue_confirm }
+    default: remark_pending_resources_found
+
+  - id: remark_revalidate_tech_issue_confirm
+    type: message
+    prompt:
+      text: |
+        Upon revalidation, we found some **technical issues** affecting your progress for **{{ ctx.collected.course_name }}**.
+
+        We can raise a support ticket for further investigation.
+
+        Kindly confirm whether you would like us to proceed.
     quick_replies:
-      - { id: raise, label: "📋 Raise a ticket" }
-      - { id: skip,  label: "❌ I'll try later" }
+      - { id: yes, label: "✅ Yes, please raise a ticket" }
+      - { id: no,  label: "❌ No, thank you" }
     disable_input: true
     on_reply:
-      raise: progress_collect_email
-      skip:  satisfied
+      yes: technical_issue_auto_ticket
+      no:  technical_issue_declined
 
-  # --------------------------------------------------------------------------
-  # Post-resolution satisfaction check
-  # --------------------------------------------------------------------------
+  # Remark 2 — Scenario B: Pending resources found (Section 13.2.3)
+  - id: remark_pending_resources_found
+    type: message
+    prompt:
+      text: |
+        Upon revalidation, we found that the following resource(s) are still **incomplete**:
+
+        {{ ctx.collected.incomplete_resource_names }}
+
+        Kindly complete the above resource(s) to achieve **100% completion** and enable certificate generation.
+    next: satisfied
+
+  # Remark 3 — Failed (Section 13.3)
+  - id: remark_failed
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that the issue could not be resolved successfully.
+
+        The issue has been shared with the concerned team for further investigation.
+
+        We apologise for the inconvenience. Please feel free to reach out if you require any further assistance.
+    next: satisfied
+
+  # ===========================================================================
+  # Post-resolution check
+  # ===========================================================================
   - id: progress_resolution_check
     type: message
     prompt:
@@ -313,52 +1026,80 @@ nodes:
     disable_input: true
     on_reply:
       yes: satisfied
-      no:  progress_collect_email
+      no:  progress_auto_ticket
 
-  # --------------------------------------------------------------------------
+  # ===========================================================================
   # Escalation — collect email then auto-generate ticket
-  # --------------------------------------------------------------------------
-  - id: progress_collect_email
-    type: collect
-    prompt:
-      text: "I'll raise a support ticket for you. Please enter your **registered email address**:"
-    field:
-      name: collected.user_email
-      type: email
-      validation:
-        pattern:   "^[\\w.+-]+@[\\w-]+\\.[a-z]{2,}$"
-        error_msg: "That doesn't look like a valid email. Please try again."
-    next: progress_auto_ticket
-
+  # ===========================================================================
   - id: progress_auto_ticket
     type: transfer_llm
-    auto_raise: true
     llm_context:
       include_messages:  true
       include_collected: true
       include_flow_meta: true
     llm_directives:
       objective: |
-        The user has a course progress issue that was not resolved through self-service.
-        Generate a Zoho support ticket.
+        The user has a course/program/event progress issue that was not resolved through self-service.
+        Generate a Zoho support ticket AND update the Engineering Excel with:
+          - User ID: {{ ctx.user_id_hash }}
+          - Program / Course / Event DO_ID: {{ ctx.collected.course_id }}
+          - Content DO_ID: {{ ctx.collected.content_do_id }}
         Subject: "Course Progress Issue — <course_name>"
         Description: include course_name, course_id, completion_pct,
-        resource_name (the incomplete resource), has_scorm_resources, user_email,
-        and a brief summary of the resolution steps attempted.
+          incomplete_resource_names, has_scorm_resources, all_resources_assessment,
+          admin_content_states mismatch details (if any), and user_email.
+        Summary of resolution steps attempted.
+      engineering_excel_update:
+        user_id:        "{{ ctx.user_id_hash }}"
+        do_id:          "{{ ctx.collected.course_id }}"
+        content_do_id:  "{{ ctx.collected.content_do_id }}"
       priority_override: P3
     on_complete: confirm_ticket
+    on_restart: pick_course_from_list
+
+  # Generic API error fallback — transient errors only; no ticket escalation here.
+  # The user can retry by selecting a different content or restarting the flow.
+  - id: resolution_generic_error
+    type: message
+    prompt:
+      text: |
+        I'm having trouble fetching your details right now. This is usually a temporary issue.
+
+        Please **try again in a few minutes** by starting this flow again.
+    next: satisfied
+
 
   # ===========================================================================
-  # Terminal shortcut nodes
+  # Section 14 — Closure
   # ===========================================================================
   - id: progress_updated_end
     type: message
     prompt:
-      text: "That's great! 🎉 Remember: the course must be **100% complete** for the certificate to generate."
+      text: |
+        That's great! 🎉
+
+        Please remember: the course must be **100% complete** for the certificate to be generated automatically.
+
+        Once all mandatory resources are completed successfully, the certificate will be generated.
+
+        Please feel free to reach out if you require any further assistance.
     next: satisfied
 
   - id: progress_pending_end
     type: message
     prompt:
-      text: "No problem! Please complete the pending resource at your convenience. If the issue persists, start a new session and choose **Course progress issue**."
+      text: |
+        No problem! Please complete the pending resource(s) at your convenience.
+
+        **Important:** Kindly complete all pending resources to achieve **100% completion**. Once all mandatory resources are completed successfully, the certificate will be generated automatically.
+
+        If the issue persists, please start a new session and choose **Course / Program / Event progress issue**.
+    next: satisfied
+  - id: no_courses_found
+    type: message
+    prompt:
+      text: |
+        You do not have any enrolled courses or programs with In-Progress or Completed status.
+
+        Please enrol in a course on the iGOT Karmayogi portal and try again.
     next: satisfied

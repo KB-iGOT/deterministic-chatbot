@@ -16,8 +16,8 @@ nodes:
       method: POST
       url: "/tickets"
       body:
-        subject:        "[ITSM Support v2] {{ ctx.ticket_draft.subject }}"
-        description:    "{{ ctx.ticket_draft.description }}"
+        subject: "[ITSM Support v2] - {{ ctx.ticket_draft.subject }}"
+        description: "<p>Dear Support Team,</p><p>A new support request has been submitted through the iGOT Karmayogi chatbot.</p><table border=\"1\" cellpadding=\"6\" cellspacing=\"0\" style=\"border-collapse:collapse\"><tr><th align=\"left\">Field</th><th align=\"left\">Value</th></tr><tr><td>Name</td><td>{{ ctx.collected.first_name | default('') }} {{ ctx.collected.last_name | default('') }}</td></tr><tr><td>User ID</td><td>{{ ctx.collected.user_id | default('') }}</td></tr><tr><td>Email</td><td>{{ ctx.collected.email | default('') }}</td></tr><tr><td>Phone</td><td>{{ ctx.collected.mobile | default('') }}</td></tr></table><br><p><b>Workflow:</b> {{ params.cf_category }} &rarr; {{ params.cf_sub_category }}</p><p><b>Request Summary:</b></p><p>{{ ctx.ticket_draft.description | default('No details collected.') | replace('\n', '<br>') }}</p>{% if ctx.ticket_draft.conversation_trail %}<p><b>Conversation Trail:</b></p>{{ ctx.ticket_draft.conversation_trail }}{% endif %}"
         email:          "{{ ctx.collected.email | default('') }}"
         phone:          "{{ ctx.collected.mobile | default('') }}"
         priority:       "{{ ctx.ticket_draft.priority | default('P3') }}"
@@ -51,7 +51,7 @@ nodes:
   - id: ticket_confirmation
     type: message
     prompt:
-      text: "✅ Ticket **#{{ ctx.collected.ticket_id }}** raised. L2 team will reach you within **2 business days**. 📧"
+      text: "✅ Your request has been successfully submitted.\n\n**Ticket ID: #{{ ctx.collected.ticket_id }}**\n\nOur support team will review your request and reach out to you with further updates. Thank you for your patience. 📧"
     next: ticket_raised_end
 
   - id: ticket_failed

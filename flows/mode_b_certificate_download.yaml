@@ -27,7 +27,8 @@ version: 2
 metadata:
   category:         course
   menu_label:       "🎓 Certificate issue"
-  menu_group:       "Learning"
+  menu_group:       "Content Related Issue"
+  menu_group_order: 2
   menu_order:       1
   classification:   Query
   default_portal:   Learner Portal
@@ -64,6 +65,7 @@ imports:
       field_name:    c1_course_id
       field_prefix:  "c1_"
       next:          c1_branch_enrollment
+      on_empty:      no_courses_found_cert
 
 nodes:
 
@@ -94,7 +96,7 @@ nodes:
   # C1: Certificate Not Generated / Not Received (UC-03)
   # ===========================================================================
 
-  # c1_pick_course — injected from _shared/_enrollment_picker.yaml
+  # c1_pick_course — injected from _shared/_enrollment_picker.yaml (on_empty: no_courses_found_cert)
 
   # c1_check_enrollment removed — all fields now captured by c1_pick_course extra_fields
 
@@ -107,7 +109,7 @@ nodes:
       - { if: "ctx.collected.c1_enrollment_status == 2",
           then: c1_branch_certificate_issued }
       - { if: "ctx.collected.c1_enrollment_status == 1",
-          then: c1_fetch_incomplete_resources }
+          then: c1_read_course_content }
     default: c1_not_started
 
   - id: c1_no_enrollment_found
@@ -167,6 +169,28 @@ nodes:
   # --------------------------------------------------------------------------
   # Step 2 — Incomplete Resource Lookup (course in-progress)
   # --------------------------------------------------------------------------
+  - id: c1_read_course_content
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/content/v1/read/{{ ctx.collected.c1_course_id }}"
+    response_mapping:
+      - { from: "$.content.leafNodes",
+          to:   collected.c1_incomplete_ids,
+          transform: diff_leaf_nodes,
+          transform_ctx_key: collected.c1_completed_ids }
+    on_success: c1_branch_on_leaf_ids_available
+    on_error:
+      any: c1_fetch_incomplete_resources
+    timeout_ms: 8000
+
+  - id: c1_branch_on_leaf_ids_available
+    type: branch
+    rules:
+      - { if: "len(ctx.collected.c1_incomplete_ids) == 0",
+          then: c1_wait_24h }
+    default: c1_fetch_incomplete_resources
   - id: c1_fetch_incomplete_resources
     type: api_call
     integration: karmayogi
@@ -177,6 +201,11 @@ nodes:
         request:
           filters:
             identifier: "{{ ctx.collected.c1_incomplete_ids }}"
+            status:
+              - "Live"
+              - "Review"
+              - "Draft"
+              - "Retired"
           isSecureSettingsDisabled: true
           sort_by:
             createdOn: "desc"
@@ -223,7 +252,7 @@ nodes:
         ⚠️ SCORM resources require a stable internet connection and cannot be completed offline.
 
         Please complete all pending resources and recheck certificate availability after successful course completion.
-    next: c1_resolution_check
+    next: satisfied
 
   - id: c1_in_progress
     type: message
@@ -247,7 +276,7 @@ nodes:
         10. Continue until the course completion reaches **100%**.
 
         Please complete all pending resources and recheck certificate availability after successful course completion.
-    next: c1_resolution_check
+    next: satisfied
 
   # --------------------------------------------------------------------------
   # Satisfaction check — if unresolved, auto-raise ticket
@@ -266,7 +295,6 @@ nodes:
 
   - id: c1_auto_ticket
     type: transfer_llm
-    auto_raise: true
     llm_context:
       include_messages:  true
       include_collected: true
@@ -281,6 +309,7 @@ nodes:
         and a brief summary of what the user tried.
       priority_override: P4
     on_complete: confirm_ticket
+    on_restart: ask_certificate_issue
 
   # ===========================================================================
   # C3: Incorrect Name on Certificate (UC-02)
@@ -421,7 +450,6 @@ nodes:
 
   - id: generic_auto_ticket
     type: transfer_llm
-    auto_raise: true
     llm_context:
       include_messages:  true
       include_collected: true
@@ -433,3 +461,13 @@ nodes:
         Description: summarise the issue type (sub_scenario if available), course details, and what was tried.
       priority_override: P4
     on_complete: confirm_ticket
+    on_restart: ask_certificate_issue
+
+  - id: no_courses_found_cert
+    type: message
+    prompt:
+      text: |
+        You do not have any enrolled courses or programs with In-Progress or Completed status.
+
+        Please enrol in a course on the iGOT Karmayogi portal and try again.
+    next: satisfied

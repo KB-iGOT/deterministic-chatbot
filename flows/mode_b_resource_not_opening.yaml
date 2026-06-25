@@ -24,7 +24,8 @@ version: 2
 metadata:
   category:         course
   menu_label:       "📂 Resource not opening"
-  menu_group:       "Learning"
+  menu_group:       "Content Related Issue"
+  menu_group_order: 2
   menu_order:       4
   classification:   Incident
   default_portal:   Learner Portal
@@ -56,7 +57,6 @@ imports:
       cf_flow_id:      RESOURCE_NOT_OPENING
 
 nodes:
-
   # ===========================================================================
   # 1. Identify User Device (User Selection)
   # ===========================================================================
@@ -71,7 +71,7 @@ nodes:
     on_reply:
       save_to: collected.device_type
       mobile: mobile_app_guidance
-      web:    web_pick_course
+      web:    shared_pick_course
 
   # ===========================================================================
   # CASE 1: Mobile Application
@@ -101,11 +101,13 @@ nodes:
     prompt:
       text: "Let's try using Desktop Mode on your mobile browser."
     steps:
-      - "Open **Google Chrome** browser on your mobile device."
+      - "Open **Google Chrome** browser on the mobile device."
       - "Click on the **three dots** at the top right corner of the browser."
       - "Enable **Desktop Site** / **Desktop Mode**."
-      - "Navigate to iGOT Karmayogi and login."
-      - "Search for the course, click **Resume**, and try opening the resource again."
+      - "In the address bar, type **iGOT Karmayogi**."
+      - "Login using the registered credentials."
+      - "Search for the course."
+      - "Click **Resume** and try opening the resource again."
     follow_up:
       text: "Did the resource open successfully in Desktop Mode?"
       quick_replies:
@@ -113,23 +115,21 @@ nodes:
         - { id: no,  label: "❌ No, still not opening" }
     on_reply:
       yes: satisfied
-      no:  mobile_collect_details
+      no:  mobile_collect_device_details
 
-  - id: mobile_collect_details
+  - id: mobile_collect_device_details
     type: collect
     prompts:
-      - { field: collected.course_name,   text: "Please share the Course Name:" }
-      - { field: collected.resource_name, text: "Please share the Resource Name:" }
       - { field: collected.mobile_model,  text: "Please share your Mobile Device Model (e.g., Samsung Galaxy S21):" }
       - { field: collected.app_version,   text: "Please share your Mobile Application Version (if known):", optional: true }
-    next: escalate_to_ticket
+    next: shared_pick_course
 
   # ===========================================================================
-  # CASE 2: Web Browser
+  # CASE 2: Web Browser / Shared API Path
   # ===========================================================================
 
   # Step 1: Select course from enrollment list
-  - id: web_pick_course
+  - id: shared_pick_course
     type: collect
     prompt:
       text: "Please select the course that has the resource not opening:"
@@ -156,6 +156,7 @@ nodes:
       search:     { enabled: true, placeholder: "Search your enrolled courses..." }
       pagination: { enabled: true, page_size: 10 }
       cache_ttl:  300
+      on_empty:   no_enrolled_courses_found
     next: api_fetch_hierarchy
 
   # Step 2: Fetch hierarchy to get resource IDs (Leaf Nodes)
@@ -172,12 +173,12 @@ nodes:
       - from: "$.content.children" # Use a separate field for children
         to: collected.all_child_ids
         transform: extract_child_course_ids
-    on_success: web_pick_resource
+    on_success: shared_pick_resource
     on_error:
       any: api_error_fallback
 
   # Step 3: Select the resource from a searchable list
-  - id: web_pick_resource
+  - id: shared_pick_resource
     type: collect
     prompt:
       text: "I found the following resources in **{{ ctx.collected.course_name }}**. Which one is not opening?"
@@ -206,7 +207,15 @@ nodes:
           - { from: mimeType, to: collected.resource_mime_type }
       search: { enabled: true, placeholder: "Search for a video or module name..." }
       pagination: { enabled: true, page_size: 15 }
-    next: branch_resource_type_step
+      on_empty:   no_resources_found
+    next: branch_device_check_after_resource
+
+  - id: branch_device_check_after_resource
+    type: branch
+    rules:
+      - if: "ctx.collected.device_type == 'mobile'"
+        then: resource_auto_ticket
+    default: branch_resource_type_step
 
   - id: branch_resource_type_step
     type: branch
@@ -291,7 +300,7 @@ nodes:
       - { id: no,  label: "❌ No, I'll check again later" }
     disable_input: true
     on_reply:
-      yes: escalate_to_ticket
+      yes: resource_auto_ticket
       no:  satisfied
 
   - id: youtube_config_issue
@@ -308,7 +317,7 @@ nodes:
       - { id: no,  label: "❌ No, I'll check again later" }
     disable_input: true
     on_reply:
-      yes: escalate_to_ticket
+      yes: resource_auto_ticket
       no:  satisfied
 
   # Fallback for API failures
@@ -317,7 +326,7 @@ nodes:
     prompt:
       text: |
         I'm having trouble fetching your course or resource details right now. Please try again later or share the details so I can raise a ticket.
-    next: escalate_to_ticket
+    next: resource_auto_ticket
 
   # ===========================================================================
   # CASE 2B: SCORM / Other Formats
@@ -336,7 +345,7 @@ nodes:
       - { id: no,  label: "❌ No, I'll check again later" }
     disable_input: true
     on_reply:
-      yes: escalate_to_ticket
+      yes: resource_auto_ticket
       no:  satisfied
 
   - id: other_format_issue
@@ -361,27 +370,14 @@ nodes:
       - { id: no,  label: "❌ No, I'll check again later" }
     disable_input: true
     on_reply:
-      yes: escalate_to_ticket
+      yes: resource_auto_ticket
       no:  satisfied
 
   # ===========================================================================
   # Escalation
   # ===========================================================================
-  - id: escalate_to_ticket
-    type: collect
-    prompt:
-      text: "I will raise a support ticket. Please enter your **registered email address** so we can contact you:"
-    field:
-      name: collected.user_email
-      type: email
-      validation:
-        pattern:   "^[\\w.+-]+@[\\w-]+\\.[a-z]{2,}$"
-        error_msg: "That doesn't look like a valid email. Please try again."
-    next: resource_auto_ticket
-
   - id: resource_auto_ticket
     type: transfer_llm
-    auto_raise: true
     llm_context:
       include_messages:  true
       include_collected: true
@@ -392,5 +388,28 @@ nodes:
         Generate a Zoho support ticket.
         Subject: "Resource Not Opening — {{ ctx.collected.course_name | default('Course') }}"
         Description: include course name, resource name, channel ({{ ctx.channel }}), resource type, and email.
+        If mobile device details (mobile model, app version) are provided, include them as well.
       priority_override: P3
     on_complete: confirm_ticket
+    on_restart: ask_device_type
+
+  # ---------------------------------------------------------------------------
+  # Empty-state nodes
+  # ---------------------------------------------------------------------------
+  - id: no_enrolled_courses_found
+    type: message
+    prompt:
+      text: |
+        You do not have any enrolled courses or programs at the moment.
+
+        Please enrol in a course on the iGOT Karmayogi portal and try again.
+    next: satisfied
+
+  - id: no_resources_found
+    type: message
+    prompt:
+      text: |
+        We could not find any resources in the selected course.
+
+        If you believe this is incorrect, please try again after some time or raise a support ticket.
+    next: satisfied

@@ -124,7 +124,7 @@ class ZohoDeskAdapter:
         client = await self._get_client()
 
         for attempt in (1, 2, 3):
-            log.debug("[zoho] %s %s (attempt %d/3) params=%s", method, url, attempt, params)
+            log.debug("[zoho] %s %s (attempt %d/3) params=%s body=%s", method, url, attempt, params, str(body)[:800] if body else "—")
             token = await self._ensure_token(force_refresh=(attempt > 1))
             merged_headers = {
                 "Authorization": f"Zoho-oauthtoken {token}",
