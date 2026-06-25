@@ -101,6 +101,15 @@ class KarmayogiService:
         # preserved as data['_raw'] for completeness.
         if isinstance(data, dict) and "result" in data and isinstance(data["result"], dict):
             unwrapped = data["result"]
+            
+            # The Content Search API groups assessments under "QuestionSet".
+            # Merge them into "content" so that downstream JSONPaths like $.content[*].name
+            # can extract metadata regardless of whether the pending resource is a course or assessment.
+            if "QuestionSet" in unwrapped and isinstance(unwrapped["QuestionSet"], list):
+                if "content" not in unwrapped or not isinstance(unwrapped["content"], list):
+                    unwrapped["content"] = []
+                unwrapped["content"].extend(unwrapped["QuestionSet"])
+                
             unwrapped["_raw"] = data
             return unwrapped
         return data
