@@ -555,6 +555,7 @@ nodes:
         list_path: "$.content"
         id_field: identifier
         label_field: name
+      on_empty:   no_caps_assigned
     next: fetch_all_enrollments
 
   - id: fetch_all_enrollments
@@ -1226,4 +1227,16 @@ nodes:
       - "Go to **Profile** → **My Learning** → **In Progress**"
       - "Open **{{ ctx.collected.course_name }}** and click **Resume**"
       - "Locate the Final Assessment and click **Start / Resume**"
+    next: satisfied
+
+  # ---------------------------------------------------------------------------
+  # Empty-state node
+  # ---------------------------------------------------------------------------
+  - id: no_caps_assigned
+    type: message
+    prompt:
+      text: |
+        No Comprehensive Assessment Programs (CAPs) are currently assigned to you.
+
+        If you believe you should have been assigned a CAP, please contact your Nodal Officer for assistance.
     next: satisfied

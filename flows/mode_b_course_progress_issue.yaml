@@ -124,6 +124,7 @@ nodes:
       search:     { enabled: true, placeholder: "Search your enrolled courses and programs..." }
       pagination: { enabled: true, page_size: 10 }
       cache_ttl:  300
+      on_empty:   no_courses_found
     # Skip api_enrollment_check — all required fields are already captured above.
     # api_enrollment_check used $.result.enrollments[0] which is the wrong response
     # path; the API actually returns data under $.courses[*] (matching list_path above).
@@ -1093,4 +1094,12 @@ nodes:
         **Important:** Kindly complete all pending resources to achieve **100% completion**. Once all mandatory resources are completed successfully, the certificate will be generated automatically.
 
         If the issue persists, please start a new session and choose **Course / Program / Event progress issue**.
+    next: satisfied
+  - id: no_courses_found
+    type: message
+    prompt:
+      text: |
+        You do not have any enrolled courses or programs with In-Progress or Completed status.
+
+        Please enrol in a course on the iGOT Karmayogi portal and try again.
     next: satisfied

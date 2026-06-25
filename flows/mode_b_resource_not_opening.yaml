@@ -156,6 +156,7 @@ nodes:
       search:     { enabled: true, placeholder: "Search your enrolled courses..." }
       pagination: { enabled: true, page_size: 10 }
       cache_ttl:  300
+      on_empty:   no_enrolled_courses_found
     next: api_fetch_hierarchy
 
   # Step 2: Fetch hierarchy to get resource IDs (Leaf Nodes)
@@ -206,6 +207,7 @@ nodes:
           - { from: mimeType, to: collected.resource_mime_type }
       search: { enabled: true, placeholder: "Search for a video or module name..." }
       pagination: { enabled: true, page_size: 15 }
+      on_empty:   no_resources_found
     next: branch_device_check_after_resource
 
   - id: branch_device_check_after_resource
@@ -390,3 +392,24 @@ nodes:
       priority_override: P3
     on_complete: confirm_ticket
     on_restart: ask_device_type
+
+  # ---------------------------------------------------------------------------
+  # Empty-state nodes
+  # ---------------------------------------------------------------------------
+  - id: no_enrolled_courses_found
+    type: message
+    prompt:
+      text: |
+        You do not have any enrolled courses or programs at the moment.
+
+        Please enrol in a course on the iGOT Karmayogi portal and try again.
+    next: satisfied
+
+  - id: no_resources_found
+    type: message
+    prompt:
+      text: |
+        We could not find any resources in the selected course.
+
+        If you believe this is incorrect, please try again after some time or raise a support ticket.
+    next: satisfied

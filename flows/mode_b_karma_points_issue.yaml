@@ -148,6 +148,7 @@ nodes:
       search:     { enabled: true, placeholder: "Search your completed courses..." }
       pagination: { enabled: true, page_size: 10 }
       cache_ttl:  300
+      on_empty:   no_completed_courses_found
     next: kc_fetch_karma_by_id
 
   # ---------------------------------------------------------------------------
@@ -309,6 +310,7 @@ nodes:
       search:     { enabled: true, placeholder: "Search your completed events..." }
       pagination: { enabled: true, page_size: 10 }
       cache_ttl:  300
+      on_empty:   no_completed_events_found
     next: ev_fetch_karma_for_event
 
   # ---------------------------------------------------------------------------
@@ -426,6 +428,7 @@ nodes:
       search:     { enabled: true, placeholder: "Search your completed courses..." }
       pagination: { enabled: true, page_size: 10 }
       cache_ttl:  300
+      on_empty:   no_completed_courses_found
     next: ec1_fetch_karma
 
   # 3.1.2 — Fetch karma history (enrollment-picker path)
@@ -554,4 +557,25 @@ nodes:
     type: message
     prompt:
       text: "You can go to the course TOC page and press the **Claim Karma Point** button to claim the remaining karma points."
+    next: satisfied
+
+  # ===========================================================================
+  # Empty-state nodes
+  # ===========================================================================
+  - id: no_completed_courses_found
+    type: message
+    prompt:
+      text: |
+        You do not have any completed courses at the moment.
+
+        Karma points are credited only after a course is fully completed. Please complete a course on the iGOT Karmayogi portal and try again.
+    next: satisfied
+
+  - id: no_completed_events_found
+    type: message
+    prompt:
+      text: |
+        You do not have any completed events at the moment.
+
+        Karma points are credited only after an event is fully completed. Please attend and complete an event on the iGOT Karmayogi portal and try again.
     next: satisfied

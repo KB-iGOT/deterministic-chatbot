@@ -58,6 +58,7 @@ class Activity(BaseModel):
     items: list[PickerItem] | None = None
     other_option: QuickReply | None = None
     search_enabled: bool = True
+    total_items: int | None = None
 
     # input
     input_id: str | None = None
@@ -103,6 +104,7 @@ class Activity(BaseModel):
             placeholder=placeholder,
             other_option=other_option,
             disable_input=True,
+            total_items=len(items),
         )
 
     @classmethod

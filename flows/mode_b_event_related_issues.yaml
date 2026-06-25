@@ -95,6 +95,7 @@ nodes:
       search:     { enabled: true, placeholder: "Search your enrolled events..." }
       pagination: { enabled: true, page_size: 10 }
       cache_ttl:  300
+      on_empty:   no_events_found
     next: api_read_event_uc1
 
   - id: pick_event_from_list_uc2
@@ -119,6 +120,7 @@ nodes:
       search:     { enabled: true, placeholder: "Search your enrolled events..." }
       pagination: { enabled: true, page_size: 10 }
       cache_ttl:  300
+      on_empty:   no_events_found
     next: api_read_event_uc2
 
   - id: pick_event_from_list_uc3
@@ -144,6 +146,7 @@ nodes:
       search:     { enabled: true, placeholder: "Search your enrolled events..." }
       pagination: { enabled: true, page_size: 10 }
       cache_ttl:  300
+      on_empty:   no_events_found
     next: branch_uc3_progress
 
   - id: pick_event_from_list_uc4
@@ -170,6 +173,7 @@ nodes:
       search:     { enabled: true, placeholder: "Search your enrolled events..." }
       pagination: { enabled: true, page_size: 10 }
       cache_ttl:  300
+      on_empty:   no_events_found
     next: branch_uc4_certificate
 
   # ===========================================================================
@@ -446,6 +450,15 @@ nodes:
   # ===========================================================================
   # Common Error / End Nodes
   # ===========================================================================
+  - id: no_events_found
+    type: message
+    prompt:
+      text: |
+        You do not have any enrolled events at the moment.
+
+        Please enrol in an event on the iGOT Karmayogi portal and try again.
+    next: satisfied
+
   - id: resolution_generic_error
     type: message
     prompt:
