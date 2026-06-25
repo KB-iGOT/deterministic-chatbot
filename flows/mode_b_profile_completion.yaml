@@ -98,7 +98,7 @@ nodes:
       edu_qual:      edu_qual_steps
       photo:         profile_photo_steps
       cover:         cover_photo_steps
-      pct:           checking_profile
+      pct:           fetch_user_profile
 
   # ═══════════════════════════════════════════════════════════════════════════
   # §1  NAME UPDATE
@@ -402,26 +402,11 @@ nodes:
     prompt:
       text: "What best describes your situation with **Email ID / Mobile Number** update?"
     quick_replies:
-      - { id: guide,            label: "📋 I need help with the update steps" }
       - { id: no_otp,           label: "❌ Not receiving OTP" }
       - { id: multiple_account, label: "👥 Multiple account issue / Invalid domain" }
     on_reply:
-      guide:            email_mobile_guide_steps
       no_otp:           fetch_mdo_for_email
       multiple_account: email_mobile_multiple_account
-
-  - id: email_mobile_guide_steps
-    type: resolution
-    prompt:
-      text: |
-        To update your **Email ID or Mobile Number**, OTP verification is mandatory.
-        Follow these steps:
-    steps:
-      - "Go to **View Profile → Edit Profile** and locate the Email or Mobile field."
-      - "Enter the new Email ID / Mobile Number."
-      - "Click **Send OTP** — ensure you have access to your current registered email/phone."
-      - "Enter the OTP received and click **Verify & Save**."
-    next: satisfied
 
   - id: email_mobile_multiple_account
     type: message
@@ -1714,18 +1699,13 @@ nodes:
       - "Click the **three dots (⋮)** at the top-right of the profile section."
       - "Click **Edit Cover Photo**."
       - "Select **Change Cover Photo** and choose the photo from your device."
+      - "Cover photo requirements: ≤ **200 KB** and ≤ **1200 × 300 pixels**."
       - "Click **Apply Changes**."
     next: satisfied
 
   # ═══════════════════════════════════════════════════════════════════════════
   # §13  PROFILE COMPLETION % — Fetch + Diagnose
   # ═══════════════════════════════════════════════════════════════════════════
-  - id: checking_profile
-    type: message
-    prompt:
-      text: "Let me check your iGOT profile to see what's incomplete..."
-    next: fetch_user_profile
-
   - id: fetch_user_profile
     type: api_call
     integration: karmayogi
@@ -1736,12 +1716,13 @@ nodes:
     # Paths verified against live UAT API (2026-06-02)
     response_mapping:
       - { from: "$.response.firstName",                               to: collected.first_name }
-      - { from: "$.response.avatar",                                  to: collected.avatar_url }
+      - { from: "$.response.profileDetails.profileImageUrl",          to: collected.avatar_url }
       - { from: "$.response.profileCompletionPercentage",             to: collected.completion_pct }
       - { from: "$.response.profileDetails.verifiedKarmayogi",        to: collected.username_verified }
       - { from: "$.response.profileDetails.profileDesignationStatus", to: collected.designation_status }
       - { from: "$.response.profileDetails.profileGroupStatus",       to: collected.group_status }
       - { from: "$.response.profileDetails.profileBannerUrl",         to: collected.banner_url }
+      - { from: "$.response.profileDetails.employmentDetails.aboutme", to: collected.about_me }
       - { from: "$.response.rootOrgId",                                to: collected.root_org_id }
     on_success: diagnose_missing_fields
     on_error:
@@ -1766,26 +1747,28 @@ nodes:
     type: message
     prompt:
       text: |
-        We checked your profile (currently at **{{ ctx.collected.completion_pct or 0 }}%** completion).
+        We have checked your profile and found that certain details are missing. Please update the following details in your profile to achieve 100% profile completion:
 
-        The following mandatory details appear to be incomplete:
         {% if not ctx.collected.avatar_url %}
-        • **Profile Photo** — not uploaded
+        • **Profile Photo**
         {% endif %}
         {% if not ctx.collected.banner_url %}
-        • **Cover Photo** — not uploaded
+        • **Cover Photo**
         {% endif %}
         {% if ctx.collected.username_verified == 'False' or not ctx.collected.username_verified %}
-        • **Username Verification** — not verified
+        • **Username Verification Tick**
+        {% endif %}
+        {% if not ctx.collected.about_me %}
+        • **About Me**
         {% endif %}
         {% if ctx.collected.designation_status != 'VERIFIED' %}
-        • **Designation** — not set in Primary Details
+        • **Designation**
         {% endif %}
         {% if ctx.collected.group_status != 'VERIFIED' %}
-        • **Group** — not set in Primary Details
+        • **Group**
         {% endif %}
 
-        Please update the missing details to reach 100% profile completion. Which field would you like to fix first?
+        The profile completion percentage will reach 100% only after all mandatory fields are updated. Please update the missing details in your profile to complete it to 100%. Which field would you like to fix first?
     quick_replies:
       - { id: photo,       label: "📷 Profile Photo" }
       - { id: cover,       label: "🖼️ Cover Photo" }
@@ -1827,7 +1810,9 @@ nodes:
       text: "Your **cover photo** is missing."
     steps:
       - "Click **View Profile** → **three dots (⋮)** → **Edit Cover Photo**."
-      - "Select **Change Cover Photo** → choose file → **Apply Changes**."
+      - "Select **Change Cover Photo** → choose file."
+      - "Requirements: ≤ **200 KB**, ≤ **1200 × 300 pixels**."
+      - "Click **Apply Changes**."
     follow_up:
       text: "Done?"
       quick_replies:
