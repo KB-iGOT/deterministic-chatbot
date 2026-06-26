@@ -31,7 +31,7 @@
 #   yp_lookup  (_yp_lookup — Excel-backed YP/SPOC contact by org_channel)
 # =============================================================================
 
-flow_id: PROFILE_VERIFICATION_DESIGNATION
+flow_id: DESIGNATION_GROUP_NOT_VERIFIED
 flow_type: deterministic
 version: 2
 
@@ -116,7 +116,12 @@ nodes:
   - id: branch_on_verified_status
     type: branch
     rules:
-      - if: "ctx.collected.designation_status != None and ctx.collected.designation_status.lower() == 'verified'"
+      - if: >
+          ctx.collected.designation_status != None and ctx.collected.designation_status.lower() == 'verified' and
+          ctx.collected.current_group != None and ctx.collected.current_group != '' and
+          ctx.collected.current_designation != None and ctx.collected.current_designation != '' and
+          ctx.collected.current_dept_name != None and ctx.collected.current_dept_name != '' and
+          (ctx.collected.wf_id == None or ctx.collected.wf_id == '')
         then: show_already_verified
     default: branch_on_pending_request
 
@@ -124,17 +129,14 @@ nodes:
     type: message
     prompt:
       text: |
-        Upon checking, we found that your profile has already been verified
-        and there are no pending verification requests.
-
-        To verify the **Verified Community Badge**:
-
-        1. Go to your profile.
-        2. Check the area next to your name.
-        3. A **green tick mark** should be visible next to your name.
-
-        The green tick indicates that the Verified Community Badge has been
-        successfully assigned to your profile.
+        Upon checking, we found that your profile has already been verified and there are no pending verification requests. 
+        
+        To verify the same:
+        Go to your profile. 
+        Check the area next to your name. 
+        A green tick mark should be visible next to your name. 
+        
+        The green tick indicates that the Profile is already Verified.
     next: resolution_check
 
   # ===========================================================================
@@ -199,17 +201,11 @@ nodes:
     type: message
     prompt:
       text: |
-        Your request to transfer to **{{ ctx.collected.transfer_dept_name }}**
-        is currently **pending approval**.
-
-        The organisation admin who will approve your request is:
-
-        👤 **{{ ctx.collected.mdo_leader_name or ctx.collected.mdo_leader_name_fallback }}**
-        📧 {{ ctx.collected.mdo_leader_email or ctx.collected.mdo_leader_email_fallback }}
-
-        Your designation will reflect in your profile once the admin approves it.
-
-        > 💡 *Tip:* Log out and log back in after approval to see the updated designation.
+        Your designation request has already been submitted and is awaiting approval from the Organization Admin. 
+        
+        Please contact the below admin for further assistance: 
+        Admin Name: {{ ctx.collected.mdo_leader_name or ctx.collected.mdo_leader_name_fallback }}
+        Admin Email ID: {{ ctx.collected.mdo_leader_email or ctx.collected.mdo_leader_email_fallback }}
     next: resolution_check
 
   # ---------------------------------------------------------------------------
@@ -224,26 +220,20 @@ nodes:
     type: message
     prompt:
       text: |
-        Your designation request is already submitted, but currently **no admin
-        is available** to approve it.
-
-        Please connect with your assigned **Young Professional (YP)** for
-        further assistance:
-
-        👤 **{{ ctx.collected.yp_name }}**
-        📧 {{ ctx.collected.yp_email }}
-        📞 {{ ctx.collected.yp_mobile }}
+        Your designation request has already been submitted. However, there is currently no Organization Admin available to approve the request. 
+        
+        Kindly connect with the concerned YP for further assistance. 
+        YP Name: {{ ctx.collected.yp_name }}
+        YP Email ID: {{ ctx.collected.yp_email }}
     next: resolution_check
 
   - id: yp_not_found
     type: message
     prompt:
       text: |
-        Your designation request is already submitted, but currently **no admin
-        is available** to approve it.
-
-        Please connect with the **Young Professional (YP)** assigned to your
-        state/department for further assistance.
+        Your designation request has already been submitted. However, there is currently no Organization Admin available to approve the request. 
+        
+        Kindly connect with the concerned YP for further assistance.
     next: resolution_check
 
   # ===========================================================================
@@ -254,17 +244,13 @@ nodes:
     type: resolution
     prompt:
       text: |
-        No pending designation or group request was found for your profile.
-
-        Please follow the steps below to update and submit your designation or
-        group for approval:
+        Please follow the steps below to update and submit your designation or group for approval:
     steps:
-      - "Click on **View Profile** from the top-right menu."
-      - "Navigate to **Primary Details** and click the ✏️ **Edit (pen) icon**."
-      - "Update the correct **Group** and **Designation**."
-      - "Click **Send for Approval** to submit the changes."
-      - "The request will be sent to your organisation admin for approval."
-      - "Your designation will reflect in your profile once the admin approves it."
+      - "Click on View Profile."
+      - "Navigate to Primary Details and click the Edit (Pen) icon."
+      - "Update the correct Group and Designation."
+      - "Click Send for Approval."
+      - "Once the request is submitted, it will be sent to the Organization Admin for approval. The designation or group will reflect in your profile after approval."
     follow_up:
       text: "Were you able to submit the request successfully?"
       quick_replies:
@@ -367,17 +353,12 @@ nodes:
     type: message
     prompt:
       text: |
-        ✅ Your designation request has been submitted successfully.
-
-        Please **log out and log back in** to verify if the designation is
-        now reflecting in your profile.
-
-        Your organisation admin will approve the request shortly:
-
-        👤 **{{ ctx.collected.mdo_leader_name or ctx.collected.mdo_leader_name_fallback }}**
-        📧 {{ ctx.collected.mdo_leader_email or ctx.collected.mdo_leader_email_fallback }}
-
-        Your designation will reflect once the admin completes the approval.
+        We can confirm that your designation request has been submitted successfully. 
+        Kindly log out and log in again to verify the status. 
+        The request is awaiting approval from the Organization Admin. 
+        Admin Name: {{ ctx.collected.mdo_leader_name or ctx.collected.mdo_leader_name_fallback }}
+        Admin Email ID: {{ ctx.collected.mdo_leader_email or ctx.collected.mdo_leader_email_fallback }}
+        The designation will reflect in your profile after approval.
     next: resolution_check
 
   # ===========================================================================
@@ -389,16 +370,13 @@ nodes:
     prompt:
       text: |
         We still could not find a pending designation request in the system.
-
-        Please follow the steps below to re-submit your designation or group
-        for approval:
+        Please follow the steps below to submit your designation or group for approval again:
     steps:
-      - "Click on **View Profile** from the top-right menu."
-      - "Navigate to **Primary Details** and click the ✏️ **Edit (pen) icon**."
-      - "Update the correct **Group** and **Designation**."
-      - "Click **Send for Approval** to submit the changes."
-      - "The request will be sent to your organisation admin for approval."
-      - "Your designation will reflect in your profile once the admin approves it."
+      - "Click on View Profile."
+      - "Navigate to Primary Details and click the Edit (Pen) icon."
+      - "Update the correct Group and Designation."
+      - "Click Send for Approval."
+      - "Once the request is submitted, it will be sent to the Organization Admin for approval. The designation or group will reflect in your profile after approval."
     follow_up:
       text: "Were you able to re-submit the request?"
       quick_replies:
