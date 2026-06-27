@@ -198,13 +198,7 @@ class ApiCallNode(NodeHandler):
                     return _record_error(state, cfg, "not_found")
 
                 except Exception as e:  # noqa: BLE001
-                    with open('/tmp/zoho_error.log', 'w') as err_file:
-                        err_file.write(f"Exception: {type(e).__name__}: {e}\n")
-                        err_file.write(f"Integration: {integration_name}\n")
-                        err_file.write(f"Method: {rendered['method']} URL: {rendered['url']}\n")
-                        err_file.write(f"Body: {rendered.get('body')}\n")
                     log.error(
-
                         "[api_call] node=%s raised %s: %s  (integration=%s %s %s)",
                         node_id, type(e).__name__, e,
                         integration_name, rendered["method"], rendered["url"],
