@@ -878,15 +878,11 @@ nodes:
 
         To view the completed course, please follow the steps below:
 
-        Navigate to the Homepage.
-
-        Locate the My iGOT section.
-
-        Click on the Completed tab to view all completed courses.
-
-        Search for the mentioned course in the list of completed courses.
-
-        You should be able to find and access the completed course there.
+        1. Navigate to the Homepage.
+        2. Locate the My iGOT section.
+        3. Click on the Completed tab to view all completed courses.
+        4. Search for the mentioned course in the list of completed courses.
+        5. You should be able to find and access the completed course there.
     disable_input: true
     next: satisfied
 

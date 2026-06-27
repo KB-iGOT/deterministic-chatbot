@@ -49,11 +49,6 @@ entry_node: fetch_transfer_status
 
 imports:
   - _terminal
-  - fragment: _zoho_ticket
-    with:
-      cf_category:     profile
-      cf_sub_category: access_revoked
-      cf_flow_id:      ACCESS_REVOKED
   - fragment: _yp_lookup
 
 nodes:
@@ -138,7 +133,6 @@ nodes:
       text: |
         I'm sorry, I was unable to find an account matching your profile details.
 
-        For security reasons, I can't proceed. Please contact our support team directly at **support@igotkarmayogi.gov.in** for further assistance.
     next: satisfied
 
 
@@ -159,9 +153,15 @@ nodes:
     on_reply:
       save_to: collected.org_confirmed
       # SOP Step 2.3: Once User Confirms Organization
-      yes: fetch_mdo_admin_details
+      yes: check_mdo_root_org
       # SOP Step 5.5: Cancel Request (If Required)
       no:  cancel_and_reraise_guide
+
+  - id: check_mdo_root_org
+    type: branch
+    rules:
+      - { if: "(ctx.collected.fetched_root_org_id or ctx.collected.transfer_root_org_id)", then: fetch_mdo_admin_details }
+    default: start_yp_lookup
 
   # SOP 2.3: Identify Concerned MDO Admin/Leader
   - id: fetch_mdo_admin_details
@@ -185,14 +185,14 @@ nodes:
       - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail", to: collected.mdo_admin_email }
     on_success: branch_on_mdo_found
     on_error:
-      any: lookup_yp_contact  # Fallback to YP lookup if API fails
+      any: start_yp_lookup  # Fallback to YP lookup if API fails
 
   - id: branch_on_mdo_found
     type: branch
     rules:
       - { if: "ctx.collected.mdo_admin_count > 0", then: show_mdo_admin_details }
     # SOP Step 3: If No MDO Admin/Leader Exists — look up YP/SPOC
-    default: lookup_yp_contact
+    default: start_yp_lookup
 
   - id: show_mdo_admin_details
     type: resolution
@@ -584,13 +584,18 @@ nodes:
         ⚠️ **Organization Not Found**
 
         Since we could not locate your organization in the system dropdown, we are looking up the YP/SPOC contact details for your Ministry/State to assist you.
-    next: lookup_yp_by_parent
+    next: start_yp_lookup
 
-  # Inline YP lookup for Path B: check department (org_channel) first.
-  - id: lookup_yp_by_dept
+  - id: start_yp_lookup
+    type: branch
+    rules:
+      - { if: "true", then: lookup_yp_org }
+    default: lookup_yp_org
+
+  - id: lookup_yp_org
     type: data_lookup
     service: yp_lookup
-    key: "{{ ctx.collected.org_channel }}"
+    key: "{{ ctx.collected.dropdown_org_name or ctx.collected.transfer_org_name or ctx.collected.fetched_org_name or 'NO_ORG' }}"
     response_mapping:
       - { from: name,      to: collected.yp_name }
       - { from: email,     to: collected.yp_email }
@@ -598,13 +603,25 @@ nodes:
       - { from: cc_email,  to: collected.yp_cc_email }
     on_success: yp_found_result
     on_error:
-      any: lookup_yp_by_parent
+      any: lookup_yp_dept
 
-  # If department lookup fails, check the parent Ministry/State (selected_parent_name).
-  - id: lookup_yp_by_parent
+  - id: lookup_yp_dept
     type: data_lookup
     service: yp_lookup
-    key: "{{ ctx.collected.selected_parent_name }}"
+    key: "{{ ctx.collected.dropdown_dept_name or ctx.collected.transfer_dept_name or 'NO_DEPT' }}"
+    response_mapping:
+      - { from: name,      to: collected.yp_name }
+      - { from: email,     to: collected.yp_email }
+      - { from: mobile,    to: collected.yp_mobile }
+      - { from: cc_email,  to: collected.yp_cc_email }
+    on_success: yp_found_result
+    on_error:
+      any: lookup_yp_ministry
+
+  - id: lookup_yp_ministry
+    type: data_lookup
+    service: yp_lookup
+    key: "{{ ctx.collected.selected_parent_name or ctx.collected.fetched_ministry_name or ctx.collected.org_channel or ctx.collected.fetched_org_channel or 'NO_MINISTRY' }}"
     response_mapping:
       - { from: name,      to: collected.yp_name }
       - { from: email,     to: collected.yp_email }
@@ -685,6 +702,7 @@ nodes:
     on_reply:
       confirm: access_revoked_auto_ticket
       cancel:  satisfied
+    next: satisfied
 
   # ===========================================================================
   # 5. Escalation & Terminal
@@ -718,6 +736,7 @@ nodes:
   # Note: confirm_ticket (API call to Zoho) and ticket_confirmation are provided
   # by the imported _zoho_ticket fragment. The local override has been removed
   # so that tickets are actually created via the Zoho Desk API.
+    next: satisfied
 
   - id: satisfied
     type: end

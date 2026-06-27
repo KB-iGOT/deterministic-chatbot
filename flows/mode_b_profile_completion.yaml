@@ -221,7 +221,7 @@ nodes:
     on_reply:
       yes:   fetch_user_for_desig
       retry: designation_search_and_pick
-      none:  designation_no_match_collect_org
+      none:  reset_designation_ticket_fields
 
   # ── §3B  Match found — check MDO import ─────────────────────────────────────
   - id: fetch_user_for_desig
@@ -323,15 +323,34 @@ nodes:
     next: satisfied
 
   # ── §3C  No match — raise ticket ────────────────────────────────────────────
+  # Reset previously collected fields so the collect node always re-prompts
+  - id: reset_designation_ticket_fields
+    type: branch
+    rules: []
+    default: designation_no_match_collect_org
+    # Clear stale values so the multi-field collect always starts fresh
+    collect_reset:
+      - collected.designation_requested
+      - collected.designation_org_name
+
   - id: designation_no_match_collect_org
     type: collect
-    prompts:
-      - field: collected.designation_requested
-        text: "Please type the exact designation (in full form) you would like added:"
-        placeholder: "e.g. Senior Administrative Officer"
-      - field: collected.designation_org_name
-        text: "Please share your **Organisation Name**:"
-        placeholder: "e.g. Ministry of Finance"
+    prompt:
+      text: "Please type the exact designation (in full form) you would like to add:"
+      placeholder: "e.g. Senior Administrative Officer"
+    field:
+      name: collected.designation_requested
+      type: text
+    next: designation_no_match_collect_org_name
+
+  - id: designation_no_match_collect_org_name
+    type: collect
+    prompt:
+      text: "Please share your **Organisation Name**:"
+      placeholder: "e.g. Ministry of Finance"
+    field:
+      name: collected.designation_org_name
+      type: text
     next: confirm_designation_ticket
 
   - id: confirm_designation_ticket
@@ -379,6 +398,7 @@ nodes:
       priority_override: P3
       ticket_tags: [designation_not_found, new_designation_request]
     on_complete: confirm_ticket
+    on_restart: intake_menu
 
   # ═══════════════════════════════════════════════════════════════════════════
   # §4  EMAIL / MOBILE UPDATE
@@ -976,7 +996,9 @@ nodes:
       method: GET
       url: "/api/masterData/v1/languages"
     response_mapping:
-      - { from: "$.languages", to: collected._language_list }
+      - from: "$.languages"
+        transform: append_others_language
+        to: collected._language_list
     on_success: mother_tongue_pick
     on_error:
       any: mother_tongue_ticket
@@ -984,7 +1006,10 @@ nodes:
   - id: mother_tongue_pick
     type: collect
     prompt:
-      text: "Please select your **mother tongue** from the list:"
+      text: |
+        Please select your **mother tongue** from the list:
+        
+        **Note:** If you cannot find your language in the dropdown, please select **Others**
     field:
       name: collected.mother_tongue_verified
       type: select
@@ -997,7 +1022,49 @@ nodes:
       search: { enabled: true, placeholder: "Search languages..." }
       empty_message: "No languages found."
     on_empty: mother_tongue_ticket
-    next: confirm_mother_tongue_selection
+    next: check_mother_tongue_others
+
+  - id: check_mother_tongue_others
+    type: branch
+    rules:
+      - { if: "ctx.collected.mother_tongue_verified == 'Others'", then: collect_mother_tongue_others }
+    default: confirm_mother_tongue_selection
+
+  - id: collect_mother_tongue_others
+    type: collect
+    prompt:
+      text: "Please type the language you would like to add:"
+    field:
+      name: collected.mother_tongue_others_input
+      type: text
+    next: confirm_mother_tongue_ticket_others
+
+  - id: confirm_mother_tongue_ticket_others
+    type: message
+    prompt:
+      text: |
+        I will raise a support request to get your mother tongue (**{{ ctx.collected.mother_tongue_others_input }}**) added.
+        Shall I submit this request?
+    quick_replies:
+      - { id: yes, label: "✅ Yes, raise request" }
+      - { id: no,  label: "❌ No, not now" }
+    on_reply:
+      yes: raise_mother_tongue_ticket_others
+      no:  satisfied
+
+  - id: raise_mother_tongue_ticket_others
+    type: transfer_llm
+    llm_context:
+      include_messages: true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        Raise a Zoho ticket to request that the user's mother tongue ({{ ctx.collected.mother_tongue_others_input }}) be added or updated in the iGOT system. Include any relevant details shared by the user. Keep to 1 turn.
+      priority_override: P3
+      ticket_tags: [mother_tongue_missing, profile_update]
+    on_complete: confirm_ticket
+    on_restart: intake_menu
 
   - id: confirm_mother_tongue_selection
     type: message
@@ -1029,6 +1096,8 @@ nodes:
         You reported that the language list is unavailable. You would like us to raise a support request to add or update your mother tongue in the iGOT system.
 
         Please review the details above and confirm whether they are correct.
+        I can raise a support request to get your mother tongue added .
+        Shall I submit this request?
     quick_replies:
       - { id: confirm, label: "✅ Confirm" }
       - { id: cancel,  label: "❌ Cancel" }
@@ -1050,6 +1119,7 @@ nodes:
       priority_override: P3
       ticket_tags: [mother_tongue_missing, profile_update]
     on_complete: confirm_ticket
+    on_restart: intake_menu
 
   # ═══════════════════════════════════════════════════════════════════════════
   # §6  EHRMS ID

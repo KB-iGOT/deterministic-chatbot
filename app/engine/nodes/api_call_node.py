@@ -1546,6 +1546,19 @@ def _append_others_org(orgs: Any) -> list[dict]:
     return filtered
 
 
+def _append_others_language(languages: Any) -> list[dict]:
+    """Append the 'Others' option to the end of the languages list."""
+    if not isinstance(languages, list):
+        filtered = []
+    else:
+        filtered = list(languages)
+    
+    filtered.append({
+        "name": "Others"
+    })
+    return filtered
+
+
 # Registry of named transforms usable in YAML response_mapping `transform:` field.
 _TRANSFORMS: dict[str, Any] = {
     "extract_hierarchy_names":     _extract_hierarchy_names,
@@ -1617,6 +1630,7 @@ _TRANSFORMS: dict[str, Any] = {
     "is_youtube_embed_url":          _is_youtube_embed_url,
     "filter_orgs_by_parent":         _filter_orgs_by_parent,
     "append_others_org":             _append_others_org,
+    "append_others_language":        _append_others_language,
     "merge_lists":                   _merge_lists,
 }
 
