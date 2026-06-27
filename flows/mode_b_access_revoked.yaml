@@ -49,6 +49,11 @@ entry_node: fetch_transfer_status
 
 imports:
   - _terminal
+  - fragment: _zoho_ticket
+    with:
+      cf_category:     profile
+      cf_sub_category: access_revoked
+      cf_flow_id:      ACCESS_REVOKED
   - fragment: _yp_lookup
 
 nodes:
