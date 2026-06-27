@@ -287,7 +287,7 @@ nodes:
       
 
   - id: youtube_unrestricted_ticket
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Summary of Request:**
@@ -297,16 +297,11 @@ nodes:
         • **Resource:** {{ ctx.collected.resource_name }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: resource_auto_ticket
-      cancel:  satisfied
+    on_confirm: resource_auto_ticket
+    on_cancel: satisfied
 
   - id: youtube_config_issue
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Summary of Request:**
@@ -316,13 +311,8 @@ nodes:
         • **Resource:** {{ ctx.collected.resource_name }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: resource_auto_ticket
-      cancel:  satisfied
+    on_confirm: resource_auto_ticket
+    on_cancel: satisfied
 
   # Fallback for API failures
   - id: api_error_fallback
@@ -336,7 +326,7 @@ nodes:
   # CASE 2B: SCORM / Other Formats
   # ===========================================================================
   - id: scorm_format_issue
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Summary of Request:**
@@ -346,16 +336,11 @@ nodes:
         • **Resource:** {{ ctx.collected.resource_name }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: resource_auto_ticket
-      cancel:  satisfied
+    on_confirm: resource_auto_ticket
+    on_cancel: satisfied
 
   - id: other_format_issue
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         {% set r_type = "a content module" %}
@@ -373,13 +358,8 @@ nodes:
         • **Resource:** {{ ctx.collected.resource_name }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: resource_auto_ticket
-      cancel:  satisfied
+    on_confirm: resource_auto_ticket
+    on_cancel: satisfied
 
   # ===========================================================================
   # Escalation

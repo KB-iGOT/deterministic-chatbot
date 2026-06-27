@@ -200,7 +200,7 @@ nodes:
     default: resolution_uc1_case_b
 
   - id: confirm_ticket_uc1
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Event Video Missing — Content Configuration Issue
@@ -211,13 +211,8 @@ nodes:
         • **Event:** {{ ctx.collected.event_name or 'Selected event' }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: auto_ticket_uc1
-      cancel:  satisfied
+    on_confirm: auto_ticket_uc1
+    on_cancel: satisfied
 
   - id: auto_ticket_uc1
     type: transfer_llm
@@ -282,7 +277,7 @@ nodes:
     next: step1_ticket_uc2
 
   - id: step1_ticket_uc2
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Event Video Not Playing — Configuration Issue
@@ -293,13 +288,8 @@ nodes:
         • **Event:** {{ ctx.collected.event_name or 'Selected event' }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: auto_ticket_uc2
-      cancel:  satisfied
+    on_confirm: auto_ticket_uc2
+    on_cancel: satisfied
 
   - id: auto_ticket_uc2
     type: transfer_llm
@@ -348,7 +338,7 @@ nodes:
       no:  satisfied
 
   - id: step1_ticket_uc2_persists
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Event Video Not Playing — Troubleshooting Failed
@@ -359,13 +349,8 @@ nodes:
         • **Event:** {{ ctx.collected.event_name or 'Selected event' }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: auto_ticket_uc2_persists
-      cancel:  satisfied
+    on_confirm: auto_ticket_uc2_persists
+    on_cancel: satisfied
 
   - id: auto_ticket_uc2_persists
     type: transfer_llm
@@ -401,7 +386,7 @@ nodes:
     next: satisfied
 
   - id: confirm_ticket_uc3
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Event Progress Not Updating — Technical Issue
@@ -412,13 +397,8 @@ nodes:
         • **Event:** {{ ctx.collected.event_name or 'Selected event' }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: auto_ticket_uc3
-      cancel:  satisfied
+    on_confirm: auto_ticket_uc3
+    on_cancel: satisfied
 
   - id: auto_ticket_uc3
     type: transfer_llm
@@ -471,7 +451,7 @@ nodes:
     next: satisfied
 
   - id: confirm_ticket_uc4
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Event Certificate Not Generated — Technical Issue
@@ -482,13 +462,8 @@ nodes:
         • **Event:** {{ ctx.collected.event_name or 'Selected event' }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: auto_ticket_uc4
-      cancel:  satisfied
+    on_confirm: auto_ticket_uc4
+    on_cancel: satisfied
 
   - id: auto_ticket_uc4
     type: transfer_llm

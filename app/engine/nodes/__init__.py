@@ -20,6 +20,7 @@ from app.engine.nodes.llm_choose_node import LLMChooseNode
 from app.engine.nodes.message_node import MessageNode
 from app.engine.nodes.open_llm_subgraph_node import OpenLLMSubgraphNode
 from app.engine.nodes.resolution_node import ResolutionNode
+from app.engine.nodes.ticket_confirm_node import TicketConfirmNode
 from app.engine.nodes.transfer_llm_node import TransferLLMNode
 from app.engine.nodes.engineering_ticket_node import EngineeringTicketNode
 
@@ -32,6 +33,7 @@ NODE_HANDLERS: dict[str, type[NodeHandler]] = {
     "data_lookup": DataLookupNode,
     "increment_and_branch": IncrementAndBranchNode,
     "resolution": ResolutionNode,
+    "ticket_confirm": TicketConfirmNode,
     "transfer_llm": TransferLLMNode,
     "llm_choose": LLMChooseNode,
     "open_llm_subgraph": OpenLLMSubgraphNode,
@@ -41,7 +43,8 @@ NODE_HANDLERS: dict[str, type[NodeHandler]] = {
 
 # Deterministic node types — must not call LLM. Enforced in CI.
 DETERMINISTIC_NODE_TYPES = frozenset(
-    {"message", "collect", "branch", "api_call", "data_lookup", "increment_and_branch", "resolution", "end", "engineering_ticket"}
+    {"message", "collect", "branch", "api_call", "data_lookup", "increment_and_branch",
+     "resolution", "ticket_confirm", "end", "engineering_ticket"}
 )
 
 LLM_NODE_TYPES = frozenset({"transfer_llm", "llm_choose", "open_llm_subgraph"})

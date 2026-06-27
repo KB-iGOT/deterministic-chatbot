@@ -685,7 +685,7 @@ nodes:
     next: access_revoked_step1_ticket
 
   - id: access_revoked_step1_ticket
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Access Revoked — Support Request
@@ -700,14 +700,8 @@ nodes:
         {% endif %}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: access_revoked_auto_ticket
-      cancel:  satisfied
-    next: satisfied
+    on_confirm: access_revoked_auto_ticket
+    on_cancel: satisfied
 
   # ===========================================================================
   # 5. Escalation & Terminal

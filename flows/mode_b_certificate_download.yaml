@@ -294,7 +294,7 @@ nodes:
       no:  c1_step1_ticket
 
   - id: c1_step1_ticket
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Certificate Not Generated
@@ -305,13 +305,8 @@ nodes:
         • **Course:** {{ ctx.collected.c1_course_name or 'Selected course' }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: c1_auto_ticket
-      cancel:  satisfied
+    on_confirm: c1_auto_ticket
+    on_cancel: satisfied
 
   - id: c1_auto_ticket
     type: transfer_llm
@@ -470,7 +465,7 @@ nodes:
       no:  generic_step1_ticket
 
   - id: generic_step1_ticket
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Certificate Issue
@@ -481,13 +476,8 @@ nodes:
         • **Course:** {{ ctx.collected.c1_course_name or 'Selected course' }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: generic_auto_ticket
-      cancel:  satisfied
+    on_confirm: generic_auto_ticket
+    on_cancel: satisfied
 
   - id: generic_auto_ticket
     type: transfer_llm

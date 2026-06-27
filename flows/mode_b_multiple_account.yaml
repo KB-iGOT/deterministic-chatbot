@@ -647,7 +647,7 @@ nodes:
 
   # Step 4.3 — Inform user about impact of proceeding
   - id: case_c_show_impact
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Please review the following before confirming:**
@@ -668,14 +668,8 @@ nodes:
         • **{{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} to be Updated:** {{ ctx.collected.new_identifier }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel, label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      save_to: collected.final_confirmation
-      confirm: raise_support_ticket
-      cancel: restart_flow
+    on_confirm: raise_support_ticket
+    on_cancel: restart_flow
 
   # Step 4.6 — User says NO at final confirmation → restart from Step 1
   - id: restart_flow
