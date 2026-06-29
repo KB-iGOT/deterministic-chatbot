@@ -116,12 +116,13 @@ Every API response contains `activities: [...]`. Each object in that array maps 
 | `quick_replies` | Row of tappable button chips | On tap → send `select_choice`; see §4 |
 | `input` | Free-text input box + submit | 3 variants: plain text, email, OTP — see §0.6 |
 | `picker` | Searchable scrollable list | With secondary text, optional "Other" button — see §0.7 |
+| `nested_picker` | Grouped accordion list (plans → courses) | Top-level items are non-selectable groups; tap a **child** to send `pick_item` — see §0.7 |
 | `typing` | Typing / loading animation | Always followed by real content in the same response (Phase 1) |
 | `end` | End-of-conversation banner | 4 outcome variants — see §0.8 |
 
 > ℹ️ A single response may contain **multiple activities in one array** — render all of them, top to bottom, in order before waiting for the next user action.
 
-**`disable_input` flag** — present on `markdown`, `quick_replies`, and `picker` activities:
+**`disable_input` flag** — present on `markdown`, `quick_replies`, `picker`, and `nested_picker` activities:
 
 | Value | Frontend action |
 |-------|----------------|
@@ -188,28 +189,39 @@ All pickers use the same `picker` activity schema — you build **one reusable p
 - On "Other" tap → show a free-text input → send `request_other` with `other_query`
 
 **Nested Picker (`"type": "nested_picker"`)**
-If the activity type is `"nested_picker"`, the items will contain a `children` array representing hierarchical data (like Courses grouped under Plans).
+If the activity type is `"nested_picker"`, top-level items are non-selectable group headers (e.g. CBP Plans); the selectable items are their `children` (e.g. Courses inside each plan).
 ```json
 {
   "type": "nested_picker",
   "picker_id": "collected.selected_apar_course_id",
   "placeholder": "Search plans and courses...",
+  "total_items": 5,
   "items": [
     {
-      "id": "plan_1",
-      "label": "Annual Training Plan 2026",
+      "id": "Plan 1",
+      "label": "Plan 1",
+      "meta": "Ends: 31/03/2027",
       "children": [
         {
           "id": "do_1144031217479680001241",
           "label": "Ethics in Public Service",
-          "meta": "Course"
+          "meta": "Incomplete (40%)"
+        },
+        {
+          "id": "do_1144031217479680001242",
+          "label": "Leadership Essentials",
+          "meta": "Completed"
         }
       ]
     }
-  ]
+  ],
+  "disable_input": true
 }
 ```
-*Frontend requirement:* Render the top-level items as a collapsible accordion/expansion group. Render the nested `children` as the selectable items. Clicking a child should send back the standard `pick_item` payload with the child's `item_id`.
+- `total_items` — count of selectable **leaf** items across all groups (not group count). Use this for a count badge.
+- Top-level items (`items[]`) are display-only group headers — **do not** make them tappable.
+- Only `children[]` items are selectable. On child tap → send `pick_item` with the **child's** `id` as `item_id`.
+- The same `pick_item` action shape is used as for a regular picker — `nested_picker` vs `picker` only differs in rendering.
 
 ---
 
@@ -773,6 +785,73 @@ Same fields as `markdown` but render as plain text — no Markdown parsing.
   "other_query": "My course is not in the list"
 }
 ```
+
+---
+
+### `nested_picker` — grouped accordion list
+
+```json
+{
+  "type": "nested_picker",
+  "picker_id": "collected.selected_apar_course_id",
+  "placeholder": "Search plans and courses...",
+  "search_enabled": true,
+  "total_items": 5,
+  "items": [
+    {
+      "id": "Plan 1",
+      "label": "Plan 1",
+      "meta": "Ends: 31/03/2027",
+      "children": [
+        {
+          "id": "do_1144031217479680001241",
+          "label": "Ethics in Public Service",
+          "meta": "Incomplete (40%)"
+        },
+        {
+          "id": "do_1144031217479680001242",
+          "label": "Leadership Essentials",
+          "meta": "Completed"
+        }
+      ]
+    }
+  ],
+  "disable_input": true
+}
+```
+
+| Field | Type | Always present? | Description |
+|-------|------|-----------------|-------------|
+| `type` | `"nested_picker"` | ✅ | |
+| `picker_id` | string | ✅ | Send back in `pick_item.picker_id` |
+| `placeholder` | string | ✅ | Search box hint text |
+| `search_enabled` | bool | ✅ | Show search/filter input if true |
+| `total_items` | integer | ✅ | Total count of selectable **leaf (child)** items across all groups — not the group count. Use for a count badge. Always ≥ 1 (zero-item case is never sent). |
+| `items` | array | ✅ | Top-level group headers — **not selectable** |
+| `items[].id` | string | ✅ | Group identifier (not sent back) |
+| `items[].label` | string | ✅ | Group header display text (e.g. "Plan 1") |
+| `items[].meta` | string \| null | ❌ | Group sub-label (e.g. "Ends: 31/03/2027") |
+| `items[].children` | array | ✅ | Selectable items inside this group |
+| `items[].children[].id` | string | ✅ | Course/item identifier — send back as `item_id` |
+| `items[].children[].label` | string | ✅ | Primary display text |
+| `items[].children[].meta` | string \| null | ❌ | Sub-label (status, progress) |
+| `disable_input` | bool | ❌ (default true) | Almost always true — user must pick from the list |
+
+**Rendering requirement:** Top-level `items[]` are accordion/expansion group headers — render them as collapsible sections, not tappable rows. Only `children[]` items are selectable.
+
+**Empty state:** Same guarantee as `picker` — you will **never** receive a `nested_picker` with empty `items[]`.
+
+**On child item tap → send `pick_item`:**
+```json
+{
+  "action": "pick_item",
+  "picker_id": "collected.selected_apar_course_id",
+  "item_id": "do_1144031217479680001241",
+  "item_label": "Ethics in Public Service"
+}
+```
+
+The `pick_item` payload shape is identical to a regular `picker` — use the **child's** `id` and `label`, not the group's.
 
 ---
 
