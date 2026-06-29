@@ -820,7 +820,7 @@ nodes:
         If you are unable to access or attempt the Final Assessment, please let me know what kind of issue you are facing:
     quick_replies:
       - { id: mobile, label: "📱 Unable to access from Mobile" }
-      - { id: other,  label: "⚠️ Any Other Error" }
+      - { id: other,  label: "Any Other Error" }
     disable_input: true
     on_reply:
       mobile: cap_assessment_mobile_guidance
@@ -850,7 +850,7 @@ nodes:
   # Option 3 — Any Other Error
   # ---------------------------------------------------------------------------
   - id: cap_other_error_guidance
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** CAP Technical Issue
@@ -862,13 +862,8 @@ nodes:
         {% endif %}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: cap_auto_ticket
-      cancel:  satisfied
+    on_confirm: cap_auto_ticket
+    on_cancel: satisfied
 
   # ---------------------------------------------------------------------------
   # Ticket Raising
@@ -1065,7 +1060,7 @@ nodes:
       quick_replies:
         - { id: YES,     label: "✅ Yes, progress updated" }
         - { id: NO,      label: "❌ No, still not updating" }
-        - { id: other,   label: "⚠️ Any Other Error" }
+        - { id: other,   label: "Any Other Error" }
     on_reply:
       YES: satisfied
       NO: cap_other_error_guidance
@@ -1094,7 +1089,7 @@ nodes:
       quick_replies:
         - { id: YES,     label: "✅ Yes, progress updated" }
         - { id: NO,      label: "❌ No, still not updating" }
-        - { id: other,   label: "⚠️ Any Other Error" }
+        - { id: other,   label: "Any Other Error" }
     on_reply:
       YES: satisfied
       NO: cap_other_error_guidance
@@ -1113,7 +1108,7 @@ nodes:
     quick_replies:
       - { id: mobile, label: "📱 Unable to complete from Mobile" }
       - { id: limit, label: "🚫 Assessment Limit Exceeded" }
-      - { id: other, label: "⚠️ Any Other Error" }
+      - { id: other, label: "Any Other Error" }
     disable_input: true
     on_reply:
       mobile: cap_assessment_mobile_guidance
@@ -1160,7 +1155,7 @@ nodes:
     next: satisfied
 
   - id: cap_assessment_limit_exceeded
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** CAP Assessment Attempt Limit Exceeded
@@ -1172,19 +1167,14 @@ nodes:
         {% endif %}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: cap_auto_ticket
-      cancel:  satisfied
+    on_confirm: cap_auto_ticket
+    on_cancel: satisfied
 
   # ===========================================================================
   # Child Course Technical Issue & Engineering Excel
   # ===========================================================================
   - id: cap_child_course_technical_message
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** CAP Child Course Technical Issue
@@ -1196,13 +1186,8 @@ nodes:
         {% endif %}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: cap_child_course_technical_ticket
-      cancel:  satisfied
+    on_confirm: cap_child_course_technical_ticket
+    on_cancel: satisfied
 
   - id: cap_child_course_technical_ticket
     type: engineering_ticket

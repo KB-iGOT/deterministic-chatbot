@@ -354,7 +354,7 @@ nodes:
     next: confirm_designation_ticket
 
   - id: confirm_designation_ticket
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Request to Add New Designation
@@ -366,13 +366,9 @@ nodes:
         • **Designation (full form):** {{ ctx.collected.designation_requested }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: edit,    label: "✏️ Edit Details" }
-    disable_input: true
-    on_reply:
-      confirm: raise_designation_ticket
-      edit:    designation_no_match_collect_org
+    on_confirm: raise_designation_ticket
+    on_cancel: designation_no_match_collect_org
+    cancel_label: "✏️ Edit Details"
 
   - id: raise_designation_ticket
     type: transfer_llm
@@ -613,7 +609,9 @@ nodes:
     type: message
     prompt:
       text: |
-        ⚠️ We were unable to verify whether the **{{ ctx.collected.new_identifier }}** is already registered due to a temporary issue.
+        **Verification Temporarily Unavailable**
+
+        We are currently unable to verify whether the **{{ ctx.collected.new_identifier }}** is already registered due to a temporary issue.
 
         Please try again in a moment.
     quick_replies:
@@ -650,7 +648,7 @@ nodes:
     quick_replies:
       - { id: done,    label: "✅ Updated successfully" }
       - { id: no_otp,  label: "❌ Did not receive OTP" }
-      - { id: error,   label: "⚠️ Still getting an error" }
+      - { id: error,   label: "Still getting an error" }
     disable_input: true
     on_reply:
       done:   satisfied
@@ -765,7 +763,9 @@ nodes:
     type: message
     prompt:
       text: |
-        ⚠️ The {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} **{{ ctx.collected.new_identifier }}** is already registered with another account.
+        **Identifier Already Registered**
+
+        The {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} **{{ ctx.collected.new_identifier }}** is already registered with another account.
 
         **Details of the registered account:**
         🏢 **Organisation:** {{ ctx.collected.conflict_org_name or "Unknown" }}
@@ -777,7 +777,7 @@ nodes:
     quick_replies:
       - { id: no,       label: "❌ No, don't proceed" }
       - { id: merge,    label: "🔗 Can we merge both accounts?" }
-      - { id: proceed,  label: "⚠️ Yes, I want to proceed" }
+      - { id: proceed,  label: "➡️ Yes, I want to proceed" }
     disable_input: true
     on_reply:
       save_to: collected.conflict_decision
@@ -838,7 +838,7 @@ nodes:
     type: message
     prompt:
       text: |
-        ⚠️ Please review the following before confirming:
+        **Please review the following before confirming:**
 
         **Your current account enrollments:**
         📚 **Total Enrollments:** {{ (ctx.collected.current_inprogress or 0) + (ctx.collected.current_completed or 0) }}
@@ -1040,20 +1040,21 @@ nodes:
     next: confirm_mother_tongue_ticket_others
 
   - id: confirm_mother_tongue_ticket_others
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
-        I will raise a support request to get your mother tongue (**{{ ctx.collected.mother_tongue_others_input }}**) added.
-        Shall I submit this request?
-    quick_replies:
-      - { id: yes, label: "✅ Yes, raise request" }
-      - { id: no,  label: "❌ No, not now" }
-    on_reply:
-      yes: raise_mother_tongue_ticket_others
-      no:  satisfied
+        **Issue Identified:** Mother Tongue Addition Request
+
+        **Summary of Request:**
+        You reported that your mother tongue (**{{ ctx.collected.mother_tongue_others_input }}**) is not available in the iGOT system. You would like us to raise a support request to get it added.
+
+        Please review the details above and confirm whether they are correct.
+    on_confirm: raise_mother_tongue_ticket_others
+    on_cancel: satisfied
 
   - id: raise_mother_tongue_ticket_others
     type: transfer_llm
+    auto_raise: silent
     llm_context:
       include_messages: true
       include_collected: true
@@ -1087,7 +1088,7 @@ nodes:
     next: satisfied
 
   - id: mother_tongue_ticket
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Mother Tongue Update Request
@@ -1096,15 +1097,8 @@ nodes:
         You reported that the language list is unavailable. You would like us to raise a support request to add or update your mother tongue in the iGOT system.
 
         Please review the details above and confirm whether they are correct.
-        I can raise a support request to get your mother tongue added .
-        Shall I submit this request?
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: raise_mother_tongue_ticket
-      cancel:  satisfied
+    on_confirm: raise_mother_tongue_ticket
+    on_cancel: satisfied
 
   - id: raise_mother_tongue_ticket
     type: transfer_llm
@@ -1468,7 +1462,7 @@ nodes:
       yes: satisfied
 
   - id: confirm_service_ticket
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Request to Add or Update Service/Cadre Details
@@ -1480,13 +1474,9 @@ nodes:
         • **Cadre Controlling Authority:** {{ ctx.collected.service_cadre_authority }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: edit,    label: "✏️ Edit Details" }
-    disable_input: true
-    on_reply:
-      confirm: raise_service_ticket
-      edit:    service_not_found_collect
+    on_confirm: raise_service_ticket
+    on_cancel: service_not_found_collect
+    cancel_label: "✏️ Edit Details"
 
   - id: raise_service_ticket
     type: transfer_llm

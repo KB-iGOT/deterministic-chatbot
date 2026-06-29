@@ -37,6 +37,7 @@ def _get_interrupt_nodes(flow: dict[str, Any]) -> list[str]:
     - ``message`` nodes that have a ``quick_replies`` key
     - all ``collect`` nodes
     - ``resolution`` nodes that have a ``follow_up`` key
+    - ``ticket_confirm`` nodes (always awaits user confirmation)
     - ``transfer_llm`` nodes without ``auto_raise: true`` (show confirmation, wait for user)
     """
     result: list[str] = []
@@ -50,6 +51,8 @@ def _get_interrupt_nodes(flow: dict[str, Any]) -> list[str]:
         elif ntype == "collect":
             result.append(nid)
         elif ntype == "resolution" and "follow_up" in node:
+            result.append(nid)
+        elif ntype == "ticket_confirm":
             result.append(nid)
         elif ntype == "transfer_llm" and not node.get("auto_raise", False):
             result.append(nid)
@@ -391,6 +394,11 @@ def _collect_edge_targets(node: dict[str, Any]) -> set[str]:
                 targets.add(v)
         if "next" in on_reply and isinstance(on_reply["next"], str):
             targets.add(on_reply["next"])
+    # ticket_confirm edges
+    if "on_confirm" in node:
+        targets.add(node["on_confirm"])
+    if "on_cancel" in node:
+        targets.add(node["on_cancel"])
     if "on_low_confidence" in node:
         targets.add(node["on_low_confidence"])
     if "candidates" in node:

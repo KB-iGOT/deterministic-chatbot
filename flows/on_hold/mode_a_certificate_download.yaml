@@ -653,7 +653,7 @@ nodes:
   - id: satisfied
     type: message
     prompt:
-      text: "✅ Issue resolved — hope that helped!"
+      text: "✅ Does this help?"
     quick_replies:
       - { id: yes, label: "👍 All good, thanks!" }
       - { id: no,  label: "🔄 I have another issue" }
@@ -691,8 +691,6 @@ nodes:
   - id: satisfied_end
     type: end
     outcome: self_served
-    prompt:
-      text: "Glad I could help! 🙏 Take care."
 
   - id: ticket_raised_end
     type: end

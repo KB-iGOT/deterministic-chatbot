@@ -369,7 +369,7 @@ nodes:
   # STEP 6 — Technical Issue Found → Obtain User Confirmation (SOP 6.1.1)
   # ===========================================================================
   - id: confirm_technical_issue
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Course / Program / Event Progress — Technical Issue Detected
@@ -380,13 +380,8 @@ nodes:
         • **Course / Program / Event:** {{ ctx.collected.course_name or 'Selected content' }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: technical_issue_auto_ticket
-      cancel:  technical_issue_declined
+    on_confirm: technical_issue_auto_ticket
+    on_cancel: technical_issue_declined
 
   # User declined — close the conversation politely (SOP 6.3)
   - id: technical_issue_declined
@@ -979,7 +974,7 @@ nodes:
     default: remark_pending_resources_found
 
   - id: remark_revalidate_tech_issue_confirm
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Course / Program / Event Progress — Technical Issue (Revalidated)
@@ -990,13 +985,8 @@ nodes:
         • **Course / Program / Event:** {{ ctx.collected.course_name or 'Selected content' }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: technical_issue_auto_ticket
-      cancel:  technical_issue_declined
+    on_confirm: technical_issue_auto_ticket
+    on_cancel: technical_issue_declined
 
   # Remark 2 — Scenario B: Pending resources found (Section 13.2.3)
   - id: remark_pending_resources_found
@@ -1038,7 +1028,7 @@ nodes:
       no:  progress_step1_ticket
 
   - id: progress_step1_ticket
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Course / Program / Event Progress Issue
@@ -1049,13 +1039,8 @@ nodes:
         • **Course / Program / Event:** {{ ctx.collected.course_name or 'Selected content' }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: progress_auto_ticket
-      cancel:  satisfied
+    on_confirm: progress_auto_ticket
+    on_cancel: satisfied
 
   # ===========================================================================
   # Escalation — collect email then auto-generate ticket

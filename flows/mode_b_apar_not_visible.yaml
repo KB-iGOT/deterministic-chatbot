@@ -706,7 +706,7 @@ nodes:
       no:  satisfied
 
   - id: apar_confirm_ticket
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** APAR Training Plan Not Visible
@@ -715,13 +715,8 @@ nodes:
         You reported that your APAR training plan / courses are not visible on the platform. You would like us to investigate this issue further.
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: raise_ticket
-      cancel:  satisfied
+    on_confirm: raise_ticket
+    on_cancel: satisfied
 
   - id: raise_ticket
     type: transfer_llm

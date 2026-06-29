@@ -463,7 +463,7 @@ nodes:
 
         ℹ️ Your weekly clap will start building again from the next week in which you spend 60 or more minutes on the platform.
 
-        > ⚠️ **Note:** The Insights API provides data for only the last 12 weeks. If the clap streak exceeded 12 weeks, the exact reset point may be beyond the available history.
+        > **Note:** The Insights API provides data for only the last 12 weeks. If the clap streak exceeded 12 weeks, the exact reset point may be beyond the available history.
     quick_replies:
       - { id: agree,    label: "✅ I understand" }
       - { id: disagree, label: "❌ I disagree — I spent more time" }
@@ -500,7 +500,7 @@ nodes:
     next: discrepancy_step1_ticket
 
   - id: discrepancy_step1_ticket
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Weekly Clap Not Credited — Discrepancy Detected
@@ -512,16 +512,11 @@ nodes:
         {% endif %}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: discrepancy_auto_ticket
-      cancel:  satisfied
+    on_confirm: discrepancy_auto_ticket
+    on_cancel: satisfied
 
   - id: disagree_step1_ticket
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Weekly Clap Reset — Disputed Activity Data
@@ -533,13 +528,8 @@ nodes:
         {% endif %}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: disagree_auto_ticket
-      cancel:  satisfied
+    on_confirm: disagree_auto_ticket
+    on_cancel: satisfied
 
   # ===========================================================================
   # Ticket path — User disagrees with reset explanation (SOP 1.3.3)

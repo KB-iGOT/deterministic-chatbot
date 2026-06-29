@@ -36,7 +36,7 @@ nodes:
   - id: otp_send_failed
     type: message
     prompt:
-      text: "⚠️ We couldn't send the OTP right now. Please try again in a few minutes, or contact support@igotkarmayogi.gov.in."
+      text: "We couldn't send the OTP right now. Please try again in a few minutes, or contact support@igotkarmayogi.gov.in."
     next: otp_max_retries_node
 
   # Ask user to enter the OTP

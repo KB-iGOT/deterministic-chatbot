@@ -150,7 +150,9 @@ nodes:
     type: message
     prompt:
       text: |
-        ⚠️ We were unable to fetch your profile details at this moment. Please try again shortly.
+        **Profile Details Unavailable**
+
+        We were unable to fetch your profile details at this moment. Please try again shortly.
     quick_replies:
       - { id: retry, label: "🔄 Try again" }
       - { id: done,  label: "✅ Exit" }
@@ -562,7 +564,9 @@ nodes:
     type: message
     prompt:
       text: |
-        ⚠️ Search is unavailable right now. Please try again.
+        **Search Unavailable**
+
+        Search is unavailable right now. Please try again.
     quick_replies:
       - { id: retry, label: "🔄 Try again" }
       - { id: done,  label: "✅ Exit" }
@@ -735,7 +739,9 @@ nodes:
     type: message
     prompt:
       text: |
-        ⚠️ We are having trouble searching for events right now. Please try again.
+        **Search Unavailable**
+
+        We are having trouble searching for events right now. Please try again.
     quick_replies:
       - { id: retry, label: "🔄 Try again" }
       - { id: done,  label: "✅ Exit" }

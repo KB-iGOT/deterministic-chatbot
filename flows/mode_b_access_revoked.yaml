@@ -221,7 +221,7 @@ nodes:
     type: resolution
     prompt:
       text: |
-        ⚠️ **Cancel Current Request**
+        **Cancel Current Request**
 
         Since the organization is incorrect, you need to cancel the current transfer request and raise a fresh one with the correct organization.
     steps:
@@ -259,7 +259,7 @@ nodes:
       text: "Are you facing any issues while raising the request?"
       quick_replies:
         - { id: done,   label: "✅ I've submitted it" }
-        - { id: greyed, label: "⚠️  Button is disabled" }
+        - { id: greyed, label: "Button is disabled" }
         - { id: no_org, label: "🔍 Can't find my organisation" }
     on_reply:
       done: satisfied
@@ -273,7 +273,7 @@ nodes:
     type: resolution
     prompt:
       text: |
-        ⚠️ **"Make Transfer Request" Button is Disabled**
+        **"Make Transfer Request" Button is Disabled**
 
         This usually happens when you have a pending request under your **Primary Details** section.
     steps:
@@ -586,9 +586,9 @@ nodes:
     type: message
     prompt:
       text: |
-        ⚠️ **Organization Not Found**
+        **Finding Contact Details**
 
-        Since we could not locate your organization in the system dropdown, we are looking up the YP/SPOC contact details for your Ministry/State to assist you.
+        To assist you further, we are looking up the YP/SPOC contact details for your Ministry/State.
     next: start_yp_lookup
 
   - id: start_yp_lookup
@@ -679,13 +679,13 @@ nodes:
     type: message
     prompt:
       text: |
-        ⚠️ **YP / SPOC Details Not Found**
+        **Need Further Assistance?**
 
-        We could not locate a YP or SPOC for your organization. A support ticket will be raised for further investigation — our team will reach out to assist you.
+        To help get this resolved, we will raise a support ticket and our team will reach out to assist you shortly.
     next: access_revoked_step1_ticket
 
   - id: access_revoked_step1_ticket
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Access Revoked — Support Request
@@ -700,14 +700,8 @@ nodes:
         {% endif %}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: access_revoked_auto_ticket
-      cancel:  satisfied
-    next: satisfied
+    on_confirm: access_revoked_auto_ticket
+    on_cancel: satisfied
 
   # ===========================================================================
   # 5. Escalation & Terminal

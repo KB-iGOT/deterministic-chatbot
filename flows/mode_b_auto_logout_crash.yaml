@@ -114,7 +114,7 @@ nodes:
     default: android_confirm_ticket
 
   - id: android_confirm_ticket
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Auto Logout / App Crash — Technical Issue
@@ -127,13 +127,8 @@ nodes:
         • **Android Version:** {{ ctx.collected.android_version }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: android_raise_ticket
-      cancel:  satisfied
+    on_confirm: android_raise_ticket
+    on_cancel: satisfied
 
   - id: android_unsupported_version
     type: resolution
@@ -196,7 +191,7 @@ nodes:
     default: ios_confirm_ticket
 
   - id: ios_confirm_ticket
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Auto Logout / App Crash — Technical Issue
@@ -209,13 +204,8 @@ nodes:
         • **iOS Version:** {{ ctx.collected.ios_version }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: ios_raise_ticket
-      cancel:  satisfied
+    on_confirm: ios_raise_ticket
+    on_cancel: satisfied
 
   - id: ios_unsupported_version
     type: resolution

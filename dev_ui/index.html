@@ -664,9 +664,10 @@ function appendUser(text) {
 
 function appendEndBanner(a) {
   const outcome = a.outcome || 'ended';
-  const icons   = { self_served:'✅', ticket_raised:'🎫', ticket_failed:'⚠️', ended:'👋' };
+  if (outcome === 'self_served') return;
+  
+  const icons   = { ticket_raised:'🎫', ticket_failed:'⚠️', ended:'👋' };
   const texts   = {
-    self_served:   'Issue resolved — hope that helped!',
     ticket_raised: 'Ticket raised' + (a.content ? ': ' + a.content : '.'),
     ticket_failed: 'Ticket could not be raised — please email support@igotkarmayogi.gov.in',
     ended:         a.content || 'Conversation ended.',

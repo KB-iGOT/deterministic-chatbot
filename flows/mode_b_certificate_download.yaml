@@ -64,7 +64,7 @@ imports:
       prompt_text:   "Please select the course for which you have not received the certificate."
       field_name:    c1_course_id
       field_prefix:  "c1_"
-      next:          c1_branch_enrollment
+      next:          c1_read_course_content
       on_empty:      no_courses_found_cert
 
 nodes:
@@ -101,6 +101,24 @@ nodes:
   # c1_check_enrollment removed — all fields now captured by c1_pick_course extra_fields
 
   # Route based on enrollment status (0=not started, 1=in-progress, 2=completed)
+  - id: c1_read_course_content
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/content/v1/read/{{ ctx.collected.c1_course_id }}"
+    response_mapping:
+      - { from: "$.content.leafNodes",
+          to:   collected.c1_incomplete_ids,
+          transform: diff_leaf_nodes,
+          transform_ctx_key: collected.c1_completed_ids }
+      - { from: "$.content.primaryCategory",
+          to:   collected.c1_primary_category }
+    on_success: c1_branch_enrollment
+    on_error:
+      any: c1_branch_enrollment
+    timeout_ms: 8000
+
   - id: c1_branch_enrollment
     type: branch
     rules:
@@ -109,7 +127,13 @@ nodes:
       - { if: "ctx.collected.c1_enrollment_status == 2",
           then: c1_branch_certificate_issued }
       - { if: "ctx.collected.c1_enrollment_status == 1",
-          then: c1_read_course_content }
+          then: c1_branch_on_leaf_ids_available }
+    default: c1_branch_not_started
+
+  - id: c1_branch_not_started
+    type: branch
+    rules:
+      - { if: "'program' in lower(str(ctx.collected.c1_primary_category))", then: c1_not_started_program }
     default: c1_not_started
 
   - id: c1_no_enrollment_found
@@ -132,7 +156,24 @@ nodes:
         4. Expand each module (click the **+** icon)
         5. Complete all items without a blue tick mark
         6. Once all modules show a blue tick, the certificate generates within 24 hours
-    next: c1_resolution_check
+    next: satisfied
+
+  # Course completed — check timing
+  - id: c1_not_started_program
+    type: message
+    prompt:
+      text: |
+        Your program **{{ ctx.collected.c1_course_name }}** is showing as 'not started' with 0% completion. A certificate is only generated upon 100% completion.
+
+        **Steps to complete the program:**
+
+        1. Go to **Profile** → **My Learning** → **In Progress**
+        2. Locate and select the program
+        3. Click **Resume**
+        4. Expand each module (click the **+** icon)
+        5. Complete all items without a blue tick mark
+        6. Once all modules show a blue tick, the certificate generates within 24 hours
+    next: satisfied
 
   # Course completed — check timing
   - id: c1_branch_certificate_issued
@@ -140,7 +181,19 @@ nodes:
     rules:
       # Guard: if completedOn was null, treat as > 24h (same UX — cert should be available)
       - { if: "ctx.collected.c1_completed_on_iso == None or hours_since(ctx.collected.c1_completed_on_iso) > 24",
-          then: c1_certificate_available }
+          then: c1_branch_certificate_available }
+    default: c1_branch_wait_24h
+
+  - id: c1_branch_certificate_available
+    type: branch
+    rules:
+      - { if: "'program' in lower(str(ctx.collected.c1_primary_category))", then: c1_certificate_available_program }
+    default: c1_certificate_available
+
+  - id: c1_branch_wait_24h
+    type: branch
+    rules:
+      - { if: "'program' in lower(str(ctx.collected.c1_primary_category))", then: c1_wait_24h_program }
     default: c1_wait_24h
 
   - id: c1_certificate_available
@@ -158,7 +211,24 @@ nodes:
         5. Open the course details page.
         6. Navigate to the **About** section.
         7. Click on **Download Certificate**.
-    next: c1_resolution_check
+    next: satisfied
+
+  - id: c1_certificate_available_program
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that the program **{{ ctx.collected.c1_course_name }}** has been successfully completed and more than 24 hours have passed since completion.
+
+        We request you to download the certificate again by following the steps below:
+
+        1. Log in to the **iGOT Karmayogi Portal**.
+        2. Go to **Profile**.
+        3. Click on **My Learning**.
+        4. Search and select **{{ ctx.collected.c1_course_name }}**.
+        5. Open the program details page.
+        6. Navigate to the **About** section.
+        7. Click on **Download Certificate**.
+    next: satisfied
 
   - id: c1_wait_24h
     type: message
@@ -169,27 +239,20 @@ nodes:
   # --------------------------------------------------------------------------
   # Step 2 — Incomplete Resource Lookup (course in-progress)
   # --------------------------------------------------------------------------
-  - id: c1_read_course_content
-    type: api_call
-    integration: karmayogi
-    request:
-      method: GET
-      url: "/api/content/v1/read/{{ ctx.collected.c1_course_id }}"
-    response_mapping:
-      - { from: "$.content.leafNodes",
-          to:   collected.c1_incomplete_ids,
-          transform: diff_leaf_nodes,
-          transform_ctx_key: collected.c1_completed_ids }
-    on_success: c1_branch_on_leaf_ids_available
-    on_error:
-      any: c1_fetch_incomplete_resources
-    timeout_ms: 8000
+  - id: c1_wait_24h_program
+    type: message
+    prompt:
+      text: "Certificate generation may take up to **24 hours** after successful program completion. We request you to wait until 24 hours have elapsed from the completion time and then try downloading the certificate again."
+    next: satisfied
 
+  # --------------------------------------------------------------------------
+  # Step 2 — Incomplete Resource Lookup (course in-progress)
+  # --------------------------------------------------------------------------
   - id: c1_branch_on_leaf_ids_available
     type: branch
     rules:
       - { if: "len(ctx.collected.c1_incomplete_ids) == 0",
-          then: c1_wait_24h }
+          then: c1_branch_wait_24h }
     default: c1_fetch_incomplete_resources
   - id: c1_fetch_incomplete_resources
     type: api_call
@@ -218,13 +281,25 @@ nodes:
       - { from: "$.content[*].mimeType", to: collected.c1_has_scorm, transform: detect_scorm }
     on_success: c1_branch_scorm
     on_error:
-      any: c1_in_progress
+      any: c1_branch_in_progress
     timeout_ms: 8000
 
   - id: c1_branch_scorm
     type: branch
     rules:
-      - { if: "ctx.collected.c1_has_scorm == true", then: c1_in_progress_scorm }
+      - { if: "ctx.collected.c1_has_scorm == true", then: c1_branch_in_progress_scorm }
+    default: c1_branch_in_progress
+
+  - id: c1_branch_in_progress_scorm
+    type: branch
+    rules:
+      - { if: "'program' in lower(str(ctx.collected.c1_primary_category))", then: c1_in_progress_scorm_program }
+    default: c1_in_progress_scorm
+
+  - id: c1_branch_in_progress
+    type: branch
+    rules:
+      - { if: "'program' in lower(str(ctx.collected.c1_primary_category))", then: c1_in_progress_program }
     default: c1_in_progress
 
   - id: c1_in_progress_scorm
@@ -249,9 +324,36 @@ nodes:
         10. Ensure all modules and content items display a blue tick mark.
         11. Continue until the course completion reaches **100%**.
 
-        ⚠️ SCORM resources require a stable internet connection and cannot be completed offline.
+        **Note:** SCORM resources require a stable internet connection and cannot be completed offline.
 
         Please complete all pending resources and recheck certificate availability after successful course completion.
+    next: satisfied
+
+  - id: c1_in_progress_scorm_program
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found that the program **{{ ctx.collected.c1_course_name }}** is still in progress and has not yet been completed.
+
+        The resource **"{{ ctx.collected.c1_incomplete_resource_name }}"** is pending completion. This resource is in **SCORM format** — it must be completed within the platform in one continuous session.
+
+        **Steps to identify and complete pending resources:**
+
+        1. Go to **Profile**.
+        2. Click on **My Learning**.
+        3. Open the **In Progress** section under *Contents*.
+        4. Locate and select **{{ ctx.collected.c1_course_name }}**.
+        5. Click **Resume**.
+        6. Expand each module by clicking the **plus (+) icon**.
+        7. Check for content items that do not have a blue tick mark.
+        8. Open resources **without a blue tick** — complete them fully without closing the tab.
+        9. SCORM reports completion only when you reach the end or pass the threshold.
+        10. Ensure all modules and content items display a blue tick mark.
+        11. Continue until the program completion reaches **100%**.
+
+        **Note:** SCORM resources require a stable internet connection and cannot be completed offline.
+
+        Please complete all pending resources and recheck certificate availability after successful program completion.
     next: satisfied
 
   - id: c1_in_progress
@@ -281,56 +383,29 @@ nodes:
   # --------------------------------------------------------------------------
   # Satisfaction check — if unresolved, auto-raise ticket
   # --------------------------------------------------------------------------
-  - id: c1_resolution_check
-    type: message
-    prompt:
-      text: "Did the above steps help resolve your certificate issue?"
-    quick_replies:
-      - { id: yes, label: "✅ Yes, resolved" }
-      - { id: no,  label: "❌ No, still facing issue" }
-    disable_input: true
-    on_reply:
-      yes: satisfied
-      no:  c1_step1_ticket
-
-  - id: c1_step1_ticket
+  - id: c1_in_progress_program
     type: message
     prompt:
       text: |
-        **Issue Identified:** Certificate Not Generated
+        Upon checking, we found that the program **{{ ctx.collected.c1_course_name }}** is still in progress and has not yet been completed.
 
-        **Summary of Request:**
-        You reported that your certificate has not been generated despite following the self-service steps. You would like us to investigate this issue.
-        
-        • **Course:** {{ ctx.collected.c1_course_name or 'Selected course' }}
+        The following resource is pending completion: **"{{ ctx.collected.c1_incomplete_resource_name }}"**
 
-        Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: c1_auto_ticket
-      cancel:  satisfied
+        **Steps to identify and complete pending resources:**
 
-  - id: c1_auto_ticket
-    type: transfer_llm
-    auto_raise: silent
-    llm_context:
-      include_messages:  true
-      include_collected: true
-      include_flow_meta: true
-    llm_directives:
-      objective: |
-        The user could not resolve a certificate issue through self-service steps.
-        Generate a concise Zoho support ticket summary.
-        Subject: "Certificate Not Generated — <course_name>"
-        Description: include sub-scenario (C1=not generated, C3=incorrect name),
-        course name, enrollment status, completion percentage, completedOn date if known,
-        and a brief summary of what the user tried.
-      priority_override: P4
-    on_complete: confirm_ticket
-    on_restart: ask_certificate_issue
+        1. Go to **Profile**.
+        2. Click on **My Learning**.
+        3. Open the **In Progress** section under *Contents*.
+        4. Locate and select **{{ ctx.collected.c1_course_name }}**.
+        5. Click **Resume**.
+        6. Expand each module by clicking the **plus (+) icon**.
+        7. Check for content items that do not have a blue tick mark.
+        8. Ensure all modules and content items display a blue tick mark.
+        9. Resume and complete the pending videos, assessments, or content items.
+        10. Continue until the program completion reaches **100%**.
+
+        Please complete all pending resources and recheck certificate availability after successful program completion.
+    next: satisfied
 
   # ===========================================================================
   # C3: Incorrect Name on Certificate (UC-02)
@@ -470,7 +545,7 @@ nodes:
       no:  generic_step1_ticket
 
   - id: generic_step1_ticket
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
         **Issue Identified:** Certificate Issue
@@ -481,13 +556,8 @@ nodes:
         • **Course:** {{ ctx.collected.c1_course_name or 'Selected course' }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel,  label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      confirm: generic_auto_ticket
-      cancel:  satisfied
+    on_confirm: generic_auto_ticket
+    on_cancel: satisfied
 
   - id: generic_auto_ticket
     type: transfer_llm

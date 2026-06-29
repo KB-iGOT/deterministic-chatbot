@@ -357,7 +357,9 @@ nodes:
     type: message
     prompt:
       text: |
-        ⚠️ We were unable to verify whether the **{{ ctx.collected.new_identifier }}** is already registered due to a temporary issue.
+        **Verification Temporarily Unavailable**
+
+        We are currently unable to verify whether the **{{ ctx.collected.new_identifier }}** is already registered due to a temporary issue.
 
         Please try again in a moment.
     quick_replies:
@@ -549,7 +551,9 @@ nodes:
     type: message
     prompt:
       text: |
-        ⚠️ The {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} **{{ ctx.collected.new_identifier }}** is already registered with another account.
+        **Identifier Already Registered**
+
+        The {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} **{{ ctx.collected.new_identifier }}** is already registered with another account.
 
         **Details of the registered account:**
         🏢 **Organisation:** {{ ctx.collected.conflict_org_name or "Unknown" }}
@@ -561,7 +565,7 @@ nodes:
     quick_replies:
       - { id: no, label: "❌ No, don't proceed" }
       - { id: merge, label: "🔗 Can we merge both accounts?" }
-      - { id: proceed, label: "⚠️ Yes, I want to proceed" }
+      - { id: proceed, label: "➡️ Yes, I want to proceed" }
     disable_input: true
     on_reply:
       save_to: collected.conflict_decision
@@ -643,10 +647,10 @@ nodes:
 
   # Step 4.3 — Inform user about impact of proceeding
   - id: case_c_show_impact
-    type: message
+    type: ticket_confirm
     prompt:
       text: |
-        ⚠️ Please review the following before confirming:
+        **Please review the following before confirming:**
 
         **Your current account enrollments:**
         📚 **Total Enrollments:** {{ (ctx.collected.current_inprogress or 0) + (ctx.collected.current_completed or 0) }}
@@ -664,14 +668,8 @@ nodes:
         • **{{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} to be Updated:** {{ ctx.collected.new_identifier }}
 
         Please review the details above and confirm whether they are correct.
-    quick_replies:
-      - { id: confirm, label: "✅ Confirm" }
-      - { id: cancel, label: "❌ Cancel" }
-    disable_input: true
-    on_reply:
-      save_to: collected.final_confirmation
-      confirm: raise_support_ticket
-      cancel: restart_flow
+    on_confirm: raise_support_ticket
+    on_cancel: restart_flow
 
   # Step 4.6 — User says NO at final confirmation → restart from Step 1
   - id: restart_flow
