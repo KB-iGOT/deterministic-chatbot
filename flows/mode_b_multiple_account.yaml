@@ -160,7 +160,7 @@ nodes:
           if: "not ctx.collected.new_identifier.isdigit()",
           then: reject_invalid_mobile,
         }
-    default: check_registration
+    default: fetch_current_profile
 
   - id: reject_invalid_mobile
     type: message
@@ -190,7 +190,7 @@ nodes:
     on_success: branch_domain_check
     on_error:
       # Cannot verify domain — treat as valid and continue
-      any: check_registration
+      any: fetch_current_profile
     timeout_ms: 5000
 
   - id: branch_domain_check
@@ -207,7 +207,7 @@ nodes:
           if: "email_domain_valid(ctx.collected.new_identifier, ctx.collected.approved_domains) == False",
           then: domain_invalid_fetch_user_profile,
         }
-    default: check_registration
+    default: fetch_current_profile
 
   # ---------------------------------------------------------------------------
   # Domain NOT valid — fetch user profile to get rootOrgId → MDO lookup
@@ -368,14 +368,69 @@ nodes:
     on_reply:
       retry: check_registration
 
+  # ===========================================================================
+  # STEP 3 — Fetch current user's profile to compare identifier
+  # ===========================================================================
+  - id: fetch_current_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
+    response_mapping:
+      - { from: "$.response.profileDetails.personalDetails.primaryEmail", to: collected.current_email }
+      - { from: "$.response.profileDetails.personalDetails.mobile", to: collected.current_phone }
+    on_success: check_same_identifier
+    on_error:
+      any: check_registration
+    timeout_ms: 5000
+
+  - id: check_same_identifier
+    type: branch
+    rules:
+      - {
+          if: "ctx.collected.update_type == 'EMAIL' and ctx.collected.new_identifier == ctx.collected.current_email",
+          then: same_identifier_message,
+        }
+      - {
+          if: "ctx.collected.update_type == 'MOBILE' and ctx.collected.new_identifier == ctx.collected.current_phone",
+          then: same_identifier_message,
+        }
+    default: check_registration
+
+  # ===========================================================================
+  # STEP 4 — Branch based on registration check
+  # ===========================================================================
   - id: branch_registration
     type: branch
     rules:
+      - {
+          if: "ctx.collected.conflict_count != None and ctx.collected.conflict_count > 0 and ctx.collected.conflict_user_id == ctx.user_id_hash",
+          then: same_identifier_message,
+        }
       - {
           if: "ctx.collected.conflict_count != None and ctx.collected.conflict_count > 0",
           then: fetch_conflict_enrollments,
         }
     default: guide_self_service_update
+
+  # ===========================================================================
+  # 3.0 — Identifier belongs to the CURRENT user
+  # ===========================================================================
+  - id: same_identifier_message
+    type: message
+    prompt:
+      text: |
+        The **{{ ctx.collected.new_identifier }}** you provided is already the active {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} on your current account!
+
+        Would you like to try entering a different {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }}, or are you all set?
+    quick_replies:
+      - { id: new, label: "🔄 Try another identifier" }
+      - { id: resolved, label: "✅ All good, I'm done" }
+    disable_input: true
+    on_reply:
+      new: ask_identifier_type
+      resolved: satisfied
 
   # ===========================================================================
   # 3.1 — Identifier NOT registered → guide self-service update
@@ -538,34 +593,11 @@ nodes:
           from: "$.userCourseEnrolmentInfo.certificatesIssued",
           to: collected.conflict_completed,
         }
-    on_success: fetch_current_profile
-    on_error:
-      # If enrollment fetch fails (e.g. cross-user permission), show what we know
-      any: fetch_current_profile
-    timeout_ms: 8000
-
-  # ---------------------------------------------------------------------------
-  # Step 4.2 — Fetch current user's profile to get their current email / phone
-  # ---------------------------------------------------------------------------
-  - id: fetch_current_profile
-    type: api_call
-    integration: karmayogi
-    request:
-      method: GET
-      url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
-    response_mapping:
-      - {
-          from: "$.response.profileDetails.personalDetails.primaryEmail",
-          to: collected.current_email,
-        }
-      - {
-          from: "$.response.profileDetails.personalDetails.mobile",
-          to: collected.current_phone,
-        }
     on_success: show_impact_and_confirm
     on_error:
+      # If enrollment fetch fails (e.g. cross-user permission), show what we know
       any: show_impact_and_confirm
-    timeout_ms: 5000
+    timeout_ms: 8000
 
   # ---------------------------------------------------------------------------
   # Step 4.3 — Inform user about impact and obtain final confirmation
