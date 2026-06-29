@@ -100,6 +100,10 @@ class Activity(BaseModel):
         other_option: QuickReply | None = None,
     ) -> Self:
         is_nested = any(bool(item.children) for item in items)
+        total = (
+            sum(len(item.children) for item in items if item.children)
+            if is_nested else len(items)
+        )
         return cls(
             type="nested_picker" if is_nested else "picker",
             picker_id=picker_id,
@@ -107,7 +111,7 @@ class Activity(BaseModel):
             placeholder=placeholder,
             other_option=other_option,
             disable_input=True,
-            total_items=len(items),
+            total_items=total,
         )
 
     @classmethod

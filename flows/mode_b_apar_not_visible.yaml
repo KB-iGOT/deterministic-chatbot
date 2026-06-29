@@ -239,14 +239,11 @@ nodes:
       source: context
       context_key: collected.apar_picker_list
       empty_message: "No APAR courses were found in your training plan."
+      on_empty: no_apar_courses_found
       response_mapping:
         id_field: courseId
         label_field: courseName
         sub_label_field: combinedMeta
-        extra_fields:
-          - { from: planName, to: collected.picker_plan_name }
-          - { from: endDate,  to: collected.picker_end_date }
-          - { from: statusText, to: collected.picker_status_text }
     next: share_apar_course_link
 
   - id: share_apar_course_link
@@ -275,14 +272,11 @@ nodes:
       source: context
       context_key: collected.non_apar_picker_list
       empty_message: "No Non-APAR courses were found in your training plan."
+      on_empty: no_non_apar_courses_found
       response_mapping:
         id_field: courseId
         label_field: courseName
         sub_label_field: combinedMeta
-        extra_fields:
-          - { from: planName, to: collected.picker_plan_name }
-          - { from: endDate,  to: collected.picker_end_date }
-          - { from: statusText, to: collected.picker_status_text }
     next: share_non_apar_course_link
 
   - id: share_non_apar_course_link
@@ -859,6 +853,27 @@ nodes:
         4. Search for the mentioned course in the list of completed courses.
         5. You should be able to find and access the completed course there.
     disable_input: true
+    next: satisfied
+
+  # ---------------------------------------------------------------------------
+  # Empty-state nodes
+  # ---------------------------------------------------------------------------
+  - id: no_apar_courses_found
+    type: message
+    prompt:
+      text: |
+        No APAR courses were found in your assigned training plan at this time.
+
+        If you believe this is incorrect, please try again after some time or contact your MDO administrator.
+    next: satisfied
+
+  - id: no_non_apar_courses_found
+    type: message
+    prompt:
+      text: |
+        No Non-APAR courses were found in your assigned training plan at this time.
+
+        If you believe this is incorrect, please try again after some time or contact your MDO administrator.
     next: satisfied
 
   # EC1 Step 3.3 — Course exists in plan but not completed (SOP 3.3)
