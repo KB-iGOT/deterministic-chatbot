@@ -623,6 +623,7 @@ function renderActivities(activities) {
         break;
 
       case 'picker':
+      case 'nested_picker':
         if (a.content) appendBot(esc(a.content), false);
         nextMode  = 'picker';
         nextPkr   = a;

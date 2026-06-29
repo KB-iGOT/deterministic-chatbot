@@ -41,6 +41,7 @@ class Activity(BaseModel):
         "markdown",
         "quick_replies",
         "picker",
+        "nested_picker",
         "input",
         "typing",
         "end",
@@ -98,8 +99,9 @@ class Activity(BaseModel):
         placeholder: str | None = None,
         other_option: QuickReply | None = None,
     ) -> Self:
+        is_nested = any(bool(item.children) for item in items)
         return cls(
-            type="picker",
+            type="nested_picker" if is_nested else "picker",
             picker_id=picker_id,
             items=items,
             placeholder=placeholder,
