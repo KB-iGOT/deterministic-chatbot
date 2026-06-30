@@ -14,6 +14,11 @@ YAML shape:
         save_to: collected.issue_category
         next: branch_on_category
       # OR for messages without quick_replies, just `next: <node_id>`
+
+    # Optional — emit a tappable course/URL button after the message text:
+      action_button:
+        label: "Click here to open the course"
+        url: "{{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.selected_course_id }}/overview"
 """
 
 from __future__ import annotations
@@ -46,6 +51,7 @@ class MessageNode(NodeHandler):
         prompt_text_tmpl: str = cfg["prompt"].get("text", "")
         prompt_voice_tmpl: str | None = cfg["prompt"].get("voice")
         quick_replies_raw: list[dict] | None = cfg.get("quick_replies")
+        action_button_raw: dict | None = cfg.get("action_button")
         disable_input: bool = cfg.get("disable_input", bool(quick_replies_raw))
 
         def run(state: ConversationState) -> dict:
@@ -79,6 +85,16 @@ class MessageNode(NodeHandler):
                         exclude_none=True
                     )
                 )
+
+            if action_button_raw:
+                btn_label = render(action_button_raw.get("label", ""), ctx)
+                btn_url   = render(action_button_raw.get("url", ""), ctx)
+                if btn_label and btn_url:
+                    activities.append(
+                        Activity.action_button(label=btn_label, url=btn_url).model_dump(
+                            exclude_none=True
+                        )
+                    )
 
             # Append bot message to conversation history for LLM transcript
             bot_messages = [AIMessage(content=text)] if text else []

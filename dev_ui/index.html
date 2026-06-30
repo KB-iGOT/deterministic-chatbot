@@ -262,6 +262,23 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .qr.other { border-style: dashed; color: var(--muted); border-color: var(--border); }
 .qr.other:hover { background: var(--surface-2); color: var(--text); border-color: var(--muted); }
 
+/* —— Action button (course link) ——————————————————————————————————— */
+.action-btn-wrap {
+  margin: 6px 0;
+}
+.action-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: var(--r-sm);
+  padding: 9px 18px;
+  font-size: 13px; font-weight: 600;
+  text-decoration: none;
+  transition: background .15s, transform .1s;
+  border: none; cursor: pointer;
+}
+.action-btn:hover { background: var(--accent-hover); transform: translateY(-1px); }
+
 /* ── Picker ──────────────────────────────────────────────────────────────── */
 .picker-wrap {
   border: 1px solid var(--border);
@@ -634,6 +651,10 @@ function renderActivities(activities) {
         nextMode = 'text';
         break;
 
+      case 'action_button':
+        appendActionButton(a);
+        break;
+
       case 'typing':
         // Already shown via showTyping(); real streaming will use this signal.
         break;
@@ -705,6 +726,20 @@ function appendEndBanner(a) {
   const d = el('div', 'end-banner ' + outcome);
   d.innerHTML = (icons[outcome] || '—') + ' ' + esc(texts[outcome] || outcome);
   msgs().appendChild(d);
+}
+
+function appendActionButton(a) {
+  const row = el('div', 'row bot');
+  row.innerHTML = `
+    <div class="av bot">🤖</div>
+    <div class="bub">
+      <div class="action-btn-wrap">
+        <a class="action-btn" href="${escA(a.url || '#')}" target="_blank" rel="noopener noreferrer">
+          ${esc(a.label || 'Open')}
+        </a>
+      </div>
+    </div>`;
+  msgs().appendChild(row);
 }
 
 function appendTrace(lines) {

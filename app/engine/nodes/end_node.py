@@ -26,20 +26,30 @@ class EndNode(NodeHandler):
 
         outcome = cfg.get("outcome", "ended")
         prompt = cfg.get("prompt", {})
+        action_button_raw: dict | None = cfg.get("action_button")
 
         def run(state: ConversationState) -> dict:
             activities: list[dict] = []
+            ctx = {
+                "collected": state.collected,
+                "counters": state.counters,
+                "user_id_hash": state.user_id_hash,
+                "channel": state.channel,
+            }
             if prompt:
-                ctx = {
-                    "collected": state.collected,
-                    "counters": state.counters,
-                    "user_id_hash": state.user_id_hash,
-                    "channel": state.channel,
-                }
                 text = render(prompt.get("text", ""), ctx)
                 if text:
                     activities.append(
                         Activity.markdown(text).model_dump(exclude_none=True)
+                    )
+            if action_button_raw:
+                btn_label = render(action_button_raw.get("label", ""), ctx)
+                btn_url   = render(action_button_raw.get("url", ""), ctx)
+                if btn_label and btn_url:
+                    activities.append(
+                        Activity.action_button(label=btn_label, url=btn_url).model_dump(
+                            exclude_none=True
+                        )
                     )
             activities.append(
                 Activity.end(outcome=outcome).model_dump(exclude_none=True)

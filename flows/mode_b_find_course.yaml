@@ -292,10 +292,13 @@ nodes:
       text: |
         Upon checking, we found that you are eligible for the requested moderated course.
 
-        📘 **Course Name:** [{{ ctx.collected.course_name_found }}]({{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.course_id }}/overview)
+        📘 **Course Name:** {{ ctx.collected.course_name_found }}
 
-        Kindly use the above link to access and enroll in the course.
+        Kindly use the link below to access and enroll in the course.
     steps: []
+    action_button:
+      label: "🔗 Open Course"
+      url: "{{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.course_id }}/overview"
     follow_up:
       text: "Is there anything else I can help you with?"
       quick_replies:
@@ -353,10 +356,13 @@ nodes:
       text: |
         Upon checking, we found the requested course on the platform.
 
-        📘 **Course Name:** [{{ ctx.collected.course_name_found }}]({{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.course_id }}/overview)
+        📘 **Course Name:** {{ ctx.collected.course_name_found }}
 
-        Kindly use the above link to navigate to the course and proceed with enrollment.
+        Kindly use the link below to navigate to the course and proceed with enrollment.
     steps: []
+    action_button:
+      label: "🔗 Open Course"
+      url: "{{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.course_id }}/overview"
     follow_up:
       text: "Were you able to find and enroll in the course?"
       quick_replies:
@@ -404,10 +410,13 @@ nodes:
 
         Kindly refer to the eligible course below and proceed with enrollment:
 
-        📘 **Course Name:** [{{ ctx.collected.course_name_found }}]({{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.course_id }}/overview)
+        📘 **Course Name:** {{ ctx.collected.course_name_found }}
 
         If this is not the course you are looking for, please search again with a more specific name.
     steps: []
+    action_button:
+      label: "🔗 Open Course"
+      url: "{{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.course_id }}/overview"
     follow_up:
       text: "Did you find the course you were looking for?"
       quick_replies:
@@ -670,10 +679,13 @@ nodes:
       text: |
         Upon checking, we found the requested event on the platform.
 
-        📅 **Event Name:** [{{ ctx.collected.event_name_found }}]({{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/event-hub/home/{{ ctx.collected.event_id }})
+        📅 **Event Name:** {{ ctx.collected.event_name_found }}
 
-        Kindly use the above link to access the event and proceed accordingly.
+        Kindly use the link below to access the event and proceed accordingly.
     steps: []
+    action_button:
+      label: "🔗 Open Event"
+      url: "{{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/event-hub/home/{{ ctx.collected.event_id }}"
     follow_up:
       text: "Were you able to find and join the event?"
       quick_replies:

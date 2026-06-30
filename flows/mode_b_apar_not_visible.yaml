@@ -251,7 +251,9 @@ nodes:
     prompt:
       text: |
         Here is the link to access the selected course:
-        🔗 [Click here to open the course]({{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.selected_apar_course_id }}/overview)
+    action_button:
+      label: "🔗 Click here to open the course"
+      url: "{{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.selected_apar_course_id }}/overview"
     next: satisfied
 
   # ===========================================================================
@@ -284,7 +286,9 @@ nodes:
     prompt:
       text: |
         Here is the link to access the selected course:
-        🔗 [Click here to open the course]({{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.selected_non_apar_course_id }}/overview)
+    action_button:
+      label: "🔗 Click here to open the course"
+      url: "{{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.selected_non_apar_course_id }}/overview"
     next: satisfied
 
   # ===========================================================================

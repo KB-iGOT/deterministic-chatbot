@@ -45,6 +45,7 @@ class ResolutionNode(NodeHandler):
         prompt = cfg.get("prompt", {})
         steps = cfg["steps"]
         follow_up = cfg.get("follow_up")
+        action_button_raw: dict | None = cfg.get("action_button")
 
         def run(state: ConversationState) -> dict:
             ctx = {
@@ -66,6 +67,16 @@ class ResolutionNode(NodeHandler):
                 body_lines.append(f"{i}. {render(step, ctx)}")
 
             activities.append(Activity.markdown("\n".join(body_lines)).model_dump(exclude_none=True))
+
+            if action_button_raw:
+                btn_label = render(action_button_raw.get("label", ""), ctx)
+                btn_url   = render(action_button_raw.get("url", ""), ctx)
+                if btn_label and btn_url:
+                    activities.append(
+                        Activity.action_button(label=btn_label, url=btn_url).model_dump(
+                            exclude_none=True
+                        )
+                    )
 
             if follow_up:
                 fu_text = render(follow_up.get("text", ""), ctx)

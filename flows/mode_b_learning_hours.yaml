@@ -666,10 +666,9 @@ nodes:
         Since the email IDs are different, the iGOT training data may not be automatically linked to your SPARROW account.
 
         Kindly refer to the video guide below for instructions on how to fetch iGOT training data into SPARROW APAR:
-
-        📹 **Reference Video:** [How to Fetch iGOT Training Data into SPARROW APAR_V8.mp4](https://tarento-my.sharepoint.com/personal/soniya_chugh_tarento_com/_layouts/15/stream.aspx?id=%2Fpersonal%2Fsoniya%5Fchugh%5Ftarento%5Fcom%2FDocuments%2FMicrosoft%20Teams%20Chat%20Files%2FHow%20to%20Fetch%20iGOT%20Training%20Data%20into%20SPARROW%20APAR%5FV8%201%2Emp4&referrer=StreamWebApp%2EWeb&referrerScenario=AddressBarCopied%2Eview%2E4cd905b0%2Da0b7%2D40cc%2Dbc5b%2D7818d1639509&ga=1)
-
-        Please follow the steps in the video to link your iGOT training records with your SPARROW account. Thank you! 🙏
+    action_button:
+      label: "📹 How to Fetch iGOT Training Data into SPARROW APAR"
+      url: "https://tarento-my.sharepoint.com/personal/soniya_chugh_tarento_com/_layouts/15/stream.aspx?id=%2Fpersonal%2Fsoniya%5Fchugh%5Ftarento%5Fcom%2FDocuments%2FMicrosoft%20Teams%20Chat%20Files%2FHow%20to%20Fetch%20iGOT%20Training%20Data%20into%20SPARROW%20APAR%5FV8%201%2Emp4&referrer=StreamWebApp%2EWeb&referrerScenario=AddressBarCopied%2Eview%2E4cd905b0%2Da0b7%2D40cc%2Dbc5b%2D7818d1639509&ga=1"
 
   # Step 4.3 — APAR/CAP not assigned + MDO found → show MDO details
   - id: sp_no_apar_mdo_found

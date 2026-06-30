@@ -43,6 +43,7 @@ class Activity(BaseModel):
         "picker",
         "nested_picker",
         "input",
+        "action_button",
         "typing",
         "end",
         "trace",
@@ -61,6 +62,10 @@ class Activity(BaseModel):
     other_option: QuickReply | None = None
     search_enabled: bool = True
     total_items: int | None = None
+
+    # action_button
+    label: str | None = None           # Button label text, e.g. "Click here to open the course"
+    url: str | None = None             # Destination URL the frontend should open
 
     # input
     input_id: str | None = None
@@ -113,6 +118,17 @@ class Activity(BaseModel):
             disable_input=True,
             total_items=total,
         )
+
+    @classmethod
+    def action_button(cls, label: str, url: str, content: str | None = None) -> Self:
+        """Structured tappable link — frontend opens `url` in WebView / browser.
+
+        Args:
+            label:   Button text the user sees, e.g. "Click here to open the course".
+            url:     Full destination URL.
+            content: Optional introductory text shown above the button.
+        """
+        return cls(type="action_button", label=label, url=url, content=content)
 
     @classmethod
     def input(cls, input_id: str, placeholder: str = "") -> Self:
