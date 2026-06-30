@@ -869,21 +869,21 @@ def _nested_cbp_courses(enrollments: Any, all_courses: Any, is_apar: bool) -> li
             course_name = str(course.get("name", "Unknown Course"))
             
             enrolled_data = enrollment_map.get(course_id)
-            status_text = "Incomplete"
+            status_text = "Not Started"
             
             if enrolled_data:
                 status_num = _enrollment_status_to_int(enrolled_data.get("status"))
                 if status_num == 2:
                     status_text = "Completed"
+                elif status_num == 1:
+                    status_text = "In Progress"
                 else:
-                    completion_pct = enrolled_data.get("completionPercentage")
-                    if completion_pct is not None:
-                        status_text = f"Incomplete ({completion_pct}%)"
+                    status_text = "Not Started"
                         
             plan_courses.append({
                 "courseId": course_id,
                 "courseName": course_name,
-                "combinedMeta": status_text,
+                "combinedMeta": {"status": status_text},
                 "extra": {
                     "planName": plan_name,
                     "endDate": plan_end,
