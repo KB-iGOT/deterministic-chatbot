@@ -721,6 +721,31 @@ Same fields as `markdown` but render as plain text — no Markdown parsing.
 
 ---
 
+### `action_button` — tappable link button
+
+```json
+{
+  "type": "action_button",
+  "label": "🔗 Click here to open the course",
+  "url": "https://portal.qa.karmayogibharat.net/app/toc/do_123/overview",
+  "disable_input": false
+}
+```
+
+| Field | Type | Always present? | Description |
+|-------|------|-----------------|-------------|
+| `type` | `"action_button"` | ✅ | |
+| `label` | string | ✅ | The button text displayed to the user |
+| `url` | string | ✅ | The destination URL |
+| `disable_input` | bool | ❌ (default false) | If true, hide/disable the free-text input box |
+
+**Behaviour:**
+- Render this as a highly visible button or clickable link card.
+- On tap → open the `url` (in a WebView on mobile, or in a new browser tab `_blank` on web).
+- This activity does not expect any API action back to the chatbot (like `select_choice` or `pick_item`). It is a one-way navigation action.
+
+---
+
 ### `picker` — searchable item list / dropdown
 
 ```json
