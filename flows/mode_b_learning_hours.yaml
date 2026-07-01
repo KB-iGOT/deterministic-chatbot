@@ -160,7 +160,7 @@ nodes:
     prompt:
       text: |
         We were unable to retrieve your profile details at this moment.
-        Please try again after some time. If the issue persists, write to **support@igotkarmayogi.gov.in**.
+        Please try again after some time.
     next: satisfied
 
   # ===========================================================================
@@ -282,7 +282,7 @@ nodes:
       text: |
         Upon checking, we could not find an MDO Admin mapped to your organization (**{{ ctx.collected.org_channel | default('your organization') }}**).
 
-        Please write to **support@igotkarmayogi.gov.in** with your name, organization name, and a description of your issue. Our support team will assist you further.
+        Please try again after some time.
     next: satisfied
 
   # MDO API error
@@ -291,7 +291,7 @@ nodes:
     prompt:
       text: |
         We encountered an issue while fetching MDO details for your organization.
-        Please try again later or write to **support@igotkarmayogi.gov.in** for assistance.
+        Please try again after some time.
     next: satisfied
 
   # YP/AM lookup nodes — required by _yp_lookup fragment
@@ -318,7 +318,7 @@ nodes:
       text: |
         Upon checking, we could not find the YP/AM contact for your organization.
 
-        Please write to **support@igotkarmayogi.gov.in** with your name, organization name, and SPARROW-related issue for further assistance.
+        Please try again after some time.
     next: satisfied
 
   # ===========================================================================
@@ -369,7 +369,7 @@ nodes:
     type: message
     prompt:
       text: |
-        We were unable to find your profile details in the system. Please contact **support@igotkarmayogi.gov.in** for further assistance.
+        We were unable to find your profile details in the system. Please try again after some time.
     next: satisfied
 
   # Step 3.3 — User mapped to iGOT / Karmayogi Prarambh Trainee
@@ -776,5 +776,5 @@ nodes:
     prompt:
       text: |
         We encountered a technical issue while fetching your profile details.
-        Please try again later or contact **support@igotkarmayogi.gov.in** for assistance.
+        Please try again after some time. Thank you for your patience.
     next: satisfied

@@ -285,10 +285,5 @@ nodes:
     type: message
     prompt:
       text: |
-        For further assistance, please write to **support@igotkarmayogi.gov.in** with:
-        - Your name and organisation name
-        - The exact error message you are seeing
-        - The report you are trying to access
-
-        Our support team will investigate and get back to you.
+        We're facing a technical issue with this report right now. Please try again after some time. Thank you for your patience.
     next: satisfied
