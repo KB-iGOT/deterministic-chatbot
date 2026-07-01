@@ -381,9 +381,9 @@ Terminates the flow. `outcome` is required.
 
 - id: ticket_failed_end
   type: end
-  outcome: ticket_failed        # Zoho API call failed; show support email
+  outcome: ticket_failed        # Zoho API call failed
   prompt:
-    text: "⚠️ We couldn't raise a ticket right now. Please email support@igotkarmayogi.gov.in."
+    text: "⚠️ We couldn't raise a ticket right now due to a technical issue. Please try again after some time. Thank you for your patience."
 ```
 
 **Outcomes and their UI banner colours:**

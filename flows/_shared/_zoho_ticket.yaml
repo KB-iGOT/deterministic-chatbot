@@ -64,7 +64,7 @@ nodes:
   - id: ticket_failed
     type: message
     prompt:
-      text: "I couldn't raise the ticket automatically. Please email **support@igotkarmayogi.gov.in** directly."
+      text: "I'm facing a technical issue and couldn't raise the ticket right now. Please try again after some time. Thank you for your patience."
     next: ticket_failed_end
 
   - id: ticket_raised_end

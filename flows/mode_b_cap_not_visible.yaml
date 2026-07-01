@@ -593,21 +593,10 @@ nodes:
       text: |
         Upon checking, we found that the assigned Comprehensive Assessment Program (CAP) is not yet enrolled.
 
-        Kindly enroll in the assigned CAP to unlock the Final Assessment:
-        {% set target_cap_id = ctx.collected.selected_cap_id or (ctx.collected.all_caps[0].identifier if ctx.collected.all_caps else '') %}
-        {% for cap in ctx.collected.all_caps | default([]) %}
-          {% if cap.identifier == target_cap_id %}
-            {% set ns = namespace(enrolled=false) %}
-            {% for enroll in ctx.collected.all_enrollment_list | default([]) %}
-              {% if enroll.courseId == cap.identifier %}
-                {% set ns.enrolled = true %}
-              {% endif %}
-            {% endfor %}
-            {% if not ns.enrolled %}
-          - [{{ cap.name | default('Assigned CAP') }}](https://portal.uat.karmayogibharat.net/app/toc/{{ cap.identifier }}/overview)
-            {% endif %}
-          {% endif %}
-        {% endfor %}
+        Kindly enroll in the assigned CAP to unlock the Final Assessment.
+    action_button:
+      label: "🔗 Click here to open the CAP"
+      url: "{{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.selected_cap_id or (ctx.collected.all_caps[0].identifier if ctx.collected.all_caps else '') }}/overview"
     next: satisfied
 
   - id: fetch_cap_hierarchy
@@ -619,152 +608,71 @@ nodes:
     response_mapping:
       - { from: "$.content.children", to: collected.cap_hierarchy_children }
       - { from: "$.content", to: collected.incomplete_child_courses, transform: extract_incomplete_child_courses, transform_ctx_key: collected.all_enrollment_list }
-    on_success: evaluate_child_courses
+      - { from: "$.content", to: collected.cap_pending_resources, transform: extract_cap_pending_resources, transform_ctx_key: collected.all_enrollment_list }
+      - { from: "$.content", to: collected.cap_incomplete_courses_picker, transform: nested_cap_incomplete_courses, transform_ctx_key: collected.all_enrollment_list }
+    on_success: evaluate_child_courses_summary
     on_error:
       any: cap_not_enrolled_message
     timeout_ms: 8000
 
-  - id: evaluate_child_courses
+  - id: evaluate_child_courses_summary
+    type: branch
+    rules:
+      - if: "len(ctx.collected.cap_pending_resources or []) > 0"
+        then: show_pending_steps
+    default: show_all_completed_summary
+
+  - id: show_pending_steps
     type: message
     prompt:
       text: |
-        {% set ns_global = namespace(has_incomplete=false) %}
-        
-        {# Check child courses #}
-        {% set child_count = ctx.collected.cap_hierarchy_children | default([]) | length %}
-        {% if child_count > 0 %}
-          {% for child in ctx.collected.cap_hierarchy_children | default([]) %}
-            {% if "assessment" not in child.name | default('') | lower %}
-              {% set ns = namespace(complete=false) %}
-              {% set enroll_data = namespace(val=None) %}
-              {% for enroll in ctx.collected.all_enrollment_list | default([]) %}
-                {% if enroll.courseId == child.identifier %}
-                  {% set enroll_data.val = enroll %}
-                  {% if enroll.status == 2 or enroll.completionPercentage == 100 or (enroll.issuedCertificates and enroll.issuedCertificates | length > 0) %}
-                    {% set ns.complete = true %}
-                  {% endif %}
-                {% endif %}
-              {% endfor %}
-              {% if not ns.complete %}
-                {% set ns_global.has_incomplete = true %}
-              {% endif %}
-            {% endif %}
-          {% endfor %}
-        {% else %}
-          {% set target_cap_id = ctx.collected.selected_cap_id or (ctx.collected.all_caps[0].identifier if ctx.collected.all_caps else '') %}
-          {% for enroll in ctx.collected.all_enrollment_list | default([]) %}
-            {% if enroll.courseId == target_cap_id and enroll.status != 2 and enroll.completionPercentage != 100 and not (enroll.issuedCertificates and enroll.issuedCertificates | length > 0) %}
-              {% set ns_global.has_incomplete = true %}
-            {% endif %}
-          {% endfor %}
-        {% endif %}
+        We found that some mandatory resources or child courses are still incomplete.
 
-        {% if ns_global.has_incomplete %}
-        We found that the following resources are still incomplete:
-        
-        {% set count = namespace(val=0) %}
-        {% if child_count > 0 %}
-          {% for child in ctx.collected.cap_hierarchy_children | default([]) %}
-            {% if "assessment" not in child.name | default('') | lower %}
-              {% set ns = namespace(complete=false) %}
-              {% set enroll_data = namespace(val=None) %}
-              {% for enroll in ctx.collected.all_enrollment_list | default([]) %}
-                {% if enroll.courseId == child.identifier %}
-                  {% set enroll_data.val = enroll %}
-                  {% if enroll.status == 2 or enroll.completionPercentage == 100 or (enroll.issuedCertificates and enroll.issuedCertificates | length > 0) %}
-                    {% set ns.complete = true %}
-                  {% endif %}
-                {% endif %}
-              {% endfor %}
-              {% if not ns.complete %}
-                {% set count.val = count.val + 1 %}
-        {{ count.val }}. [{{ child.name }}](https://portal.uat.karmayogibharat.net/app/toc/{{ child.identifier }}/overview)
-                {% set res_ns = namespace(found=false) %}
-                {% if enroll_data.val and enroll_data.val.langContentStatus %}
-                  {% for module in child.children | default([]) %}
-                    {% set is_leaf = (module.children | default([]) | length == 0) %}
-                    {% if is_leaf %}
-                      {% set res_complete = namespace(val=false) %}
-                      {% for lang, status_map in enroll_data.val.langContentStatus.items() %}
-                        {% if status_map.get(module.identifier) == 2 %}
-                          {% set res_complete.val = true %}
-                        {% endif %}
-                      {% endfor %}
-                      {% if not res_complete.val and "assessment" not in module.name | default('') | lower %}
-           - **Pending:** {{ module.name }}
-                        {% set res_ns.found = true %}
-                      {% endif %}
-                    {% else %}
-                      {% for resource in module.children | default([]) %}
-                        {% set res_complete = namespace(val=false) %}
-                        {% for lang, status_map in enroll_data.val.langContentStatus.items() %}
-                          {% if status_map.get(resource.identifier) == 2 %}
-                            {% set res_complete.val = true %}
-                          {% endif %}
-                        {% endfor %}
-                        {% if not res_complete.val and "assessment" not in resource.name | default('') | lower %}
-           - **Pending:** {{ resource.name }}
-                          {% set res_ns.found = true %}
-                        {% endif %}
-                      {% endfor %}
-                    {% endif %}
-                  {% endfor %}
-                {% else %}
-                  {% for module in child.children | default([]) %}
-                    {% set is_leaf = (module.children | default([]) | length == 0) %}
-                    {% if is_leaf %}
-           - **Pending:** {{ module.name }}
-                      {% set res_ns.found = true %}
-                    {% else %}
-                      {% for resource in module.children | default([]) %}
-           - **Pending:** {{ resource.name }}
-                        {% set res_ns.found = true %}
-                      {% endfor %}
-                    {% endif %}
-                  {% endfor %}
-                {% endif %}
-                {% if not res_ns.found %}
-           - **Pending:** Complete remaining modules
-                {% endif %}
-              {% endif %}
-            {% endif %}
-          {% endfor %}
-        {% else %}
-          {% set target_cap_id = ctx.collected.selected_cap_id or (ctx.collected.all_caps[0].identifier if ctx.collected.all_caps else '') %}
-          {% set selected_cap = namespace(obj=None) %}
-          {% for cap in ctx.collected.all_caps | default([]) %}
-            {% if cap.identifier == target_cap_id %}
-              {% set selected_cap.obj = cap %}
-            {% endif %}
-          {% endfor %}
-          {% if selected_cap.obj %}
-            {% for enroll in ctx.collected.all_enrollment_list | default([]) %}
-              {% if enroll.courseId == target_cap_id and enroll.status != 2 and enroll.completionPercentage != 100 and not (enroll.issuedCertificates and enroll.issuedCertificates | length > 0) %}
-                {% set count.val = count.val + 1 %}
-        {{ count.val }}. [{{ selected_cap.obj.name | default('Assigned CAP') }}](https://portal.uat.karmayogibharat.net/app/toc/{{ target_cap_id }}/overview)
-                 - **Pending:** Complete remaining modules
-              {% endif %}
-            {% endfor %}
-          {% endif %}
-        {% endif %}
-        
         The Final Assessment will be unlocked only after all mandatory resources and child courses are completed successfully.
-        
+
         **Steps to Identify Pending Resources:**
-        1. Login to the **iGOT Karmayogi** portal.
-        2. Navigate to **Profile**.
-        3. Open **My Learning**.
-        4. Open the **In Progress** section.
-        5. Open the respective course mentioned above.
-        6. Click **Resume**.
-        7. Expand every module using the **"+"** icon.
-        8. Identify resources that do not have a **Blue Tick**.
-        9. Complete all pending resources until every item shows a **Blue Tick**.
-        {% else %}
+        1. Login to the iGOT Karmayogi portal.
+        2. Navigate to Profile.
+        3. Open My Learning.
+        4. Open the In Progress section.
+        5. Open the respective course.
+        6. Click Resume.
+        7. Expand every module using the "+" icon.
+        8. Identify resources that do not have a Blue Tick.
+        9. Complete all pending resources until every item shows a Blue Tick.
+    next: pick_pending_course
+
+  - id: pick_pending_course
+    type: collect
+    prompt:
+      text: "Please select the course and pending resource you would like to complete:"
+    field:
+      name: collected.selected_pending_course_id
+      type: select
+    dynamic_options:
+      source: context
+      context_key: collected.cap_incomplete_courses_picker
+      response_mapping:
+        id_field: courseId
+        label_field: courseName
+    next: share_pending_resource_link
+
+  - id: share_pending_resource_link
+    type: message
+    prompt:
+      text: "Here is the link to access the course:"
+    action_button:
+      label: "🔗 Click here to open the course"
+      url: "{{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.selected_pending_course_id }}/overview"
+    next: satisfied
+
+  - id: show_all_completed_summary
+    type: message
+    prompt:
+      text: |
         Upon checking, we found that all prerequisite courses have been completed successfully.
 
         Since the Final Assessment is still locked, kindly select the type of issue you are facing below so we can assist you further.
-        {% endif %}
     quick_replies:
       - { id: incomplete_ack, label: "👍 Got it" }
       - { id: locked, label: "🔒 Help me unlock it" }

@@ -1813,8 +1813,401 @@ def _append_others_language(languages: Any) -> list[dict]:
     return filtered
 
 
+def _extract_cap_pending_resources(cap_content: Any, all_enrollment_list: Any) -> list[dict]:
+    """Extract incomplete resources from CAP hierarchy and return as a flat list of dicts for pickers."""
+    if not isinstance(cap_content, dict) or not isinstance(all_enrollment_list, list):
+        return []
+    
+    children = cap_content.get("children", [])
+    if not children:
+        children = [cap_content]
+        
+    pending = []
+    for child in children:
+        if not isinstance(child, dict): continue
+        if "assessment" in str(child.get("name", "")).lower(): continue
+        
+        cid = child.get("identifier")
+        if not cid: continue
+        
+        is_complete = False
+        enroll_data = None
+        for enroll in all_enrollment_list:
+            if not isinstance(enroll, dict): continue
+            if enroll.get("courseId") == cid:
+                enroll_data = enroll
+                status = enroll.get("status")
+                pct = enroll.get("completionPercentage")
+                certs = enroll.get("issuedCertificates")
+                if status == 2 or pct == 100 or (isinstance(certs, list) and len(certs) > 0):
+                    is_complete = True
+                break
+                
+        if not is_complete:
+            course_name = child.get("name") or "Assigned Course"
+            res_found = False
+            
+            if enroll_data and enroll_data.get("langContentStatus"):
+                for module in child.get("children", []):
+                    if not isinstance(module, dict): continue
+                    is_leaf = len(module.get("children", [])) == 0
+                    if is_leaf:
+                        res_complete = False
+                        for _, status_map in enroll_data.get("langContentStatus", {}).items():
+                            if isinstance(status_map, dict) and status_map.get(module.get("identifier")) == 2:
+                                res_complete = True
+                                break
+                        if not res_complete and "assessment" not in str(module.get("name", "")).lower():
+                            pending.append({
+                                "courseId": cid,
+                                "courseName": course_name,
+                                "resourceName": module.get("name") or "Resource",
+                                "combinedMeta": f"Pending: {module.get('name') or 'Resource'}"
+                            })
+                            res_found = True
+                    else:
+                        for resource in module.get("children", []):
+                            if not isinstance(resource, dict): continue
+                            res_complete = False
+                            for _, status_map in enroll_data.get("langContentStatus", {}).items():
+                                if isinstance(status_map, dict) and status_map.get(resource.get("identifier")) == 2:
+                                    res_complete = True
+                                    break
+                            if not res_complete and "assessment" not in str(resource.get("name", "")).lower():
+                                pending.append({
+                                    "courseId": cid,
+                                    "courseName": course_name,
+                                    "resourceName": resource.get("name") or "Resource",
+                                    "combinedMeta": f"Pending: {resource.get('name') or 'Resource'}"
+                                })
+                                res_found = True
+            else:
+                for module in child.get("children", []):
+                    if not isinstance(module, dict): continue
+                    is_leaf = len(module.get("children", [])) == 0
+                    if is_leaf:
+                        if "assessment" not in str(module.get("name", "")).lower():
+                            pending.append({
+                                "courseId": cid,
+                                "courseName": course_name,
+                                "resourceName": module.get("name") or "Resource",
+                                "combinedMeta": f"Pending: {module.get('name') or 'Resource'}"
+                            })
+                            res_found = True
+                    else:
+                        for resource in module.get("children", []):
+                            if not isinstance(resource, dict): continue
+                            if "assessment" not in str(resource.get("name", "")).lower():
+                                pending.append({
+                                    "courseId": cid,
+                                    "courseName": course_name,
+                                    "resourceName": resource.get("name") or "Resource",
+                                    "combinedMeta": f"Pending: {resource.get('name') or 'Resource'}"
+                                })
+                                res_found = True
+                                
+            if not res_found:
+                pending.append({
+                    "courseId": cid,
+                    "courseName": course_name,
+                    "resourceName": "Complete remaining modules",
+                    "combinedMeta": "Pending: Complete remaining modules"
+                })
+    return pending
+
+
+def _extract_cap_incomplete_courses(cap_content: Any, all_enrollment_list: Any) -> list[dict]:
+    """Extract incomplete child courses from CAP hierarchy and return for a picker."""
+    if not isinstance(cap_content, dict) or not isinstance(all_enrollment_list, list):
+        return []
+    
+    children = cap_content.get("children", [])
+    if not children:
+        children = [cap_content]
+        
+    incomplete_courses = []
+    for child in children:
+        if not isinstance(child, dict): continue
+        if "assessment" in str(child.get("name", "")).lower(): continue
+        
+        cid = child.get("identifier")
+        if not cid: continue
+        
+        is_complete = False
+        enroll_data = None
+        for enroll in all_enrollment_list:
+            if not isinstance(enroll, dict): continue
+            if enroll.get("courseId") == cid:
+                enroll_data = enroll
+                status = enroll.get("status")
+                pct = enroll.get("completionPercentage")
+                certs = enroll.get("issuedCertificates")
+                if status == 2 or pct == 100 or (isinstance(certs, list) and len(certs) > 0):
+                    is_complete = True
+                break
+                
+        if not is_complete:
+            # Count pending resources for this course
+            pending_count = 0
+            course_name = child.get("name") or "Assigned Course"
+            
+            if enroll_data and enroll_data.get("langContentStatus"):
+                for module in child.get("children", []):
+                    if not isinstance(module, dict): continue
+                    is_leaf = len(module.get("children", [])) == 0
+                    if is_leaf:
+                        res_complete = False
+                        for _, status_map in enroll_data.get("langContentStatus", {}).items():
+                            if isinstance(status_map, dict) and status_map.get(module.get("identifier")) == 2:
+                                res_complete = True
+                                break
+                        if not res_complete and "assessment" not in str(module.get("name", "")).lower():
+                            pending_count += 1
+                    else:
+                        for resource in module.get("children", []):
+                            if not isinstance(resource, dict): continue
+                            res_complete = False
+                            for _, status_map in enroll_data.get("langContentStatus", {}).items():
+                                if isinstance(status_map, dict) and status_map.get(resource.get("identifier")) == 2:
+                                    res_complete = True
+                                    break
+                            if not res_complete and "assessment" not in str(resource.get("name", "")).lower():
+                                pending_count += 1
+            else:
+                for module in child.get("children", []):
+                    if not isinstance(module, dict): continue
+                    is_leaf = len(module.get("children", [])) == 0
+                    if is_leaf:
+                        if "assessment" not in str(module.get("name", "")).lower():
+                            pending_count += 1
+                    else:
+                        for resource in module.get("children", []):
+                            if not isinstance(resource, dict): continue
+                            if "assessment" not in str(resource.get("name", "")).lower():
+                                pending_count += 1
+            
+            if pending_count == 0:
+                pending_count = 1  # Fallback to at least 1 pending indicator
+                
+            incomplete_courses.append({
+                "courseId": cid,
+                "courseName": course_name,
+                "combinedMeta": f"{pending_count} pending resource(s)"
+            })
+            
+    return incomplete_courses
+
+
+def _extract_resources_for_selected_course(cap_content: Any, collected: Any) -> list[dict]:
+    """Extract pending resources for the user's selected child course."""
+    if not isinstance(cap_content, dict) or not isinstance(collected, dict):
+        return []
+        
+    selected_course_id = collected.get("selected_pending_course_id")
+    all_enrollment_list = collected.get("all_enrollment_list")
+    
+    if not selected_course_id or not isinstance(all_enrollment_list, list):
+        return []
+        
+    children = cap_content.get("children", [])
+    if not children:
+        children = [cap_content]
+        
+    # Find the selected child course in CAP hierarchy
+    selected_child = None
+    for child in children:
+        if isinstance(child, dict) and child.get("identifier") == selected_course_id:
+            selected_child = child
+            break
+            
+    if not selected_child:
+        return []
+        
+    course_name = selected_child.get("name") or "Assigned Course"
+    
+    # Get enrollment data for this selected course
+    enroll_data = None
+    for enroll in all_enrollment_list:
+        if isinstance(enroll, dict) and enroll.get("courseId") == selected_course_id:
+            enroll_data = enroll
+            break
+            
+    pending_resources = []
+    
+    if enroll_data and enroll_data.get("langContentStatus"):
+        for module in selected_child.get("children", []):
+            if not isinstance(module, dict): continue
+            is_leaf = len(module.get("children", [])) == 0
+            if is_leaf:
+                res_complete = False
+                for _, status_map in enroll_data.get("langContentStatus", {}).items():
+                    if isinstance(status_map, dict) and status_map.get(module.get("identifier")) == 2:
+                        res_complete = True
+                        break
+                if not res_complete and "assessment" not in str(module.get("name", "")).lower():
+                    rid = module.get("identifier") or ""
+                    pending_resources.append({
+                        "resourceId": rid,
+                        "resourceName": module.get("name") or "Resource",
+                        "combinedMeta": "Incomplete resource",
+                        "courseId": selected_course_id,
+                        "courseName": course_name
+                    })
+            else:
+                for resource in module.get("children", []):
+                    if not isinstance(resource, dict): continue
+                    res_complete = False
+                    for _, status_map in enroll_data.get("langContentStatus", {}).items():
+                        if isinstance(status_map, dict) and status_map.get(resource.get("identifier")) == 2:
+                            res_complete = True
+                            break
+                    if not res_complete and "assessment" not in str(resource.get("name", "")).lower():
+                        rid = resource.get("identifier") or ""
+                        pending_resources.append({
+                            "resourceId": rid,
+                            "resourceName": resource.get("name") or "Resource",
+                            "combinedMeta": "Incomplete resource",
+                            "courseId": selected_course_id,
+                            "courseName": course_name
+                        })
+    else:
+        for module in selected_child.get("children", []):
+            if not isinstance(module, dict): continue
+            is_leaf = len(module.get("children", [])) == 0
+            if is_leaf:
+                if "assessment" not in str(module.get("name", "")).lower():
+                    rid = module.get("identifier") or ""
+                    pending_resources.append({
+                        "resourceId": rid,
+                        "resourceName": module.get("name") or "Resource",
+                        "combinedMeta": "Incomplete resource",
+                        "courseId": selected_course_id,
+                        "courseName": course_name
+                    })
+            else:
+                for resource in module.get("children", []):
+                    if not isinstance(resource, dict): continue
+                    if "assessment" not in str(resource.get("name", "")).lower():
+                        rid = resource.get("identifier") or ""
+                        pending_resources.append({
+                            "resourceId": rid,
+                            "resourceName": resource.get("name") or "Resource",
+                            "combinedMeta": "Incomplete resource",
+                            "courseId": selected_course_id,
+                            "courseName": course_name
+                        })
+                        
+    if not pending_resources:
+        pending_resources.append({
+            "resourceId": "remaining_modules",
+            "resourceName": "Complete remaining modules",
+            "combinedMeta": "Incomplete resource",
+            "courseId": selected_course_id,
+            "courseName": course_name
+        })
+        
+    return pending_resources
+
+
+def _nested_cap_incomplete_courses(cap_content: Any, all_enrollment_list: Any) -> list[dict]:
+    """Extract nested structure: incomplete child courses as parents, and their pending resources as children."""
+    if not isinstance(cap_content, dict) or not isinstance(all_enrollment_list, list):
+        return []
+    
+    children = cap_content.get("children", [])
+    if not children:
+        children = [cap_content]
+        
+    enrollment_map = {}
+    for enroll in all_enrollment_list:
+        if isinstance(enroll, dict) and "courseId" in enroll:
+            enrollment_map[str(enroll["courseId"])] = enroll
+
+    result = []
+    for child in children:
+        if not isinstance(child, dict): continue
+        if "assessment" in str(child.get("name", "")).lower(): continue
+        
+        cid = child.get("identifier")
+        if not cid: continue
+        
+        # Check if course is complete
+        is_complete = False
+        enroll_data = enrollment_map.get(cid)
+        if enroll_data:
+            status = enroll_data.get("status")
+            pct = enroll_data.get("completionPercentage")
+            certs = enroll_data.get("issuedCertificates")
+            if status == 2 or pct == 100 or (isinstance(certs, list) and len(certs) > 0):
+                is_complete = True
+                
+        if not is_complete:
+            course_name = child.get("name") or "Assigned Course"
+            
+            # Find incomplete resources in this child course
+            pending_resources = []
+            if enroll_data and enroll_data.get("langContentStatus"):
+                for module in child.get("children", []):
+                    if not isinstance(module, dict): continue
+                    is_leaf = len(module.get("children", [])) == 0
+                    if is_leaf:
+                        res_complete = False
+                        for _, status_map in enroll_data.get("langContentStatus", {}).items():
+                            if isinstance(status_map, dict) and status_map.get(module.get("identifier")) == 2:
+                                res_complete = True
+                                break
+                        if not res_complete and "assessment" not in str(module.get("name", "")).lower():
+                            pending_resources.append(module.get("name") or "Resource")
+                    else:
+                        for resource in module.get("children", []):
+                            if not isinstance(resource, dict): continue
+                            res_complete = False
+                            for _, status_map in enroll_data.get("langContentStatus", {}).items():
+                                if isinstance(status_map, dict) and status_map.get(resource.get("identifier")) == 2:
+                                    res_complete = True
+                                    break
+                            if not res_complete and "assessment" not in str(resource.get("name", "")).lower():
+                                pending_resources.append(resource.get("name") or "Resource")
+            else:
+                for module in child.get("children", []):
+                    if not isinstance(module, dict): continue
+                    is_leaf = len(module.get("children", [])) == 0
+                    if is_leaf:
+                        if "assessment" not in str(module.get("name", "")).lower():
+                            pending_resources.append(module.get("name") or "Resource")
+                    else:
+                        for resource in module.get("children", []):
+                            if not isinstance(resource, dict): continue
+                            if "assessment" not in str(resource.get("name", "")).lower():
+                                pending_resources.append(resource.get("name") or "Resource")
+            
+            if not pending_resources:
+                pending_resources.append("Complete remaining modules")
+                
+            # Build picker children
+            children_items = []
+            for rname in pending_resources:
+                children_items.append({
+                    "courseId": cid,
+                    "courseName": rname
+                })
+                
+            if children_items:
+                result.append({
+                    "courseId": cid,
+                    "courseName": course_name,
+                    "children": children_items
+                })
+                
+    return result
+
+
 # Registry of named transforms usable in YAML response_mapping `transform:` field.
 _TRANSFORMS: dict[str, Any] = {
+    "extract_cap_pending_resources":   _extract_cap_pending_resources,
+    "extract_cap_incomplete_courses": _extract_cap_incomplete_courses,
+    "nested_cap_incomplete_courses":  _nested_cap_incomplete_courses,
+    "extract_resources_for_selected_course": _extract_resources_for_selected_course,
     "extract_hierarchy_names":     _extract_hierarchy_names,
     "extract_incomplete_child_courses": _extract_incomplete_child_courses,
     "extract_incomplete_ids":      _extract_incomplete_ids,

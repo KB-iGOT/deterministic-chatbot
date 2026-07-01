@@ -93,4 +93,4 @@ shared_nodes:
     type: end
     outcome: error
     prompt:
-      text: "I couldn't raise the ticket. Please email support@igotkarmayogi.gov.in directly. Apologies."
+      text: "I'm facing a technical issue and couldn't raise the ticket right now. Please try again after some time. Thank you for your patience."
