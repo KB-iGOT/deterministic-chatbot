@@ -883,7 +883,7 @@ def _nested_cbp_courses(enrollments: Any, all_courses: Any, is_apar: bool) -> li
             plan_courses.append({
                 "courseId": course_id,
                 "courseName": course_name,
-                "combinedMeta": {"status": status_text},
+                "progress": {"status": status_text},
                 "extra": {
                     "planName": plan_name,
                     "endDate": plan_end,

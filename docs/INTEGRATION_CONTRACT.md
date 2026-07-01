@@ -173,11 +173,16 @@ All pickers use the same `picker` activity schema — you build **one reusable p
 
 ```json
 {
-  "id":    "do_1142232871610777601410",        ← send back as item_id in pick_item action
-  "label": "Micronutrient Supplementation",   ← primary display text
-  "meta":  "Completed · 21 Jul 2025"          ← secondary / sub-label (nullable)
+  "id":       "do_1142232871610777601410",        ← send back as item_id in pick_item action
+  "label":    "Micronutrient Supplementation",   ← primary display text
+  "meta":     "Completed · 21 Jul 2025",         ← string sub-label (nullable) — e.g. dates, plan end
+  "progress": { "status": "In Progress" }        ← structured status object (nullable) — APAR/CBP courses
 }
 ```
+
+> `meta` and `progress` serve different purposes and are independent — either, both, or neither may be present on any given item:
+> - `meta` — a human-readable **string** rendered as secondary/muted text (e.g. `"Ends: 31/03/2027"`)
+> - `progress` — a machine-readable **object** for structured rendering such as a status chip or progress bar
 
 **Picker component requirements:**
 - Render `placeholder` as search box hint text
@@ -201,16 +206,19 @@ If the activity type is `"nested_picker"`, top-level items are non-selectable gr
       "id": "Plan 1",
       "label": "Plan 1",
       "meta": "Ends: 31/03/2027",
+      "progress": null,
       "children": [
         {
           "id": "do_1144031217479680001241",
           "label": "Ethics in Public Service",
-          "meta": "Incomplete (40%)"
+          "meta": null,
+          "progress": { "status": "In Progress" }
         },
         {
           "id": "do_1144031217479680001242",
           "label": "Leadership Essentials",
-          "meta": "Completed"
+          "meta": null,
+          "progress": { "status": "Completed" }
         }
       ]
     }
@@ -785,7 +793,8 @@ Same fields as `markdown` but render as plain text — no Markdown parsing.
 | `items` | array | ✅ | List of selectable items (may be paginated) |
 | `items[].id` | string | ✅ | Internal identifier — send back as `item_id` |
 | `items[].label` | string | ✅ | Primary display text |
-| `items[].meta` | string \| null | ❌ | Sub-label (status, date, progress) |
+| `items[].meta` | string \| null | ❌ | Human-readable sub-label string (e.g. `"Completed · 21 Jul 2025"`). Render as muted secondary text. |
+| `items[].progress` | object \| null | ❌ | Structured status object (e.g. `{"status": "Not Started"}`). Use for rendering a status chip/badge. |
 | `other_option` | object \| null | ❌ | "None of the above" button. If shown and tapped → send `request_other` |
 | `other_option.id` | string | ✅ if present | Usually `"other"` |
 | `other_option.label` | string | ✅ if present | Display text for the "other" option |
@@ -827,16 +836,19 @@ Same fields as `markdown` but render as plain text — no Markdown parsing.
       "id": "Plan 1",
       "label": "Plan 1",
       "meta": "Ends: 31/03/2027",
+      "progress": null,
       "children": [
         {
           "id": "do_1144031217479680001241",
           "label": "Ethics in Public Service",
-          "meta": "Incomplete (40%)"
+          "meta": null,
+          "progress": { "status": "In Progress" }
         },
         {
           "id": "do_1144031217479680001242",
           "label": "Leadership Essentials",
-          "meta": "Completed"
+          "meta": null,
+          "progress": { "status": "Completed" }
         }
       ]
     }
@@ -855,12 +867,22 @@ Same fields as `markdown` but render as plain text — no Markdown parsing.
 | `items` | array | ✅ | Top-level group headers — **not selectable** |
 | `items[].id` | string | ✅ | Group identifier (not sent back) |
 | `items[].label` | string | ✅ | Group header display text (e.g. "Plan 1") |
-| `items[].meta` | string \| null | ❌ | Group sub-label (e.g. "Ends: 31/03/2027") |
-| `items[].children` | array | ✅ | Selectable items inside this group |
-| `items[].children[].id` | string | ✅ | Course/item identifier — send back as `item_id` |
-| `items[].children[].label` | string | ✅ | Primary display text |
-| `items[].children[].meta` | string \| null | ❌ | Sub-label (status, progress) |
+| `items[].meta` | string \| null | ❌ | Human-readable group sub-label string (e.g. `"Ends: 31/03/2027"`). Always a string when present. |
+| `items[].progress` | object \| null | ❌ | Always `null` for group-level headers. |
+| `items[].children` | array | ✅ | Selectable course items inside this group |
+| `items[].children[].id` | string | ✅ | Course identifier — send back as `item_id` |
+| `items[].children[].label` | string | ✅ | Course name — primary display text |
+| `items[].children[].meta` | string \| null | ❌ | Always `null` for course items (use `progress` instead). |
+| `items[].children[].progress` | object \| null | ❌ | Structured enrollment status. Shape: `{"status": "Not Started" \| "In Progress" \| "Completed"}`. Render as a status chip or badge. |
 | `disable_input` | bool | ❌ (default true) | Almost always true — user must pick from the list |
+
+**`progress.status` values:**
+
+| Value | Suggested rendering |
+|-------|--------------------|
+| `"Not Started"` | Grey chip — "Not Started" |
+| `"In Progress"` | Amber/yellow chip — "In Progress" |
+| `"Completed"` | Green chip — "Completed" |
 
 **Rendering requirement:** Top-level `items[]` are accordion/expansion group headers — render them as collapsible sections, not tappable rows. Only `children[]` items are selectable.
 
