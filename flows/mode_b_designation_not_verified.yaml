@@ -104,9 +104,7 @@ nodes:
       text: |
         I was unable to retrieve your profile details at this time.
 
-        Please try again in a few minutes. If the issue persists, write to
-        **support@igotkarmayogi.gov.in** with your registered email and a
-        description of the issue.
+        Please try again in a few minutes.
     next: resolution_check
 
   # ===========================================================================
@@ -409,6 +407,4 @@ nodes:
       text: |
         I'm sorry I couldn't fully resolve this for you.
 
-        Please write to **support@igotkarmayogi.gov.in** with your registered
-        email, organisation name, and a description of the issue. Our L2 team
-        will assist you within 2 working days.
+        Please try again after some time. Thank you for your patience.

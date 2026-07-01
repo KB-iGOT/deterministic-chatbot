@@ -106,7 +106,7 @@ nodes:
     prompt:
       text: |
         I'm sorry, I was unable to find your profile details in the system.
-        For security reasons, I can't proceed. Please contact our support team directly at **support@igotkarmayogi.gov.in** for further assistance.
+        For security reasons, I can't proceed further at this time. Please try again after some time.
     next: satisfied
 
   # ===========================================================================
@@ -729,7 +729,7 @@ nodes:
       text: |
         I'm sorry, I encountered a technical issue while fetching your profile details.
 
-        Please try again later or contact **support@igotkarmayogi.gov.in** for assistance.
+        Please try again after some time. Thank you for your patience.
     next: satisfied
 
 

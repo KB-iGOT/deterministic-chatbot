@@ -712,7 +712,7 @@ nodes:
       text: |
         I'm sorry, I encountered a technical issue while checking your profile and can't proceed with the automated steps right now.
 
-        This might be a temporary problem. If it continues, please email our support team directly at **support@igotkarmayogi.gov.in** for assistance.
+        Please try again after some time. Thank you for your patience.
     next: satisfied
 
   - id: access_revoked_auto_ticket

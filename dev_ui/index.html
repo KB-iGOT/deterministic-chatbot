@@ -720,7 +720,7 @@ function appendEndBanner(a) {
   const icons   = { ticket_raised:'🎫', ticket_failed:'⚠️', ended:'👋' };
   const texts   = {
     ticket_raised: 'Ticket raised' + (a.content ? ': ' + a.content : '.'),
-    ticket_failed: 'Ticket could not be raised — please email support@igotkarmayogi.gov.in',
+    ticket_failed: 'Ticket could not be raised — please try again after some time.',
     ended:         a.content || 'Conversation ended.',
   };
   const d = el('div', 'end-banner ' + outcome);
