@@ -28,9 +28,10 @@ class PickerItem(BaseModel):
     """A single item in a picker activity."""
     id: str
     label: str
-    meta: str | None = None           # Sub-label, e.g. "Completed · 12 May 2026"
+    meta: str | None = None              # Sub-label string, e.g. "Ends: 12 May 2026"
+    progress: dict | None = None         # Structured status object, e.g. {"status": "Not Started"}
     extra: dict[str, Any] | None = None  # Extra data carried back on selection
-    children: list['PickerItem'] | None = None # Nested children for accordion/groups
+    children: list['PickerItem'] | None = None  # Nested children for accordion/groups
 
 
 class Activity(BaseModel):
