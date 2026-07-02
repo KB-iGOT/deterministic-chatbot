@@ -228,8 +228,34 @@ nodes:
       - if: "ctx.collected.cap_issue_type == 'cap_assessment_locked'"
         then: branch_cap_count_for_assessment
       - if: "ctx.collected.cap_issue_type == 'cap_enrollment_issue'"
-        then: cap_enrollment_confirm_name
-    default: confirm_expected_cap
+        then: branch_cap_count_for_enrollment
+    default: branch_cap_count_for_not_visible
+
+  - id: branch_cap_count_for_not_visible
+    type: branch
+    rules:
+      - if: "len(ctx.collected.all_caps or []) > 1"
+        then: confirm_expected_cap_multiple
+    default: confirm_expected_cap_single
+
+  - id: confirm_expected_cap_multiple
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found the following Comprehensive Assessment Program (CAP) assignments for your profile:
+        
+        {% for cap in ctx.collected.all_caps %}
+        - **{{ cap.name | default('Not Available') }}**
+        {% endfor %}
+        
+        Kindly confirm whether the CAP you were expecting is in this list.
+    quick_replies:
+      - { id: yes, label: "✅ Yes" }
+      - { id: no,  label: "❌ No" }
+    disable_input: true
+    on_reply:
+      yes: pick_cap_to_open
+      no: cap_incorrect_message
 
   - id: cap_not_assigned_message
     type: message
@@ -244,22 +270,29 @@ nodes:
     type: message
     prompt:
       text: |
-        Since the due date has already passed, the CAP may no longer be visible on your dashboard.
+        Upon checking, we found that the following Comprehensive Assessment Program (CAP) is assigned to your profile.
 
-        Kindly search for the CAP using the **search bar** on the iGOT Karmayogi portal and continue the assessment.
+        Since the due date has already passed, it may no longer be visible on your dashboard.
+
+        Kindly search for the CAP using the search bar on the iGOT Karmayogi portal and continue the assessment.
+
+        {% for cap in ctx.collected.all_caps | default([]) %}
+        {% if not ctx.collected.selected_cap_id or cap.identifier == ctx.collected.selected_cap_id %}
+        - **CAP Name:** {{ cap.name | default('Not Available') }}
+        {% endif %}
+        {% endfor %}
+    action_button:
+      label: "🔗 Click here to open the CAP"
+      url: "{{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.selected_cap_id or (ctx.collected.all_caps[0].identifier if ctx.collected.all_caps else '') }}/overview"
     next: satisfied
 
-  - id: confirm_expected_cap
+  - id: confirm_expected_cap_single
     type: message
     prompt:
       text: |
-        Upon checking, we found the following Comprehensive Assessment Program (CAP) assignments for your profile:
+        Upon checking, we found the following Comprehensive Assessment Program (CAP) assignment for your profile:
         
-        {% for cap in ctx.collected.all_caps %}
-        - **CAP Name:** {{ cap.name | default('Not Available') }}
-          **Due Date:** {{ cap.endDate | default('Not Available') }}
-          **CAP Link:** [Open CAP](https://portal.uat.karmayogibharat.net/app/toc/{{ cap.identifier }}/overview)
-        {% endfor %}
+        - **CAP Name:** {{ ctx.collected.all_caps[0].name | default('Not Available') }}
         
         Kindly confirm whether the CAP you were expecting is in this list.
     quick_replies:
@@ -282,7 +315,29 @@ nodes:
   - id: branch_cap_confirmed_expired
     type: branch
     rules:
-      - if: "has(ctx.collected.cap_end_date) and hours_since(ctx.collected.cap_end_date) > 0"
+      - if: "has(ctx.collected.all_caps[0].endDate) and hours_since(ctx.collected.all_caps[0].endDate) > 0"
+        then: cap_expired_message
+    default: cap_active_message
+
+  - id: pick_cap_to_open
+    type: collect
+    prompt:
+      text: "You are assigned multiple Comprehensive Assessment Programs (CAPs). Please select the one you would like to access:"
+    field:
+      name: collected.selected_cap_id
+      type: select
+    dynamic_options:
+      source: context
+      context_key: collected.all_caps
+      response_mapping:
+        id_field: identifier
+        label_field: name
+    next: branch_picked_cap_expired
+
+  - id: branch_picked_cap_expired
+    type: branch
+    rules:
+      - if: "len([c for c in (ctx.collected.all_caps or []) if c.identifier == ctx.collected.selected_cap_id and has(c.endDate) and hours_since(c.endDate) > 0]) > 0"
         then: cap_expired_message
     default: cap_active_message
 
@@ -292,20 +347,51 @@ nodes:
       text: |
         Thank you for your confirmation.
 
-        Kindly use the link(s) provided above to access and continue your Comprehensive Assessment Program.
-
         We wish you the best for your assessment! 🎯
+    next: share_cap_link
+
+  - id: share_cap_link
+    type: message
+    prompt:
+      text: "Here is the link to access the CAP:"
+    action_button:
+      label: "🔗 Click here to open the CAP"
+      url: "{{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.selected_cap_id or (ctx.collected.all_caps[0].identifier if ctx.collected.all_caps else '') }}/overview"
     next: satisfied
 
-  - id: cap_enrollment_confirm_name
+  - id: branch_cap_count_for_enrollment
+    type: branch
+    rules:
+      - if: "len(ctx.collected.all_caps or []) > 1"
+        then: confirm_expected_cap_enrollment_multiple
+    default: cap_enrollment_confirm_name_single
+
+  - id: confirm_expected_cap_enrollment_multiple
+    type: message
+    prompt:
+      text: |
+        Upon checking, we found the following Comprehensive Assessment Program (CAP) assignments for your profile:
+        
+        {% for cap in ctx.collected.all_caps %}
+        - **{{ cap.name | default('Not Available') }}**
+        {% endfor %}
+        
+        Kindly confirm whether the CAP you were expecting is in this list.
+    quick_replies:
+      - { id: yes, label: "✅ Yes" }
+      - { id: no,  label: "❌ No" }
+    disable_input: true
+    on_reply:
+      yes: pick_cap_to_open_enrollment
+      no: cap_incorrect_message
+
+  - id: cap_enrollment_confirm_name_single
     type: message
     prompt:
       text: |
         Upon checking, we found that the following Comprehensive Assessment Program (CAP) is assigned to your profile:
 
-        {% for cap in ctx.collected.all_caps | default([]) %}
-        - **CAP Name:** {{ cap.name | default('Not Available') }}
-        {% endfor %}
+        **CAP Name:** {{ ctx.collected.all_caps[0].name | default('Not Available') }}
 
         Kindly confirm whether this is the CAP you were expecting.
     quick_replies:
@@ -316,6 +402,21 @@ nodes:
       yes: cap_enrollment_confirmed_message
       no: cap_incorrect_message
 
+  - id: pick_cap_to_open_enrollment
+    type: collect
+    prompt:
+      text: "You are assigned multiple Comprehensive Assessment Programs (CAPs). Please select the one you would like to access:"
+    field:
+      name: collected.selected_cap_id
+      type: select
+    dynamic_options:
+      source: context
+      context_key: collected.all_caps
+      response_mapping:
+        id_field: identifier
+        label_field: name
+    next: cap_enrollment_confirmed_message
+
   - id: cap_enrollment_confirmed_message
     type: message
     prompt:
@@ -325,13 +426,15 @@ nodes:
         Please find the assigned CAP details below:
 
         {% for cap in ctx.collected.all_caps | default([]) %}
-        - **CAP Name:** {{ cap.name | default('Not Available') }}
-          **CAP Link:** [Open CAP](https://portal.uat.karmayogibharat.net/app/toc/{{ cap.identifier }}/overview)
+        {% if not ctx.collected.selected_cap_id or cap.identifier == ctx.collected.selected_cap_id %}
+        **CAP Name:** {{ cap.name | default('Not Available') }}
+        {% endif %}
         {% endfor %}
 
-        Kindly use the above link(s) to access your Comprehensive Assessment Program.
-
-        Please feel free to reach out if you require any further assistance.
+        Kindly use the button below to access your Comprehensive Assessment Program.
+    action_button:
+      label: "🔗 Click here to open the CAP"
+      url: "{{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.selected_cap_id or (ctx.collected.all_caps[0].identifier if ctx.collected.all_caps else '') }}/overview"
     next: satisfied
 
   - id: ask_incorrect_field_full
