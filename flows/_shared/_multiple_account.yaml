@@ -400,7 +400,7 @@ nodes:
       text: |
         The **{{ ctx.collected.new_identifier }}** you provided is already the active {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} on your current account!
 
-        Would you like to try entering a different {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }}, or are you all set?
+        Would you like to try entering a different {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }}, or would you like to proceed?
     quick_replies:
       - { id: new, label: "🔄 Try another identifier" }
       - { id: resolved, label: "✅ All good, I'm done" }

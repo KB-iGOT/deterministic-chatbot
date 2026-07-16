@@ -123,7 +123,6 @@ curl -X POST \
     "request": {
       "query": "<user_search_term>",
       "filters": {
-        "primaryCategory": ["Course", "Program"],
         "status": ["Live", "Review", "Draft", "Retired"]
       },
       "sort_by": { "createdOn": "desc" },
@@ -131,6 +130,12 @@ curl -X POST \
     }
   }'
 ```
+
+> **No `primaryCategory` filter.** Karmayogi's content taxonomy has more course-like
+> categories than just `"Course"`/`"Program"` (e.g. `"Curated Program"`). Filtering on
+> `primaryCategory: ["Course", "Program"]` silently excluded live courses under those
+> other categories from results, regardless of query match. Confirmed via manual API
+> testing that dropping the filter surfaces them correctly (see GAP-5).
 
 ### Response Fields Used
 
@@ -415,3 +420,4 @@ Same `check_user_eligibility` transform (ctx: `collected.user_eligibility_ctx`) 
 | GAP-2 | SOP §10 requires per-course eligibility loop for multiple results. Only top result is processed; user is prompted to refine search if needed. |
 | GAP-3 | Course/event hyperlink URL pattern not confirmed. Placeholder used: `https://portal.karmayogibharat.net/app/toc/{id}/overview` |
 | GAP-4 | **RESOLVED** — Access Settings `result.accessControl.userGroups[].userGroupCriteriaList[]` criteria are now compared field-by-field against the user's `profileDetails.professionalDetails` via the `check_user_eligibility` transform. |
+| GAP-5 | **RESOLVED** — `primaryCategory` filter removed from composite search. Filtering to `["Course", "Program"]` silently excluded live content under other Karmayogi categories (e.g. `"Curated Program"`), so real courses never appeared in results regardless of query match. |
