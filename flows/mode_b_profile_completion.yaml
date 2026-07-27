@@ -94,7 +94,7 @@ nodes:
       email_mobile:  email_mobile_steps
       mother_tongue: mother_tongue_fetch_languages
       ehrms:         ehrms_info
-      retirement:    checking_profile_for_retirement
+      retirement:    fetch_user_profile_retirement
       service:       service_fetch_cadre_config
       svc_history:   svc_history_ask
       edu_qual:      edu_qual_steps
@@ -113,8 +113,6 @@ nodes:
       url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
     response_mapping:
       - { from: "$.response.firstName",                               to: collected.current_first_name }
-      - { from: "$.response.lastName",                                to: collected.current_last_name }
-      - { from: "$.response.profileDetails.personalDetails.surname",  to: collected.pd_surname }
     on_success: name_update_steps
     on_error:
       any: name_update_steps
@@ -126,8 +124,7 @@ nodes:
       text: |
         {% if ctx.collected.current_first_name %}
         Your current name on iGOT:
-        • **First Name:** {{ ctx.collected.current_first_name }}
-        • **Last Name:** {{ ctx.collected.pd_surname or ctx.collected.current_last_name or '(not set)' }}
+        - **Name:** {{ ctx.collected.current_first_name }}
 
         {% endif %}
         Here's how to update your name on iGOT:
@@ -149,7 +146,7 @@ nodes:
       text: |
         The **Display Name / Username** shown next to your profile name is **system-generated** and **cannot be manually updated** at this time.
 
-        We appreciate your understanding. Let me know if you have any other profile concern!
+        We appreciate your understanding. Please let us know if you have any other profile concern.
     next: satisfied
 
   # ═══════════════════════════════════════════════════════════════════════════
@@ -235,6 +232,7 @@ nodes:
       url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
     response_mapping:
       - { from: "$.response.rootOrgId",                                    to: collected.root_org_id }
+      - { from: "$.response.channel",                                      to: collected.org_channel }
       - { from: "$.response.profileDetails.profileDesignationStatus",      to: collected.profile_desig_status }
     on_success: check_mdo_import
     on_error:
@@ -268,7 +266,7 @@ nodes:
     steps:
       - "Click **View Profile**."
       - "Navigate to **Primary Details**."
-      - "Click the **Edit (✏️)** icon."
+      - "Click the **Edit ✏️** icon."
       - "Search for **{{ ctx.collected.designation_selected_name }}** in the Designation field."
       - "Select it and click **Save**."
     follow_up:
@@ -296,10 +294,16 @@ nodes:
     response_mapping:
       - { from: "$.response.content[0].profileDetails.personalDetails.firstname",    to: collected.mdo_admin_name }
       - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail", to: collected.mdo_admin_email }
-    on_success: show_mdo_contact_desig
+    on_success: branch_mdo_found_desig
     on_error:
-      any: show_mdo_contact_desig
+      any: lookup_yp_contact
     timeout_ms: 5000
+
+  - id: branch_mdo_found_desig
+    type: branch
+    rules:
+      - { if: "ctx.collected.mdo_admin_name or ctx.collected.mdo_admin_email", then: show_mdo_contact_desig }
+    default: lookup_yp_contact
 
   - id: show_mdo_contact_desig
     type: message
@@ -307,21 +311,16 @@ nodes:
       text: |
         **{{ ctx.collected.designation_selected_name }}** is available in the iGOT master data but has **not been imported** by your MDO yet.
 
-        {% if ctx.collected.mdo_admin_name or ctx.collected.mdo_admin_email %}
         Please reach out to your MDO admin and request them to import the designation. Once imported through the MDO portal, it will be available for you to select.
 
         {% if ctx.collected.mdo_admin_name %}
-        • **MDO Name:** {{ ctx.collected.mdo_admin_name }}
+        - **MDO Name:** {{ ctx.collected.mdo_admin_name }}
         {% endif %}
         {% if ctx.collected.mdo_admin_email %}
-        • **MDO Email:** {{ ctx.collected.mdo_admin_email }}
+        - **MDO Email:** {{ ctx.collected.mdo_admin_email }}
         {% endif %}
         {% if ctx.collected.mdo_admin_email %}
         Please send an email to **{{ ctx.collected.mdo_admin_email }}** requesting them to import the designation **{{ ctx.collected.designation_selected_name }}** into the MDO portal.
-        {% endif %}
-        {% else %}
-        Since the MDO Admin for your organisation isn't currently available in the system, we're unable to provide direct contact details.
-        Please contact the **Young Professional (YP)** assigned to your state/department/organisation for further clarification.
         {% endif %}
     next: satisfied
 
@@ -365,8 +364,8 @@ nodes:
         **Summary of Request:**
         You reported that your designation is not verified. You would like to request verification for the designation under the organisation.
 
-        • **Organisation:** {{ ctx.collected.designation_org_name }}
-        • **Designation (full form):** {{ ctx.collected.designation_requested }}
+        - **Organisation:** {{ ctx.collected.designation_org_name }}
+        - **Designation (full form):** {{ ctx.collected.designation_requested }}
 
         Please review the details above and confirm whether they are correct.
     on_confirm: raise_designation_ticket
@@ -410,13 +409,13 @@ nodes:
       - { id: no_otp,           label: "❌ Not receiving OTP" }
       - { id: multiple_account, label: "👥 Multiple account issue / Invalid domain" }
     on_reply:
-      no_otp:           fetch_mdo_for_email
+      no_otp:           fetch_root_org_for_email
       multiple_account: email_mobile_multiple_account
 
   - id: email_mobile_multiple_account
     type: message
     prompt:
-      text: "Taking you to the **Multiple Account / Email Conflict** section…"
+      text: "Redirecting you to the **Multiple Account / Email Conflict** section."
     next: ask_identifier_type
 
   # §4a  MULTIPLE ACCOUNT — EMAIL / MOBILE CONFLICT
@@ -437,12 +436,6 @@ nodes:
       - "Once the domain is whitelisted, retry the Email ID update."
     next: satisfied
 
-  - id: fetch_mdo_for_email
-    type: message
-    prompt:
-      text: "Let me find your MDO's contact details..."
-    next: fetch_root_org_for_email
-
   - id: fetch_root_org_for_email
     type: api_call
     integration: karmayogi
@@ -451,11 +444,12 @@ nodes:
       url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
     response_mapping:
       - { from: "$.response.rootOrgId",                                          to: collected.root_org_id }
+      - { from: "$.response.channel",                                            to: collected.org_channel }
       - { from: "$.response.profileDetails.personalDetails.primaryEmail",        to: collected.user_email }
       - { from: "$.response.profileDetails.personalDetails.mobile",              to: collected.user_mobile }
     on_success: lookup_mdo_for_email
     on_error:
-      any: show_mdo_contact_email
+      any: lookup_yp_contact
     timeout_ms: 5000
 
   - id: lookup_mdo_for_email
@@ -474,10 +468,16 @@ nodes:
     response_mapping:
       - { from: "$.response.content[0].profileDetails.personalDetails.firstname",    to: collected.mdo_admin_name }
       - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail", to: collected.mdo_admin_email }
-    on_success: show_mdo_contact_email
+    on_success: branch_mdo_found_email
     on_error:
-      any: show_mdo_contact_email
+      any: lookup_yp_contact
     timeout_ms: 5000
+
+  - id: branch_mdo_found_email
+    type: branch
+    rules:
+      - { if: "ctx.collected.mdo_admin_name or ctx.collected.mdo_admin_email", then: show_mdo_contact_email }
+    default: lookup_yp_contact
 
   - id: show_mdo_contact_email
     type: message
@@ -485,29 +485,24 @@ nodes:
       text: |
         OTP verification is mandatory to update Email ID / Mobile Number. Without OTP, the update cannot be completed directly.
 
-        {% if ctx.collected.mdo_admin_name or ctx.collected.mdo_admin_email %}
         Please contact your MDO admin who can perform the update on your behalf:
         {% if ctx.collected.mdo_admin_name %}
-        • **MDO Name:** {{ ctx.collected.mdo_admin_name }}
+        - **MDO Name:** {{ ctx.collected.mdo_admin_name }}
         {% endif %}
         {% if ctx.collected.mdo_admin_email %}
-        • **MDO Email:** {{ ctx.collected.mdo_admin_email }}
+        - **MDO Email:** {{ ctx.collected.mdo_admin_email }}
         {% endif %}
         When contacting your MDO, please share:
         {% if ctx.collected.user_email %}
-        • Your registered **Email ID:** {{ ctx.collected.user_email }}
+        - Your registered **Email ID:** {{ ctx.collected.user_email }}
         {% endif %}
         {% if ctx.collected.user_mobile %}
-        • Your registered **Mobile:** {{ ctx.collected.user_mobile }}
+        - Your registered **Mobile:** {{ ctx.collected.user_mobile }}
         {% endif %}
         {% if not ctx.collected.user_email and not ctx.collected.user_mobile %}
-        • Your existing registered **Email ID / Mobile Number**
+        - Your existing registered **Email ID / Mobile Number**
         {% endif %}
-        • The **new Email ID / Mobile Number** you want updated
-        {% else %}
-        Since the MDO Admin for your organisation isn't currently available in the system, we're unable to provide direct contact details.
-        Please contact the **Young Professional (YP)** assigned to your state/department/organisation for further clarification.
-        {% endif %}
+        - The **new Email ID / Mobile Number** you want updated
     next: satisfied
 
   # ═══════════════════════════════════════════════════════════════════════════
@@ -606,7 +601,7 @@ nodes:
     steps:
       - "Click on **View Profile**."
       - "Navigate to **Other Details**."
-      - "Click on the **Edit (✏️)** icon."
+      - "Click on the **Edit ✏️** icon."
       - "Locate the **Mother Tongue** field."
       - "Select **{{ ctx.collected.mother_tongue_verified }}** from the list."
       - "Click on **Save / Update Details**."
@@ -649,9 +644,9 @@ nodes:
       text: "**Individual users cannot update the EHRMS ID directly.** Only your MDO / Nodal Officer can update this field."
     steps:
       - "Contact your **MDO / Nodal Officer** and share:"
-      - "• Your registered **Email ID**"
-      - "• Your registered **Mobile Number**"
-      - "• Your correct **EHRMS ID**"
+      - " Your registered **Email ID**"
+      - " Your registered **Mobile Number**"
+      - " Your correct **EHRMS ID**"
       - "The MDO will update the External System ID in your profile."
     follow_up:
       text: "Would you like me to look up your MDO's contact details?"
@@ -659,14 +654,8 @@ nodes:
         - { id: yes, label: "✅ Yes, get MDO details" }
         - { id: no,  label: "✅ No, I already have their contact" }
     on_reply:
-      yes: fetch_mdo_for_ehrms
+      yes: fetch_root_org_for_ehrms
       no:  satisfied
-
-  - id: fetch_mdo_for_ehrms
-    type: message
-    prompt:
-      text: "Let me find your MDO's contact details..."
-    next: fetch_root_org_for_ehrms
 
   - id: fetch_root_org_for_ehrms
     type: api_call
@@ -676,11 +665,12 @@ nodes:
       url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
     response_mapping:
       - { from: "$.response.rootOrgId",                                     to: collected.root_org_id }
+      - { from: "$.response.channel",                                       to: collected.org_channel }
       - { from: "$.response.profileDetails.personalDetails.primaryEmail",  to: collected.user_email }
       - { from: "$.response.profileDetails.personalDetails.mobile",        to: collected.user_mobile }
     on_success: lookup_mdo_for_ehrms
     on_error:
-      any: show_mdo_contact_ehrms
+      any: lookup_yp_contact
     timeout_ms: 5000
 
   - id: lookup_mdo_for_ehrms
@@ -699,50 +689,45 @@ nodes:
     response_mapping:
       - { from: "$.response.content[0].profileDetails.personalDetails.firstname",    to: collected.mdo_admin_name }
       - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail", to: collected.mdo_admin_email }
-    on_success: show_mdo_contact_ehrms
+    on_success: branch_mdo_found_ehrms
     on_error:
-      any: show_mdo_contact_ehrms
+      any: lookup_yp_contact
     timeout_ms: 5000
+
+  - id: branch_mdo_found_ehrms
+    type: branch
+    rules:
+      - { if: "ctx.collected.mdo_admin_name or ctx.collected.mdo_admin_email", then: show_mdo_contact_ehrms }
+    default: lookup_yp_contact
 
   - id: show_mdo_contact_ehrms
     type: message
     prompt:
       text: |
-        {% if ctx.collected.mdo_admin_name or ctx.collected.mdo_admin_email %}
         Here are your MDO's contact details:
         {% if ctx.collected.mdo_admin_name %}
-        • **MDO Name:** {{ ctx.collected.mdo_admin_name }}
+        - **MDO Name:** {{ ctx.collected.mdo_admin_name }}
         {% endif %}
         {% if ctx.collected.mdo_admin_email %}
-        • **MDO Email:** {{ ctx.collected.mdo_admin_email }}
+        - **MDO Email:** {{ ctx.collected.mdo_admin_email }}
         {% endif %}
         Please contact your MDO / Nodal Officer and share:
         {% if ctx.collected.user_email %}
-        • Your registered **Email ID:** {{ ctx.collected.user_email }}
+        - Your registered **Email ID:** {{ ctx.collected.user_email }}
         {% else %}
-        • Your registered **Email ID**
+        - Your registered **Email ID**
         {% endif %}
         {% if ctx.collected.user_mobile %}
-        • Your registered **Mobile Number:** {{ ctx.collected.user_mobile }}
+        - Your registered **Mobile Number:** {{ ctx.collected.user_mobile }}
         {% else %}
-        • Your registered **Mobile Number**
+        - Your registered **Mobile Number**
         {% endif %}
-        • Your correct **EHRMS ID**
-        {% else %}
-        Since the MDO Admin for your organisation isn't currently available in the system, we're unable to provide direct contact details.
-        Please contact the **Young Professional (YP)** assigned to your state/department/organisation for further clarification.
-        {% endif %}
+        - Your correct **EHRMS ID**
     next: satisfied
 
   # ═══════════════════════════════════════════════════════════════════════════
   # §7  DATE OF RETIREMENT
   # ═══════════════════════════════════════════════════════════════════════════
-  - id: checking_profile_for_retirement
-    type: message
-    prompt:
-      text: "Let me check your profile to see if your EHRMS ID is set..."
-    next: fetch_user_profile_retirement
-
   - id: fetch_user_profile_retirement
     type: api_call
     integration: karmayogi
@@ -783,12 +768,6 @@ nodes:
       - "Your MDO / Nodal Officer needs to update the **EHRMS ID** in your profile first."
       - "Once the EHRMS ID is set, the Date of Retirement will be pulled automatically from the EHRMS portal."
       - "Ensure the Date of Retirement is also correct in the **EHRMS portal** itself."
-    next: fetch_mdo_for_retirement
-
-  - id: fetch_mdo_for_retirement
-    type: message
-    prompt:
-      text: "Let me find your MDO's contact details..."
     next: fetch_root_org_for_retirement
 
   - id: fetch_root_org_for_retirement
@@ -799,11 +778,12 @@ nodes:
       url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
     response_mapping:
       - { from: "$.response.rootOrgId",                                    to: collected.root_org_id }
+      - { from: "$.response.channel",                                      to: collected.org_channel }
       - { from: "$.response.profileDetails.personalDetails.primaryEmail", to: collected.user_email }
       - { from: "$.response.profileDetails.personalDetails.mobile",       to: collected.user_mobile }
     on_success: lookup_mdo_for_retirement
     on_error:
-      any: show_mdo_contact_retirement
+      any: lookup_yp_contact
     timeout_ms: 5000
 
   - id: lookup_mdo_for_retirement
@@ -822,32 +802,33 @@ nodes:
     response_mapping:
       - { from: "$.response.content[0].profileDetails.personalDetails.firstname",    to: collected.mdo_admin_name }
       - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail", to: collected.mdo_admin_email }
-    on_success: show_mdo_contact_retirement
+    on_success: branch_mdo_found_retirement
     on_error:
-      any: show_mdo_contact_retirement
+      any: lookup_yp_contact
     timeout_ms: 5000
+
+  - id: branch_mdo_found_retirement
+    type: branch
+    rules:
+      - { if: "ctx.collected.mdo_admin_name or ctx.collected.mdo_admin_email", then: show_mdo_contact_retirement }
+    default: lookup_yp_contact
 
   - id: show_mdo_contact_retirement
     type: message
     prompt:
       text: |
-        {% if ctx.collected.mdo_admin_name or ctx.collected.mdo_admin_email %}
         Here are your MDO's contact details:
         {% if ctx.collected.mdo_admin_name %}
-        • **MDO Name:** {{ ctx.collected.mdo_admin_name }}
+        - **MDO Name:** {{ ctx.collected.mdo_admin_name }}
         {% endif %}
         {% if ctx.collected.mdo_admin_email %}
-        • **MDO Email:** {{ ctx.collected.mdo_admin_email }}
+        - **MDO Email:** {{ ctx.collected.mdo_admin_email }}
         {% endif %}
         Please reach out to your MDO / Nodal Officer and request them to:
-        • **Add your EHRMS ID** to your iGOT profile
-        • Ensure your **Date of Retirement** is correctly set in the EHRMS portal
+        - **Add your EHRMS ID** to your iGOT profile
+        - Ensure your **Date of Retirement** is correctly set in the EHRMS portal
 
         Once both are updated, the Date of Retirement will automatically reflect on iGOT.
-        {% else %}
-        Since the MDO Admin for your organisation isn't currently available in the system, we're unable to provide direct contact details.
-        Please contact the **Young Professional (YP)** assigned to your state/department/organisation for further clarification.
-        {% endif %}
     next: satisfied
 
   # ═══════════════════════════════════════════════════════════════════════════
@@ -980,12 +961,7 @@ nodes:
       - "Navigate to **Other Details** → click **Edit**."
       - "Find the **Service** field and select **{{ ctx.collected.service_selected_name }}**."
       - "Click **Save / Update Details**."
-    follow_up:
-      text: "Were you able to update your service?"
-      quick_replies:
-        - { id: yes, label: "✅ Yes, updated" }
-    on_reply:
-      yes: satisfied
+    next: satisfied
 
   - id: confirm_service_ticket
     type: ticket_confirm
@@ -996,8 +972,8 @@ nodes:
         **Summary of Request:**
         You reported that the required service is currently unavailable. You would like to add the following:
 
-        • **Service Name:** {{ ctx.collected.service_requested }}
-        • **Cadre Controlling Authority:** {{ ctx.collected.service_cadre_authority }}
+        - **Service Name:** {{ ctx.collected.service_requested }}
+        - **Cadre Controlling Authority:** {{ ctx.collected.service_cadre_authority }}
 
         Please review the details above and confirm whether they are correct.
     on_confirm: raise_service_ticket
@@ -1032,14 +1008,8 @@ nodes:
       - { id: edit, label: "❌ Can't edit / wrong organisation shown" }
       - { id: add,  label: "➕ Add previous employment history" }
     on_reply:
-      edit: svc_history_edit_branch
+      edit: fetch_user_for_svc_history
       add:  svc_history_add_steps
-
-  - id: svc_history_edit_branch
-    type: message
-    prompt:
-      text: "Let me check your profile details..."
-    next: fetch_user_for_svc_history
 
   - id: fetch_user_for_svc_history
     type: api_call
@@ -1049,6 +1019,7 @@ nodes:
       url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
     response_mapping:
       - { from: "$.response.channel",                                             to: collected.svc_history_org }
+      - { from: "$.response.channel",                                             to: collected.org_channel }
       - { from: "$.response.rootOrgId",                                           to: collected.root_org_id }
       - { from: "$.response.profileDetails.professionalDetails[0].designation",   to: collected.svc_designation }
     on_success: show_svc_history_details
@@ -1061,8 +1032,8 @@ nodes:
     prompt:
       text: |
         Based on your profile, our records show:
-        • **Organisation:** {{ ctx.collected.svc_history_org or '(not set)' }}
-        • **Designation:** {{ ctx.collected.svc_designation or '(not set)' }}
+        - **Organisation:** {{ ctx.collected.svc_history_org or '(not set)' }}
+        - **Designation:** {{ ctx.collected.svc_designation or '(not set)' }}
 
         The service history entry is auto-populated from your current organisation and designation. Is this information correct?
     quick_replies:
@@ -1109,10 +1080,16 @@ nodes:
     response_mapping:
       - { from: "$.response.content[0].profileDetails.personalDetails.firstname",    to: collected.mdo_admin_name }
       - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail", to: collected.mdo_admin_email }
-    on_success: show_mdo_contact_svc_history
+    on_success: branch_mdo_found_svc_history
     on_error:
-      any: show_mdo_contact_svc_history
+      any: lookup_yp_contact
     timeout_ms: 5000
+
+  - id: branch_mdo_found_svc_history
+    type: branch
+    rules:
+      - { if: "ctx.collected.mdo_admin_name or ctx.collected.mdo_admin_email", then: show_mdo_contact_svc_history }
+    default: lookup_yp_contact
 
   - id: show_mdo_contact_svc_history
     type: message
@@ -1120,19 +1097,14 @@ nodes:
       text: |
         The Transfer Request will be approved by your **Department MDO**. Once approved, the service history will automatically update in your profile.
 
-        {% if ctx.collected.mdo_admin_name or ctx.collected.mdo_admin_email %}
         Here are your MDO's contact details:
         {% if ctx.collected.mdo_admin_name %}
-        • **MDO Name:** {{ ctx.collected.mdo_admin_name }}
+        - **MDO Name:** {{ ctx.collected.mdo_admin_name }}
         {% endif %}
         {% if ctx.collected.mdo_admin_email %}
-        • **MDO Email:** {{ ctx.collected.mdo_admin_email }}
+        - **MDO Email:** {{ ctx.collected.mdo_admin_email }}
         {% endif %}
         Please connect with your MDO if you need help with the approval.
-        {% else %}
-        Since the MDO Admin for your organisation isn't currently available in the system, we're unable to provide direct contact details.
-        Please contact the **Young Professional (YP)** assigned to your state/department/organisation for further clarification.
-        {% endif %}
     next: satisfied
 
   - id: svc_history_add_steps
@@ -1145,10 +1117,10 @@ nodes:
       - "Click the **Plus (+)** icon."
       - |
         Enter the required details such as:
-          • **Organisation / Employment Name**
-          • **Start Date**
-          • **End Date**
-          • Other required fields
+          - **Organisation / Employment Name**
+          - **Start Date**
+          - **End Date**
+          - Other required fields
       - "Click **Save** to add the service history entry."
     next: satisfied
 
@@ -1259,6 +1231,7 @@ nodes:
       - { from: "$.response.profileDetails.profileBannerUrl",         to: collected.banner_url }
       - { from: "$.response.profileDetails.employmentDetails.aboutme", to: collected.about_me }
       - { from: "$.response.rootOrgId",                                to: collected.root_org_id }
+      - { from: "$.response.channel",                                  to: collected.org_channel }
     on_success: diagnose_missing_fields
     on_error:
       any: escalate_api_error
@@ -1275,7 +1248,7 @@ nodes:
   - id: already_complete
     type: message
     prompt:
-      text: "Good news — your profile is already at **100%**! 🎉 Nothing more to do here."
+      text: "Your profile is already at **100%** complete. No further action is needed."
     next: satisfied
 
   - id: show_missing_summary
@@ -1285,22 +1258,22 @@ nodes:
         We've checked your profile and found that certain details are missing. Please update the following details to achieve 100% profile completion:
 
         {% if not ctx.collected.avatar_url %}
-        • **Profile Photo**
+        - **Profile Photo**
         {% endif %}
         {% if not ctx.collected.banner_url %}
-        • **Cover Photo**
+        - **Cover Photo**
         {% endif %}
         {% if ctx.collected.username_verified == 'False' or not ctx.collected.username_verified %}
-        • **Username Verification Tick**
+        - **Username Verification Tick**
         {% endif %}
         {% if not ctx.collected.about_me %}
-        • **About Me**
+        - **About Me**
         {% endif %}
         {% if ctx.collected.designation_status != 'VERIFIED' %}
-        • **Designation**
+        - **Designation**
         {% endif %}
         {% if ctx.collected.group_status != 'VERIFIED' %}
-        • **Group**
+        - **Group**
         {% endif %}
 
         The profile completion percentage will reach 100% only after all mandatory fields are updated. Please update the missing details in your profile to complete it to 100%. Which field would you like to fix first?
@@ -1331,7 +1304,7 @@ nodes:
       - "Requirements: ≤ **1 MB**, ≤ **180 × 180 pixels**."
       - "Click **Apply Changes** → **Save Changes**."
     follow_up:
-      text: "Done?"
+      text: "Has this been completed?"
       quick_replies:
         - { id: yes,   label: "✅ Yes, updated" }
         - { id: more,  label: "❌ Another field is missing" }
@@ -1349,7 +1322,7 @@ nodes:
       - "Requirements: ≤ **200 KB**, ≤ **1200 × 300 pixels**."
       - "Click **Apply Changes**."
     follow_up:
-      text: "Done?"
+      text: "Has this been completed?"
       quick_replies:
         - { id: yes,   label: "✅ Yes" }
         - { id: more,  label: "❌ Another field" }
@@ -1362,7 +1335,7 @@ nodes:
     prompt:
       text: "Your **Username Verification Tick** is missing. This appears once your MDO admin verifies your profile."
     steps:
-      - "Go to **View Profile → Primary Details → Edit (✏️)**."
+      - "Go to **View Profile → Primary Details → Edit ✏️**."
       - "Ensure **Group** and **Designation** are filled in and saved."
       - "Once primary details are complete, your MDO admin verifies your profile — the tick appears automatically."
       - "If it has been more than **2 working days**, contact your MDO admin directly."
@@ -1393,28 +1366,29 @@ nodes:
     response_mapping:
       - { from: "$.response.content[0].profileDetails.personalDetails.firstname",    to: collected.mdo_admin_name }
       - { from: "$.response.content[0].profileDetails.personalDetails.primaryEmail", to: collected.mdo_admin_email }
-    on_success: show_mdo_contact_tick
+    on_success: branch_mdo_found_tick
     on_error:
-      any: show_mdo_contact_tick
+      any: lookup_yp_contact
     timeout_ms: 5000
+
+  - id: branch_mdo_found_tick
+    type: branch
+    rules:
+      - { if: "ctx.collected.mdo_admin_name or ctx.collected.mdo_admin_email", then: show_mdo_contact_tick }
+    default: lookup_yp_contact
 
   - id: show_mdo_contact_tick
     type: message
     prompt:
       text: |
-        {% if ctx.collected.mdo_admin_name or ctx.collected.mdo_admin_email %}
         Since it has been more than **2 working days**, please contact your **MDO Admin** directly and request them to verify your profile.
 
         Here are your MDO's contact details:
         {% if ctx.collected.mdo_admin_name %}
-        • **MDO Name:** {{ ctx.collected.mdo_admin_name }}
+        - **MDO Name:** {{ ctx.collected.mdo_admin_name }}
         {% endif %}
         {% if ctx.collected.mdo_admin_email %}
         • **MDO Email:** {{ ctx.collected.mdo_admin_email }}
-        {% endif %}
-        {% else %}
-        Since the MDO Admin for your organisation isn't currently available in the system, we're unable to provide direct contact details.
-        Please contact the **Young Professional (YP)** assigned to your state/department/organisation for further clarification.
         {% endif %}
     next: satisfied
 
@@ -1427,7 +1401,7 @@ nodes:
       - "Write a short introduction (at least 30 characters)."
       - "Click **Save**."
     follow_up:
-      text: "Done?"
+      text: "Has this been completed?"
       quick_replies:
         - { id: yes,   label: "✅ Yes" }
         - { id: more,  label: "❌ Another field" }
@@ -1440,11 +1414,11 @@ nodes:
     prompt:
       text: "Your **Group** is not set in Primary Details."
     steps:
-      - "Click **View Profile → Primary Details → Edit (✏️)**."
+      - "Click **View Profile → Primary Details → Edit ✏️**."
       - "Select your **Group** from the dropdown."
       - "Click **Save**."
     follow_up:
-      text: "Done?"
+      text: "Has this been completed?"
       quick_replies:
         - { id: yes,   label: "✅ Yes" }
         - { id: more,  label: "❌ Another field" }
@@ -1457,11 +1431,11 @@ nodes:
     prompt:
       text: "Your **Designation** is not set in Primary Details."
     steps:
-      - "Click **View Profile → Primary Details → Edit (✏️)**."
+      - "Click **View Profile → Primary Details → Edit ✏️**."
       - "Search for your designation in full form (e.g. Section Officer)."
       - "Select the matching designation and click **Save**."
     follow_up:
-      text: "Did that work?"
+      text: "Has this resolved the issue?"
       quick_replies:
         - { id: yes,  label: "✅ Designation set" }
         - { id: more, label: "❌ Another field missing" }
@@ -1622,6 +1596,73 @@ nodes:
       go_group:  show_group_steps
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # YP (YOUNG PROFESSIONAL) LOOKUP — shared fallback when no MDO Admin is found
+  #   _yp_lookup fragment provides lookup_yp_contact
+  #   key: collected.org_channel (channel field from the relevant profile read)
+  #   on_success → yp_found_result
+  #   on_error   → yp_not_found
+  # ═══════════════════════════════════════════════════════════════════════════
+  - id: yp_found_result
+    type: message
+    prompt:
+      text: |
+        Since the MDO Admin for your organisation isn't currently available in the system, please contact the concerned **Young Professional (YP)** for further assistance:
+
+        • **YP Name:** {{ ctx.collected.yp_name }}
+        • **YP Email ID:** {{ ctx.collected.yp_email }}
+        {% if ctx.collected.yp_mobile %}
+        • **YP Mobile:** {{ ctx.collected.yp_mobile }}
+        {% endif %}
+    next: satisfied
+
+  - id: yp_not_found
+    type: ticket_confirm
+    prompt:
+      text: |
+        We checked, and found that there is currently no MDO Admin or YP contact available for your organisation to assist with this request.
+
+        This needs further investigation from our support team. Would you like us to create a support ticket for this issue?
+    on_confirm: yp_not_found_ticket_summary
+    on_cancel: satisfied
+
+  - id: yp_not_found_ticket_summary
+    type: ticket_confirm
+    prompt:
+      text: |
+        **Issue Identified:** Profile Update — No Admin or YP Contact Found
+
+        **Summary of Request:**
+        You reported a profile update issue, but there is currently no MDO Admin available to assist, and we could not locate a YP contact for your organisation either. You would like us to investigate this further.
+
+        • **Organisation:** {{ ctx.collected.org_channel | default('Not identified') }}
+
+        Please review the details above and confirm whether they are correct.
+    on_confirm: yp_not_found_raise_ticket
+    on_cancel: satisfied
+
+  - id: yp_not_found_raise_ticket
+    type: transfer_llm
+    auto_raise: silent
+    llm_context:
+      include_messages: true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user needs help with their iGOT profile, but no MDO Admin could be
+        found to assist, and no YP/SPOC contact could be located for their organisation
+        either — so the user has no self-service path to resolve this.
+        Generate a Zoho support ticket so the support team can manually identify the
+        correct contact and resolve the request.
+        Subject: "Profile Update — No Admin or YP Contact Found"
+        Description: include the organisation/channel and the specific profile issue the user needed help with.
+        Keep to 1 turn.
+      priority_override: P3
+      ticket_tags: [profile_update, no_admin_or_yp_contact]
+    on_complete: confirm_ticket
+    on_restart: intake_menu
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # DISSATISFACTION HANDLING
   # ═══════════════════════════════════════════════════════════════════════════
   - id: track_dissatisfaction
@@ -1635,7 +1676,7 @@ nodes:
   - id: ask_reclassify
     type: message
     prompt:
-      text: "Let me try again. What specifically is still not working?"
+      text: "Could you please specify what is still not working?"
     quick_replies:
       - { id: photo,   label: "Photo upload fails" }
       - { id: save,    label: "Save button not working" }
@@ -1678,7 +1719,7 @@ nodes:
   - id: escalate_api_error
     type: message
     prompt:
-      text: "I couldn't fetch your profile data right now. Let me raise a ticket so the team can investigate."
+      text: "We couldn't fetch your profile data right now. We will raise a ticket so the team can investigate."
     next: transfer_to_llm
 
   # terminal nodes (satisfied, ticket_raised_end) are injected from _terminal fragment

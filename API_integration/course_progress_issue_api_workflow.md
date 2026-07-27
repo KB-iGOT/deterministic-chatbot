@@ -16,14 +16,17 @@ STEP 1 → POST  /api/course/private/v4/user/enrollment/list/{user_id}
               ↓
          IF certificate_issued == true       → STOP (certificate already generated)
          ELSE                                → continue ↓
+              ↓
+         IF batch_id is NONE (not enrolled)  → STOP (inform user not enrolled)
+              ↓
 
 STEP 2 → GET   /api/content/v1/read/{course_id}
               ↓ Confirm primaryCategory (Course / Program)
               ↓
-         IF Program                          → STEP 3
-         IF Course                          → STEP 4
+         IF Program / Curated Program        → STEP 3
+         IF Course / other                    → STEP 4
 
-STEP 3 → GET   /api/private/content/v3/hierarchy/{program_id}?mode=edit          [Programs only]
+STEP 3 → GET   /api/private/content/v3/hierarchy/{program_id}          [Programs only]
               ↓ Fetch child Course DO_IDs → child_course_ids
               ↓ continue ↓
 
@@ -34,15 +37,20 @@ STEP 4 → POST  /api/admin/content/state/read
          IF completion_pct == 100                              → Revalidation path
          ELSE                                                  → STEP 5
 
-STEP 5 → GET   /api/content/v1/read/{course_id}
-              ↓ Fetch leafNodes; compute true incomplete_ids = leafNodes − completed_ids
+STEP 5 → POST  /api/course/private/v4/user/enrollment/list/{user_id}   (all statuses)
+         GET   /api/content/v1/read/{course_id}
+              ↓ Fetch every enrollment record (langContentStatus per course) so that a
+                container course (e.g. a CAP) whose own record never carries its child
+                course's completion still picks it up; then fetch leafNodes and compute
+                true incomplete_ids = leafNodes − (completed IDs across ALL enrollments)
                 (catches resources never opened and absent from langContentStatus)
               ↓
          IF incomplete_ids is empty          → Revalidation path
-         IF API error                        → fall back to enrollment-based incomplete_ids ↓
+         IF API error                        → fall back to whatever incomplete_ids was
+                                                already set (enrollment-based, from Step 1) ↓
          ELSE                                → STEP 6
 
-STEP 6 → POST  /api/content/v1/search
+STEP 6 → POST  /api/composite/v4/search
               ↓ Fetch name, mimeType, primaryCategory, duration for each incomplete resource
               ↓ Detect: all_resources_assessment, has_scorm_resources
               ↓
@@ -74,7 +82,8 @@ R2 → POST  /api/admin/content/state/read
           ↓ Re-check enrollment vs admin status
           ↓
      IF mismatch found                      → Technical Issue path
-     ELSE                                   → Escalate internally
+     IF no mismatch AND completion_pct==100 → Escalate internally (raise ticket)
+     ELSE (no mismatch, still < 100%)       → Tell user which resources are still pending
 ```
 
 ---
@@ -111,7 +120,7 @@ curl -X POST \
 | `courses[].courseId` | picker `id_field` | — | Course selection value; passed to Step 2 and Step 4 URLs |
 | `courses[].courseName` | `collected.course_name` | — | Display label in resolution messages |
 | `courses[].completionPercentage` | `collected.completion_pct` | — | `== 100` → trigger revalidation path |
-| `courses[].langContentStatus` | `collected.completed_ids` | `extract_completed_ids` | Resource IDs where status `== 2`; used in Step 5 leaf-node diff |
+| `courses[].langContentStatus` | `collected.completed_ids` | `extract_completed_ids` | Resource IDs where status `== 2`; **captured but not currently consumed** — Step 5's leaf-node diff now cross-references `all_enrollment_list_for_diff` instead |
 | `courses[].langContentStatus` | `collected.incomplete_ids` | `extract_incomplete_ids` | Fallback incomplete IDs if Step 5 API fails |
 | `courses[].langContentStatus` | `collected.lang_content_status` | — | Raw object passed to `compare_enrollment_vs_admin_state` in Step 4 |
 | `courses[].issuedCertificates` | `collected.issued_certificates` | — | Raw certificate data |
@@ -121,7 +130,7 @@ curl -X POST \
 | `courses[].batchId` | `collected.batch_id` | — | Required by Step 4 Admin Content State API |
 | `courses[].batches` | `collected.batch_id` | `extract_batch_id` | Fallback batch ID for in-progress courses (nested in `batches[0].batchId`) |
 | `courses[].primaryCategory` | `collected.primary_category` | — | `"Program"` → triggers Step 3 hierarchy call |
-| `courses[].contentId` | `collected.content_do_id` | — | Leaf-level DO_ID; used in ticket descriptions and assessment limit check |
+| `courses[].contentId` | `collected.content_do_id` | — | Leaf-level DO_ID; used in ticket descriptions (**not** in the assessment limit check — that uses `assessment_id` from Step 6, see below) |
 
 ### Sample Response (trimmed)
 
@@ -156,7 +165,10 @@ curl -X POST \
 | Condition | Action |
 |---|---|
 | `certificate_issued == true` | Inform user certificate is already generated. Stop. |
-| `certificate_issued == false` | Proceed to Step 2 |
+| `certificate_issued == false` AND `batch_id` is unset/`"NONE"` | Inform user they are not currently enrolled. Stop. |
+| `certificate_issued == false` AND `batch_id` present | Proceed to Step 2 |
+
+> The `batch_id` check (`branch_on_enrollment`) guards against a course appearing in the picker with no batch reference — treated as "not enrolled" — before the flow calls any further course-detail APIs.
 
 ---
 
@@ -177,14 +189,14 @@ curl -X GET \
 
 | Field | Stored As | Transform | Used For |
 |---|---|---|---|
-| `$.content.primaryCategory` | `collected.primary_category` | — | `"Program"` → proceed to Step 3; otherwise skip to Step 4 |
+| `$.content.primaryCategory` | `collected.primary_category` | — | `"Program"` / `"Curated Program"` → proceed to Step 3; otherwise skip to Step 4 |
 
 ### Decision After Step 2
 
 | Condition | Action |
 |---|---|
-| `primary_category == "Program"` | Proceed to Step 3 (hierarchy fetch) |
-| Any other value (`"Course"`) | Skip to Step 4 (Admin Content State) |
+| `primary_category in ["Program", "Curated Program"]` | Proceed to Step 3 (hierarchy fetch) |
+| Any other value (e.g. `"Course"`) | Skip to Step 4 (Admin Content State) |
 
 ---
 
@@ -192,12 +204,14 @@ curl -X GET \
 
 > Fetches the child Course DO_IDs nested under a Program. The Admin Content State API (Step 4) must be called with a Course DO_ID, not the Program DO_ID.
 
-**Endpoint:** `GET /api/private/content/v3/hierarchy/{program_id}?mode=edit`
+**Endpoint:** `GET /api/private/content/v3/hierarchy/{program_id}`
 
 ```bash
 curl -X GET \
-  "https://portal.uat.karmayogibharat.net/api/private/content/v3/hierarchy/do_1141986246718750721214?mode=edit"
+  "https://portal.uat.karmayogibharat.net/api/private/content/v3/hierarchy/do_1141986246718750721214"
 ```
+
+> The `?mode=edit` query parameter was used in an earlier iteration of this integration and has since been dropped from the flow — the endpoint is called with no query string.
 
 ### Response Fields Used
 
@@ -306,9 +320,34 @@ This means the backend recorded completion but the portal has not reflected it.
 
 ---
 
-## Step 5 — Content Read (Leaf-Node Cross-Check)
+## Step 5 — Cross-Enrollment Leaf-Node Diff
 
-> Fetches the course's full leaf-node list and computes the **true** set of incomplete resources by subtracting `completed_ids` (from Step 1). This catches resources the user has never opened that are absent from `langContentStatus`.
+> Computes the **true** set of incomplete resources. This is now a **two-call** sequence: first fetch every one of the user's enrollments (not just the selected course), then fetch the course's leaf-node list and diff it against completion recorded across *all* those enrollments — not just the selected course's own record.
+>
+> **Why the extra call:** a container course (e.g. a CAP — Comprehensive Assessment Program) whose own enrollment record never carries its child course's resource-level `langContentStatus` would otherwise show every leaf node as incomplete, since its own `completed_ids` is always empty even when the nested child course is 100% done. Scanning `langContentStatus` across every enrollment picks up completion recorded on the child course's own record too.
+
+### Step 5a — Fetch All Enrollments
+
+**Endpoint:** `POST /api/course/private/v4/user/enrollment/list/{user_id}`
+
+```bash
+curl -X POST \
+  "https://portal.uat.karmayogibharat.net/api/course/private/v4/user/enrollment/list/{user_id}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "request": {
+      "filters": { "status": ["0", "1", "2"] }
+    }
+  }'
+```
+
+| Field | Stored As | Transform | Used For |
+|---|---|---|---|
+| `$.courses` | `collected.all_enrollment_list_for_diff` | — | Full enrollment list (every course/program), used as the diff source in Step 5b |
+
+> **On API error:** falls through to Step 5b regardless (`collected.all_enrollment_list_for_diff` stays unset).
+
+### Step 5b — Content Read (Leaf-Node Cross-Check)
 
 **Endpoint:** `GET /api/content/v1/read/{course_id}`
 
@@ -321,9 +360,9 @@ curl -X GET \
 
 | Field | Stored As | Transform | Used For |
 |---|---|---|---|
-| `$.content.leafNodes` | `collected.incomplete_ids` | `diff_leaf_nodes` (ctx key: `collected.completed_ids`) | Overwrites enrollment-based `incomplete_ids` with the accurate diff |
+| `$.content.leafNodes` | `collected.incomplete_ids` | `diff_leaf_nodes_cross_enrollment` (ctx key: `collected.all_enrollment_list_for_diff`) | Overwrites enrollment-based `incomplete_ids` with the accurate cross-enrollment diff |
 
-> **On API error:** the node falls back to the `incomplete_ids` already populated in Step 1, and execution continues to Step 6 uninterrupted.
+> **On API error:** the node skips directly to Step 6, using whatever `incomplete_ids` was already set (the enrollment-based value from Step 1's picker), and execution continues uninterrupted.
 
 ### Sample Response (trimmed)
 
@@ -345,12 +384,15 @@ curl -X GET \
 }
 ```
 
-### `diff_leaf_nodes` Transform Logic
+### `diff_leaf_nodes_cross_enrollment` Transform Logic
 
 ```
-incomplete_ids = leafNodes − completed_ids
+completed = { resource_id : status == 2, for every course in all_enrollment_list_for_diff,
+              across every language in that course's langContentStatus }
+
+incomplete_ids = leafNodes − completed
              = ["do_114_video1","do_114_video2","do_114_module1","do_114_assess1"]
-               − ["do_114_video1"]
+               − {"do_114_video1"}   # completed somewhere across the user's enrollments
              = ["do_114_video2", "do_114_module1", "do_114_assess1"]
 ```
 
@@ -358,21 +400,21 @@ incomplete_ids = leafNodes − completed_ids
 
 | Condition | Action |
 |---|---|
-| `incomplete_ids` empty after diff | Revalidation path |
+| `incomplete_ids` empty after diff | Revalidation path (`branch_certificate_not_generated`) |
 | `incomplete_ids` non-empty | Proceed to Step 6 |
-| API error | Fall back to enrollment-based `incomplete_ids`. Proceed to Step 6. |
+| API error (Step 5b) | Skip directly to Step 6 with the pre-existing `incomplete_ids`. |
 
 ---
 
-## Step 6 — Content Search (Resource Metadata)
+## Step 6 — Composite Search (Resource Metadata)
 
 > Retrieves name, MIME type, primary category, and duration for each incomplete resource to determine the correct guidance branch.
 
-**Endpoint:** `POST /api/content/v1/search`
+**Endpoint:** `POST /api/composite/v4/search`
 
 ```bash
 curl -X POST \
-  "https://portal.uat.karmayogibharat.net/api/content/v1/search" \
+  "https://portal.uat.karmayogibharat.net/api/composite/v4/search" \
   -H "Content-Type: application/json" \
   -d '{
     "request": {
@@ -382,14 +424,14 @@ curl -X POST \
       },
       "isSecureSettingsDisabled": true,
       "sort_by": { "createdOn": "desc" },
-      "fields": ["identifier", "name", "mimeType", "status", "duration", "primaryCategory"],
+      "fields": ["identifier", "name", "mimeType", "status", "duration", "primaryCategory", "maxAttempts", "maxAssessmentRetakeAttempts"],
       "facets": ["status"],
       "limit": 1000
     }
   }'
 ```
 
-> Replace `identifier` array with `incomplete_ids[]` from Step 5.
+> Replace `identifier` array with `incomplete_ids[]` from Step 5. Request body is unchanged from the previous `/api/content/v1/search` integration except that `maxAttempts` and `maxAssessmentRetakeAttempts` were added to `fields` to support the assessment-retake check in Step 7.
 
 ### Request Filters
 
@@ -403,13 +445,23 @@ curl -X POST \
 
 ### Response Fields Used
 
+Before mapping the response, the node clears any stale `remaining_attempts` / `used_attempts` left over from a previous turn (`$._clear`).
+
 | Field | Stored As | Transform | Used For |
 |---|---|---|---|
 | `content[*]` | `collected.all_resources_assessment` | `detect_assessment_only` | `true` if every incomplete resource has `primaryCategory == "Course Assessment"` |
 | `content[*].mimeType` | `collected.has_scorm_resources` | `detect_scorm` | `true` if any resource has mimeType `application/vnd.ekstep.html-archive` |
 | `content[*].name` | `collected.incomplete_resource_names` | `extract_all_names` | Bullet list of resource names shown in non-SCORM guidance message |
+| `content[*].identifier` | `collected.missing_resource_ids` | `diff_missing_resource_ids` (ctx key: `collected.incomplete_ids`) | IDs from `incomplete_ids` that composite search did **not** return; triggers the Step 6a fallback |
 | `content[*]` | `collected.scorm_resource_name` | `extract_scorm_resource_name` | Name of the first SCORM resource; shown in SCORM guidance message |
 | `content[*]` | `collected.scorm_resource_duration_min` | `extract_scorm_duration_minutes` | `round(float(duration) / 60, 1)` — minimum time to spend on SCORM resource |
+| `content[*]` | `collected.scorm_resource_names` | `extract_scorm_resource_names` | SCORM-only subset of names, shown separately in SCORM guidance message |
+| `content[*]` | `collected.non_scorm_resource_names` | `extract_non_scorm_resource_names` | Non-SCORM subset of names, shown alongside SCORM guidance message |
+| `content[0].identifier` | `collected.assessment_id` | — | The assessment DO_ID used as `assessmentIdentifier` in Step 7 (**not** `content_do_id` from Step 1) |
+| `content[0].maxAttempts` | `collected.max_attempts` | — | Fallback attempt count if Step 7 is skipped/errors |
+| `content[0].maxAssessmentRetakeAttempts` | `collected.max_retake_attempts` | — | Fallback retake-attempt count if Step 7 is skipped/errors |
+
+> **On API error (outright HTTP failure):** the node proceeds to Step 6a below, which then falls back to fetching every ID in `incomplete_ids` individually (since `missing_resource_ids` was never populated).
 
 ### Sample Response (trimmed)
 
@@ -444,6 +496,8 @@ curl -X POST \
   }
 }
 ```
+
+> `/api/composite/v4/search` returns the same `result.content[*]` shape as the previous `/api/content/v1/search` endpoint (verified against a live UAT response), so no response-mapping changes were needed.
 
 ### MIME Type → Guidance Branch
 
@@ -480,6 +534,28 @@ all_resources_assessment = all(
 
 ---
 
+## Step 6a — Composite Search Name Fallback
+
+> Composite search (Step 6) queries every `incomplete_id` in one request, but can miss some (e.g. Draft/Retired edge cases) or fail outright. For any resource whose name wasn't returned, this step fetches it individually — one call per ID, looped — and folds the name into `collected.incomplete_resource_names` (and the SCORM/non-SCORM sub-lists) so the user still sees the complete list.
+
+**Endpoint:** `GET /api/content/v1/read/{resource_id}` — called once per missing ID via an `increment_and_branch` loop (`loop_missing_resource_names`, counter `missing_name_idx`).
+
+> ID source: `collected.missing_resource_ids` if Step 6 succeeded but missed some IDs; otherwise (Step 6 failed outright) every ID in `collected.incomplete_ids`.
+
+### Response Fields Used
+
+| Field | Stored As | Transform | Used For |
+|---|---|---|---|
+| `$.content.name` | `collected.incomplete_resource_names` | `append_resource_name` | Appends the fetched name to the running list |
+| `$.content` | `collected.scorm_resource_names` | `append_resource_name_if_scorm` | Appends the name only if the resource's mimeType is SCORM |
+| `$.content` | `collected.non_scorm_resource_names` | `append_resource_name_if_non_scorm` | Appends the name only if the resource's mimeType is not SCORM |
+
+> **On API error for any single ID:** skipped, and the loop still advances so remaining IDs are checked.
+
+Once the loop completes (or if `missing_resource_ids` was empty), execution proceeds to `branch_on_resource_type` (routing decision below).
+
+---
+
 ## Step 7 — Assessment Retake Count *(Assessment limit path only)*
 
 > Called when the user reports "Assessment Limit Exceeded". Checks remaining attempts to determine whether a ticket needs to be raised.
@@ -488,24 +564,28 @@ all_resources_assessment = all(
 
 ```bash
 curl -X GET \
-  "https://portal.uat.karmayogibharat.net/api/admin/assesment/retake/count?assessmentIdentifier={content_do_id}&userId={user_id}&editMode=false"
+  "https://portal.uat.karmayogibharat.net/api/admin/assesment/retake/count?assessmentIdentifier={assessment_id}&userId={user_id}&editMode=false"
 ```
 
 ### Query Parameters
 
 | Parameter | Value | Purpose |
 |---|---|---|
-| `assessmentIdentifier` | `collected.content_do_id` | The assessment leaf resource DO_ID captured in Step 1 |
+| `assessmentIdentifier` | `collected.assessment_id` | The assessment DO_ID captured in **Step 6** (`content[0].identifier` from the composite search), **not** `content_do_id` from Step 1 |
 | `userId` | `ctx.user_id_hash` | Learner's user ID |
 | `editMode` | `false` | Standard mode |
 
 ### Response Fields Used
 
+> KarmayogiService unwraps the result envelope for this endpoint too, so the fields are read off the response root (`$`), not `$.result.*`.
+
 | Field | Stored As | Transform | Used For |
 |---|---|---|---|
-| `$.result` | `collected.remaining_attempts` | `calculate_remaining_attempts` | `attemptsAllowed − attemptsMade`; `> 0` → show count, prompt retry |
-| `$.result.attemptsAllowed` | `collected.max_attempts` | — | Total attempts permitted |
-| `$.result.attemptsMade` | `collected.used_attempts` | — | Attempts already consumed |
+| `$` | `collected.remaining_attempts` | `calculate_remaining_attempts` | `attemptsAllowed − attemptsMade`; `> 0` → show count, prompt retry |
+| `$.attemptsAllowed` | `collected.max_attempts` | — | Total attempts permitted |
+| `$.attemptsMade` | `collected.used_attempts` | — | Attempts already consumed |
+
+> **On API error:** shows a generic "unable to process right now, try again later" message; no fallback attempt count is shown.
 
 ### `calculate_remaining_attempts` Logic
 
@@ -520,6 +600,8 @@ return remaining if remaining > 0 else 0
 |---|---|
 | `remaining_attempts > 0` | Inform user of remaining count; prompt retry |
 | `remaining_attempts == 0` | Raise Zoho support ticket |
+
+> **Ticket mechanics:** unlike the other tickets in this flow (Step 6/technical-issue, revalidation escalation, "any other error"), which go through the shared `_zoho_ticket` fragment via an LLM-drafted `transfer_llm` node, this ticket is raised by a **direct `POST /tickets` api_call node** (`assessment_limit_auto_ticket`) with a hard-coded subject/description/cf-block (`cf_category: assessment`, `cf_sub_category: other`, `cf_llm_involved: false`). No LLM drafting is involved.
 
 ---
 
@@ -539,22 +621,26 @@ return remaining if remaining > 0 else 0
 |---|---|---|---|---|
 | 1 | `POST .../enrollment/list/{user_id}` | Course/Program picker | `issuedCertificates` → `certificate_issued` | Branch: stop if `== true` |
 | 1 | `POST .../enrollment/list/{user_id}` | Course/Program picker | `completionPercentage` → `completion_pct` | Step 4 branch: revalidation if `== 100` |
-| 1 | `POST .../enrollment/list/{user_id}` | Course/Program picker | `langContentStatus` → `completed_ids` | Step 5 `diff_leaf_nodes` context |
+| 1 | `POST .../enrollment/list/{user_id}` | Course/Program picker | `langContentStatus` → `completed_ids` | Captured but no longer consumed — Step 5b's diff now uses `all_enrollment_list_for_diff` (Step 5a) instead of `completed_ids` |
 | 1 | `POST .../enrollment/list/{user_id}` | Course/Program picker | `langContentStatus` → `incomplete_ids` | Fallback for Step 6 if Step 5 errors |
 | 1 | `POST .../enrollment/list/{user_id}` | Course/Program picker | `langContentStatus` → `lang_content_status` | Step 4 `compare_enrollment_vs_admin_state` |
 | 1 | `POST .../enrollment/list/{user_id}` | Course/Program picker | `courseId` | Step 2, 3, 4, 5 URL / body |
 | 1 | `POST .../enrollment/list/{user_id}` | Course/Program picker | `batchId` / `batches` → `batch_id` | Step 4 request body |
 | 1 | `POST .../enrollment/list/{user_id}` | Course/Program picker | `primaryCategory` → `primary_category` | Step 2 branch: Program vs Course |
-| 1 | `POST .../enrollment/list/{user_id}` | Course/Program picker | `contentId` → `content_do_id` | Step 7 `assessmentIdentifier`; ticket description |
+| 1 | `POST .../enrollment/list/{user_id}` | Course/Program picker | `contentId` → `content_do_id` | Ticket description (technical-issue / certificate tickets) |
 
-| 2 | `GET /api/content/v1/read/{course_id}` | Content type check | `$.content.primaryCategory` → `primary_category` | Branch: Program → Step 3, else Step 4 |
-| 3 | `GET /api/private/content/v3/hierarchy/{program_id}?mode=edit` | Program child course IDs | `children[*].identifier` → `child_course_ids` | Step 4 loop `courseId` field |
+| 2 | `GET /api/content/v1/read/{course_id}` | Content type check | `$.content.primaryCategory` → `primary_category` | Branch: Program/Curated Program → Step 3, else Step 4 |
+| 3 | `GET /api/private/content/v3/hierarchy/{program_id}` | Program child course IDs (no `?mode=edit` query param) | `children[*].identifier` → `child_course_ids` | Step 4 loop `courseId` field |
 | 4 | `POST /api/admin/content/state/read` | Technical issue detection (loop — once per child course for Programs) | `consumptionRecords[*]` → `admin_content_states` (accumulated via `append_consumption_records`) | `compare_enrollment_vs_admin_state` |
-| 5 | `GET /api/content/v1/read/{course_id}` | Leaf-node cross-check | `$.content.leafNodes` diff → `incomplete_ids` | Step 6 `filters.identifier` |
-| 6 | `POST /api/content/v1/search` | Resource metadata for guidance routing | `content[*].mimeType` → `has_scorm_resources` | Branch: SCORM vs standard guidance |
-| 6 | `POST /api/content/v1/search` | Resource metadata for guidance routing | `content[*].name` → `incomplete_resource_names` | Resource list in non-SCORM message |
-| 6 | `POST /api/content/v1/search` | Resource metadata for guidance routing | `content[*]` → `scorm_resource_name`, `scorm_resource_duration_min` | SCORM guidance message |
-| 6 | `POST /api/content/v1/search` | Resource metadata for guidance routing | `content[*]` → `all_resources_assessment` | Branch: assessment-only guidance |
-| 7 | `GET /api/admin/assesment/retake/count` | Assessment attempt limit check | `attemptsAllowed`, `attemptsMade` → `remaining_attempts` | Branch: retry vs raise ticket |
+| 5a | `POST .../enrollment/list/{user_id}` | Fetch every enrollment (status `0`/`1`/`2`) | `$.courses` → `all_enrollment_list_for_diff` | Step 5b `diff_leaf_nodes_cross_enrollment` context |
+| 5b | `GET /api/content/v1/read/{course_id}` | Cross-enrollment leaf-node diff | `$.content.leafNodes` diff → `incomplete_ids` | Step 6 `filters.identifier` |
+| 6 | `POST /api/composite/v4/search` | Resource metadata for guidance routing | `content[*].mimeType` → `has_scorm_resources` | Branch: SCORM vs standard guidance |
+| 6 | `POST /api/composite/v4/search` | Resource metadata for guidance routing | `content[*].name` → `incomplete_resource_names` | Resource list in non-SCORM message |
+| 6 | `POST /api/composite/v4/search` | Resource metadata for guidance routing | `content[*]` → `scorm_resource_name`, `scorm_resource_duration_min`, `scorm_resource_names`, `non_scorm_resource_names` | SCORM / non-SCORM guidance messages |
+| 6 | `POST /api/composite/v4/search` | Resource metadata for guidance routing | `content[*]` → `all_resources_assessment` | Branch: assessment-only guidance |
+| 6 | `POST /api/composite/v4/search` | Resource metadata for guidance routing | `content[0].identifier`, `content[0].maxAttempts`, `content[0].maxAssessmentRetakeAttempts` → `assessment_id`, `max_attempts`, `max_retake_attempts` | Step 7 `assessmentIdentifier`; fallback attempt counts |
+| 6 | `POST /api/composite/v4/search` | Resource metadata for guidance routing | `content[*].identifier` diff → `missing_resource_ids` | Triggers Step 6a per-ID name fallback |
+| 6a | `GET /api/content/v1/read/{resource_id}` (looped) | Fill in names composite search missed | `$.content.name` → `incomplete_resource_names` (+ SCORM/non-SCORM sub-lists) | Guidance messages |
+| 7 | `GET /api/admin/assesment/retake/count` | Assessment attempt limit check | `attemptsAllowed`, `attemptsMade` → `remaining_attempts` (read from response root `$`, not `$.result`) | Branch: retry vs raise direct Zoho ticket |
 | R1 | `POST .../enrollment/list/{user_id}` | Revalidation — refresh certificate/completion | `issuedCertificates` → `certificate_issued`; `langContentStatus` → `lang_content_status` | Branch: certificate issued or re-run Step 4 |
-| R2 | `POST /api/admin/content/state/read` | Revalidation — re-check technical issue | `consumptionRecords[*]` → `admin_content_states` | `compare_enrollment_vs_admin_state` |
+| R2 | `POST /api/admin/content/state/read` | Revalidation — re-check technical issue | `consumptionRecords[*]` → `admin_content_states` | `compare_enrollment_vs_admin_state`; if no mismatch and `completion_pct < 100`, tells user which resources are pending instead of escalating |

@@ -332,7 +332,9 @@ async def _resolve_dynamic_options(
                     elif fi_op == "eq":     include = raw_val == fi_val
                     elif fi_op == "neq":    include = raw_val != fi_val
                     elif fi_op == "not_null": include = True
-                elif fi_op == "is_null":   include = True
+                else:
+                    if fi_op == "is_null": include = True
+                    elif fi_op == "neq":   include = True
                 if not include:
                     continue
 
@@ -467,7 +469,9 @@ async def _resolve_dynamic_options(
                 elif fi_op == "eq":     include = raw_val == fi_val
                 elif fi_op == "neq":    include = raw_val != fi_val
                 elif fi_op == "not_null": include = True  # raw_val already not None
-            elif fi_op == "is_null":   include = True   # raw_val is None
+            else:
+                if fi_op == "is_null": include = True
+                elif fi_op == "neq":   include = True
             if not include:
                 continue
         item_id = _item_get(raw, id_field)
@@ -501,6 +505,57 @@ async def _resolve_dynamic_options(
                 if value is not None:
                     item_extras[dst_key] = value
             extras_map[str(item_id)] = item_extras
+
+    # Fallback — same principle as the composite-search name fallback used
+    # elsewhere (diff_missing_resource_ids / append_resource_name in
+    # api_call_node.py): the primary list call can silently miss some known
+    # resource IDs (e.g. Draft/Retired status), which here means they'd never
+    # even appear as a selectable picker option. For any ID not present in the
+    # resolved items, fetch it individually via content/v1/read and add it in.
+    fallback_cfg = cfg.get("fallback_missing_ids")
+    if fallback_cfg:
+        ids_ctx_keys: list[str] = fallback_cfg.get("ids_ctx_keys", [])
+        collected_ctx = ctx.get("collected") or {}
+        all_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for key in ids_ctx_keys:
+            key_name = key.removeprefix("collected.")
+            for v in (collected_ctx.get(key_name) or []):
+                if v and v not in seen_ids:
+                    seen_ids.add(v)
+                    all_ids.append(v)
+
+        found_ids = {item.id for item in items}
+        missing_ids = [i for i in all_ids if i not in found_ids]
+
+        if missing_ids:
+            read_path_tmpl = fallback_cfg.get("read_path", "/api/content/v1/read/{id}")
+            fb_label_field = fallback_cfg.get("label_field", "name")
+            fb_extra_fields: list[dict] = fallback_cfg.get("extra_fields", [])
+            for missing_id in missing_ids:
+                try:
+                    fb_result = await integration.execute_request(
+                        method="GET",
+                        url=read_path_tmpl.replace("{id}", missing_id),
+                        params=None, body=None, headers=None,
+                    )
+                except Exception:  # noqa: BLE001
+                    continue
+                fb_content = fb_result.get("content") if isinstance(fb_result, dict) else None
+                if not isinstance(fb_content, dict):
+                    continue
+                fb_label = fb_content.get(fb_label_field)
+                if not fb_label:
+                    continue
+                items.append(PickerItem(id=str(missing_id), label=str(fb_label), meta=None))
+                fb_item_extras: dict[str, Any] = {}
+                for ef in fb_extra_fields:
+                    src_key = ef.get("from", "")
+                    dst_key = ef.get("to", "").removeprefix("collected.")
+                    val = fb_content.get(src_key)
+                    if val is not None:
+                        fb_item_extras[dst_key] = val
+                extras_map[str(missing_id)] = fb_item_extras
 
     return items, extras_map
 

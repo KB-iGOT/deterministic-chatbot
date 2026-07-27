@@ -1,5 +1,5 @@
 # =============================================================================
-# MODE B — DETERMINISTIC
+# MODE B — DETERMINISTIC + LLM TICKET TAIL
 # =============================================================================
 # Flow: Karma Points Issue (UC-XX)
 #
@@ -13,11 +13,11 @@
 #       Points status branches:
 #         Both credited           → inform already credited → close
 #         Only rating credited    →
-#           ACBP = true           → training-plan discrepancy → close
+#           ACBP = true           → training-plan discrepancy → confirm + raise ticket
 #           ACBP = false          →
-#             monthly rank ≥ 5    → monthly limit message → close
-#             monthly rank < 5    → discrepancy message   → close
-#         Neither credited        → general discrepancy → close
+#             monthly rank ≥ 5    → monthly limit message      → close
+#             monthly rank < 5    → discrepancy                → confirm + raise ticket
+#         Neither credited        → general discrepancy        → confirm + raise ticket
 #
 #   2.  Event karma points not credited
 #       2.1  Ask event name (text input)
@@ -28,11 +28,18 @@
 #         completedOn − event_start_time ≤ 4 h  → live → check kpList
 #         > 4 h                                  → not-live message → close
 #         start_time unavailable                 → skip to kpList check
+#       Live but not credited → confirm + raise ticket
 #
 #   3.1 Incorrect karma points received (5 vs 10 vs 15)
+#       Expected 15 / 10 mismatch → confirm + raise ticket
+#       Expected 5 mismatch       → monthly limit message (no ticket)
 #   3.2 Leaderboard vs overall karma points mismatch (static explanation)
 #   3.3 Learner pathway points (static explanation + Product Team note)
 #   3.4 Course added to Training Plan after completion (Claim Karma Point)
+#
+# All discrepancy branches raise a support ticket via the common _zoho_ticket
+# fragment (ticket_confirm → transfer_llm auto-ticket → confirm_ticket), rather
+# than only telling the user the issue was escalated.
 #
 # APIs used:
 #   POST /api/karmapoints/read                           (karma history, limit 50)
@@ -51,7 +58,7 @@
 # =============================================================================
 
 flow_id: KARMA_POINTS_ISSUE
-flow_type: deterministic
+flow_type: deterministic_with_llm_fallback
 version: 1
 
 metadata:
@@ -89,6 +96,11 @@ entry_node: ask_karma_issue
 
 imports:
   - _terminal
+  - fragment: _zoho_ticket
+    with:
+      cf_category:     platform
+      cf_sub_category: karma_points
+      cf_flow_id:      KARMA_POINTS_ISSUE
 
 nodes:
 
@@ -231,13 +243,40 @@ nodes:
 
   # 1.2.2.2.1.1 — Training Plan: raise ticket
   - id: kc_training_plan_discrepancy
-    type: message
+    type: ticket_confirm
     prompt:
-      text: >
-        There appears to be a discrepancy with the karma points for
-        **{{ ctx.collected.kc_kp_status.course_name | default(ctx.collected.kc_course_name) }}**.
-        This has been escalated to the technical team for investigation.
-    next: satisfied
+      text: |
+        **Issue Identified:** Course Karma Points — Training Plan Discrepancy
+
+        **Summary of Request:**
+        There appears to be a discrepancy with the karma points for the course below.
+        It is part of your Training Plan (ACBP) but has not been fully credited. You would
+        like us to investigate this discrepancy.
+
+        • **Course:** {{ ctx.collected.kc_kp_status.course_name | default(ctx.collected.kc_course_name) }}
+
+        Please review the details above and confirm whether they are correct.
+    on_confirm: kc_training_plan_auto_ticket
+    on_cancel: satisfied
+
+  - id: kc_training_plan_auto_ticket
+    type: transfer_llm
+    auto_raise: silent
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user's course completion karma points have not been fully credited even
+        though the course is part of their Training Plan (ACBP = true).
+        Generate a Zoho support ticket for the technical team to investigate.
+        Subject: "Karma Points Discrepancy — Training Plan Course Not Credited"
+        Description: include course name (kc_course_name), course id (kc_course_id),
+        the karma points status (kc_kp_status), and user email.
+      priority_override: P3
+    on_complete: confirm_ticket
+    on_restart: kc_pick_course
 
   # 1.2.2.2.1.2 — NOT Training Plan → check monthly completion rank
   - id: kc_branch_monthly_rank
@@ -257,23 +296,77 @@ nodes:
 
   # Within limit but still not credited → discrepancy, raise ticket
   - id: kc_non_acbp_discrepancy
-    type: message
+    type: ticket_confirm
     prompt:
-      text: >
-        There appears to be a discrepancy with the karma points for
-        **{{ ctx.collected.kc_kp_status.course_name | default(ctx.collected.kc_course_name) }}**.
-        This has been escalated for further investigation.
-    next: satisfied
+      text: |
+        **Issue Identified:** Course Karma Points — Not Credited
+
+        **Summary of Request:**
+        There appears to be a discrepancy with the karma points for the course below.
+        You are within the monthly limit, but the points have not been credited. You
+        would like us to investigate this discrepancy.
+
+        • **Course:** {{ ctx.collected.kc_kp_status.course_name | default(ctx.collected.kc_course_name) }}
+
+        Please review the details above and confirm whether they are correct.
+    on_confirm: kc_non_acbp_auto_ticket
+    on_cancel: satisfied
+
+  - id: kc_non_acbp_auto_ticket
+    type: transfer_llm
+    auto_raise: silent
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user's course completion karma points have not been credited even though
+        the course is not part of a Training Plan (ACBP = false) and the monthly
+        completion limit (rank < 5) has not been exceeded.
+        Generate a Zoho support ticket for the technical team to investigate.
+        Subject: "Karma Points Discrepancy — Course Not Credited"
+        Description: include course name (kc_course_name), course id (kc_course_id),
+        the karma points status (kc_kp_status), monthly rank (kc_monthly_rank), and user email.
+      priority_override: P3
+    on_complete: confirm_ticket
+    on_restart: kc_pick_course
 
   # Neither credited → discrepancy, raise ticket
   - id: kc_no_points_discrepancy
-    type: message
+    type: ticket_confirm
     prompt:
-      text: >
-        There appears to be a discrepancy with the karma points for
-        **{{ ctx.collected.kc_course_name | default('this course') }}**.
-        This has been escalated for further investigation.
-    next: satisfied
+      text: |
+        **Issue Identified:** Course Karma Points — Not Credited
+
+        **Summary of Request:**
+        There appears to be a discrepancy with the karma points for the course below.
+        Neither completion nor rating points have been credited. You would like us to
+        investigate this discrepancy.
+
+        • **Course:** {{ ctx.collected.kc_course_name | default('this course') }}
+
+        Please review the details above and confirm whether they are correct.
+    on_confirm: kc_no_points_auto_ticket
+    on_cancel: satisfied
+
+  - id: kc_no_points_auto_ticket
+    type: transfer_llm
+    auto_raise: silent
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        Neither completion nor rating karma points have been credited for the user's
+        course, and no karma points record was found for it.
+        Generate a Zoho support ticket for the technical team to investigate.
+        Subject: "Karma Points Discrepancy — No Points Credited"
+        Description: include course name (kc_course_name), course id (kc_course_id), and user email.
+      priority_override: P3
+    on_complete: confirm_ticket
+    on_restart: kc_pick_course
 
   - id: kc_api_error
     type: message
@@ -391,10 +484,39 @@ nodes:
 
   # Live + not credited → discrepancy
   - id: ev_kp_not_credited
-    type: message
+    type: ticket_confirm
     prompt:
-      text: "There appears to be a discrepancy with the karma points for **{{ ctx.collected.ev_course_name }}**. This has been escalated to the technical team for investigation."
-    next: satisfied
+      text: |
+        **Issue Identified:** Event Karma Points — Not Credited
+
+        **Summary of Request:**
+        You attended the event live (within the 4-hour participation window), but the
+        karma points have not been credited. You would like us to investigate this discrepancy.
+
+        • **Event:** {{ ctx.collected.ev_course_name }}
+
+        Please review the details above and confirm whether they are correct.
+    on_confirm: ev_kp_not_credited_auto_ticket
+    on_cancel: satisfied
+
+  - id: ev_kp_not_credited_auto_ticket
+    type: transfer_llm
+    auto_raise: silent
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user attended an event live (within the 4-hour participation window) but the
+        karma points were not credited.
+        Generate a Zoho support ticket for the technical team to investigate.
+        Subject: "Karma Points Discrepancy — Event Not Credited"
+        Description: include event name (ev_course_name), event id (ev_course_id),
+        completion time (ev_completed_on_iso), event start time (ev_start_time_iso), and user email.
+      priority_override: P3
+    on_complete: confirm_ticket
+    on_restart: ev_fetch_events_list
 
   - id: ev_api_error
     type: message
@@ -500,23 +622,85 @@ nodes:
 
   # Mismatch: should be 15
   - id: ec1_mismatch_15
-    type: message
+    type: ticket_confirm
     prompt:
-      text: >
-        There appears to be a discrepancy with the karma points for
-        **{{ ctx.collected.ec1_kp_status.course_name | default(ctx.collected.ec1_course_name) }}**.
-        This has been escalated to the technical team for investigation.
-    next: satisfied
+      text: |
+        **Issue Identified:** Incorrect Karma Points — Expected 15
+
+        **Summary of Request:**
+        There appears to be a discrepancy with the karma points for the course below.
+        This course is part of your Training Plan (ACBP) and includes an assessment,
+        so it should have credited **15 points**, but a different amount was recorded.
+        You would like us to investigate this discrepancy.
+
+        • **Course:** {{ ctx.collected.ec1_kp_status.course_name | default(ctx.collected.ec1_course_name) }}
+        • **Points Credited:** {{ ctx.collected.ec1_kp_status.completion_points }}
+
+        Please review the details above and confirm whether they are correct.
+    on_confirm: ec1_mismatch_15_auto_ticket
+    on_cancel: satisfied
+
+  - id: ec1_mismatch_15_auto_ticket
+    type: transfer_llm
+    auto_raise: silent
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user's course is part of a Training Plan (ACBP = true) and has an assessment,
+        so it is expected to credit 15 karma points, but the recorded completion_points
+        do not equal 15.
+        Generate a Zoho support ticket for the technical team to investigate.
+        Subject: "Karma Points Discrepancy — Incorrect Points (Expected 15)"
+        Description: include course name (ec1_course_name), course id (ec1_course_id),
+        the karma points status (ec1_kp_status) including the actual completion_points
+        recorded, and user email.
+      priority_override: P3
+    on_complete: confirm_ticket
+    on_restart: ec1_pick_course
 
   # Mismatch: should be 10
   - id: ec1_mismatch_10
-    type: message
+    type: ticket_confirm
     prompt:
-      text: >
-        There appears to be a discrepancy with the karma points for
-        **{{ ctx.collected.ec1_kp_status.course_name | default(ctx.collected.ec1_course_name) }}**.
-        This has been escalated to the technical team for investigation.
-    next: satisfied
+      text: |
+        **Issue Identified:** Incorrect Karma Points — Expected 10
+
+        **Summary of Request:**
+        There appears to be a discrepancy with the karma points for the course below.
+        This course is part of your Training Plan (ACBP) without an assessment, so it
+        should have credited **10 points**, but a different amount was recorded. You
+        would like us to investigate this discrepancy.
+
+        • **Course:** {{ ctx.collected.ec1_kp_status.course_name | default(ctx.collected.ec1_course_name) }}
+        • **Points Credited:** {{ ctx.collected.ec1_kp_status.completion_points }}
+
+        Please review the details above and confirm whether they are correct.
+    on_confirm: ec1_mismatch_10_auto_ticket
+    on_cancel: satisfied
+
+  - id: ec1_mismatch_10_auto_ticket
+    type: transfer_llm
+    auto_raise: silent
+    llm_context:
+      include_messages:  true
+      include_collected: true
+      include_flow_meta: true
+    llm_directives:
+      objective: |
+        The user's course is part of a Training Plan (ACBP = true) without an assessment,
+        so it is expected to credit 10 karma points, but the recorded completion_points
+        do not equal 10.
+        Generate a Zoho support ticket for the technical team to investigate.
+        Subject: "Karma Points Discrepancy — Incorrect Points (Expected 10)"
+        Description: include course name (ec1_course_name), course id (ec1_course_id),
+        the karma points status (ec1_kp_status) including the actual completion_points
+        recorded, and user email.
+      priority_override: P3
+    on_complete: confirm_ticket
+    on_restart: ec1_pick_course
 
   # Mismatch: should be 5
   - id: ec1_mismatch_5

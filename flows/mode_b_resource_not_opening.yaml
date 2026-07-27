@@ -13,7 +13,7 @@
 # APIs used:
 #   POST /api/course/private/v4/user/enrollment/list/{user_id}
 #   GET  /api/content/v2/read/{course_id}
-#   POST /api/content/v1/search
+#   POST /api/composite/v4/search
 #   GET  /api/content/v1/read/{resource_id}
 # =============================================================================
 
@@ -99,7 +99,7 @@ nodes:
   - id: mobile_desktop_mode_guidance
     type: resolution
     prompt:
-      text: "Let's try using Desktop Mode on your mobile browser."
+      text: "Please try using Desktop Mode on your mobile browser."
     steps:
       - "Open **Google Chrome** browser on the mobile device."
       - "Click on the **three dots** at the top right corner of the browser."
@@ -126,7 +126,8 @@ nodes:
 
   # ===========================================================================
   # CASE 2: Web Browser / Shared API Path
-  # ========================================================  # Step 1: Select course from enrollment list
+  # ===========================================================================
+  # Step 1: Select course from enrollment list
   - id: shared_pick_course
     type: collect
     prompt:
@@ -150,8 +151,18 @@ nodes:
         id_field:        courseId
         label_field:     courseName
         sub_label_field: completionPercentage
-        extra_fields: # This was incorrectly indented
-          - { from: courseName, to: collected.course_name }
+        extra_fields:
+          - { from: courseName,        to: collected.course_name }
+          # Captured from this same call (no separate API round-trip needed) so
+          # we can tell, once a resource is picked, whether it's already marked
+          # complete server-side before offering to raise a ticket.
+          - { from: langContentStatus, to: collected.resource_completed_ids, transform: extract_completed_ids }
+          - { from: batchId,           to: collected.batch_id }
+          - { from: batches,           to: collected.batch_id,              transform: extract_batch_id }
+      filter_items:
+        field: content.courseCategory
+        operator: neq
+        value: "Learning Pathway"
       search:     { enabled: true, placeholder: "Search your enrolled courses..." }
       pagination: { enabled: true, page_size: 10 }
       cache_ttl:  300
@@ -159,24 +170,20 @@ nodes:
         You do not have any enrolled courses or programs at the moment.
 
         Please enrol in a course on the iGOT Karmayogi portal and try again.
-      on_empty:   no_enrolled_courses_found
-    next: api_fetch_hierarchy
- 
-  # Step 2: Fetch hierarchy to get resource IDs (Leaf Nodes)
-  # Uses the PRIVATE hierarchy endpoint, not the public /api/content/v2/read/.
-  # The public endpoint returns 400 ERR_ACCESS_DENIED for Moderated courses
-  # (secureSettings block anonymous/public reads), which was silently sending
-  # every Moderated-course case straight to api_error_fallback -> auto-ticket,
-  # skipping resource selection entirely. The private endpoint has the
-  # elevated access needed to read Moderated content, and already returns a
-  # single flattened leafNodes[] covering nested CourseUnit resources too —
-  # no separate children fallback/recursion needed.
-  - id: api_fetch_hierarchy
+      on_empty:   satisfied
+    next: api_fetch_course_content
+
+  # Step 2: Fetch the course content and check for resource IDs (Leaf Nodes).
+  # Per SOP, there is no hierarchy API in this flow — we just read the content
+  # and check. GET /api/content/v2/read/ returns a flattened leafNodes[]
+  # covering nested CourseUnit resources, with children[] as a defensive
+  # fallback if leafNodes is ever absent.
+  - id: api_fetch_course_content
     type: api_call
     integration: karmayogi
     request:
       method: GET
-      url: "/api/private/content/v3/hierarchy/{{ ctx.collected.course_id }}?mode=edit"
+      url: "/api/content/v2/read/{{ ctx.collected.course_id }}"
     response_mapping:
       - from: "$.content.leafNodes"
         to: collected.all_resource_ids
@@ -187,10 +194,10 @@ nodes:
     on_error:
       any: api_error_fallback
 
-  # Guard: /api/content/v1/search silently ignores an EMPTY identifier filter
+  # Guard: /api/composite/v4/search silently ignores an EMPTY identifier filter
   # and returns unrelated content from across the whole platform instead of
-  # erroring or returning nothing. Never let that happen — if the hierarchy
-  # call above found no leaf/child IDs at all, go straight to the "no
+  # erroring or returning nothing. Never let that happen — if the content
+  # read above found no leaf/child IDs at all, go straight to the "no
   # resources" message instead of searching with an empty filter.
   - id: branch_resource_ids_found
     type: branch
@@ -215,7 +222,7 @@ nodes:
       integration: karmayogi
       request:
         method: POST
-        url: "/api/content/v1/search"
+        url: "/api/composite/v4/search"
         body:
           request:
             filters:
@@ -230,6 +237,18 @@ nodes:
         extra_fields:
           - { from: name,     to: collected.resource_name }
           - { from: mimeType, to: collected.resource_mime_type }
+      # Composite search can miss some known resource IDs (e.g. Draft/Retired
+      # status) and just silently drop them from $.content — which here means
+      # they'd never appear as a selectable option at all. For any ID present
+      # in all_resource_ids/all_child_ids but absent from the composite search
+      # result, fetch it individually via content/v1/read and add it in.
+      fallback_missing_ids:
+        ids_ctx_keys: ["collected.all_resource_ids", "collected.all_child_ids"]
+        read_path:   "/api/content/v1/read/{id}"
+        label_field: name
+        extra_fields:
+          - { from: name,     to: collected.resource_name }
+          - { from: mimeType, to: collected.resource_mime_type }
       search: { enabled: true, placeholder: "Search for a video or module name..." }
       pagination: { enabled: true, page_size: 15 }
       on_empty:   no_resources_found
@@ -239,17 +258,40 @@ nodes:
     type: branch
     rules:
       - if: "ctx.collected.device_type == 'mobile'"
-        then: resource_auto_ticket
+        then: mobile_issue_summary
     default: branch_resource_type_step
+
+  - id: mobile_issue_summary
+    type: ticket_confirm
+    prompt:
+      text: |
+        **Summary of Request:**
+        You reported that the resource is not opening on your mobile device even after switching to Desktop Mode. You would like us to investigate this issue further.
+        
+        • **Course:** {{ ctx.collected.course_name }}
+        • **Resource:** {{ ctx.collected.resource_name }}
+        • **Mobile Model:** {{ ctx.collected.mobile_model }}
+        {% if ctx.collected.app_version %}• **App Version:** {{ ctx.collected.app_version }}{% endif %}
+
+        Please review the details above and confirm whether they are correct.
+    on_confirm: resource_auto_ticket
+    on_cancel: satisfied
 
   - id: branch_resource_type_step
     type: branch
     rules:
-      - { if: "ctx.collected.resource_mime_type in ['text/x-url']", 
+      - { if: "ctx.collected.resource_mime_type in ['text/x-url']",
           then: api_youtube_read }
-      - { if: "ctx.collected.resource_mime_type == 'application/vnd.ekstep.html-archive'", 
-          then: scorm_format_issue }
-    default: other_format_issue
+    default: branch_resource_type_after_status
+
+  - id: branch_resource_type_after_status
+    type: branch
+    rules:
+      - { if: "ctx.collected.resource_mime_type == 'application/vnd.ekstep.html-archive'",
+          then: scorm_format_message }
+    default: other_format_message
+
+
 
   # Step 4: YouTube URL Configuration Check
   - id: api_youtube_read
@@ -271,7 +313,7 @@ nodes:
     rules:
       - if: "ctx.collected.streaming_url != None and ctx.collected.streaming_url == ctx.collected.artifact_url and ctx.collected.streaming_url == ctx.collected.preview_url"
         then: ask_youtube_restricted
-    default: youtube_config_issue
+    default: youtube_config_message
 
   # ===========================================================================
   # CASE 2A: YouTube Resource
@@ -288,7 +330,7 @@ nodes:
     on_reply:
       save_to: collected.youtube_restricted
       yes_restricted: youtube_restricted_guidance
-      no_open:        youtube_unrestricted_ticket
+      no_open:        youtube_unrestricted_message
 
   - id: youtube_restricted_guidance
     type: resolution
@@ -302,14 +344,14 @@ nodes:
       - "Login using your registered credentials."
       - "Search for the course."
       - "Click **Resume** and watch the video."
-    follow_up:
-      text: "Does this resolve your issue?"
-      quick_replies:
-        - { id: yes, label: "✅ Yes, thank you" }
-    
-    on_reply:
-      yes: satisfied
-      
+    next: satisfied
+
+  - id: youtube_unrestricted_message
+    type: ticket_confirm
+    prompt:
+      text: "This YouTube video requires further investigation. Would you like us to create a support ticket?"
+    on_confirm: youtube_unrestricted_ticket
+    on_cancel: satisfied
 
   - id: youtube_unrestricted_ticket
     type: ticket_confirm
@@ -317,12 +359,19 @@ nodes:
       text: |
         **Summary of Request:**
         You reported that the YouTube resource is not opening despite YouTube not being restricted on your network. You would like us to investigate this issue further.
-        
+
         • **Course:** {{ ctx.collected.course_name }}
         • **Resource:** {{ ctx.collected.resource_name }}
 
         Please review the details above and confirm whether they are correct.
     on_confirm: resource_auto_ticket
+    on_cancel: satisfied
+
+  - id: youtube_config_message
+    type: ticket_confirm
+    prompt:
+      text: "There is a configuration issue with this YouTube video. Would you like us to create a support ticket?"
+    on_confirm: youtube_config_issue
     on_cancel: satisfied
 
   - id: youtube_config_issue
@@ -358,18 +407,41 @@ nodes:
   # ===========================================================================
   # CASE 2B: SCORM / Other Formats
   # ===========================================================================
+  - id: scorm_format_message
+    type: ticket_confirm
+    prompt:
+      text: "This SCORM module requires further investigation. Would you like us to create a support ticket?"
+    on_confirm: scorm_format_issue
+    on_cancel: satisfied
+
   - id: scorm_format_issue
     type: ticket_confirm
     prompt:
       text: |
         **Summary of Request:**
         You reported that a SCORM format resource is not opening. You would like us to investigate this issue further.
-        
+
         • **Course:** {{ ctx.collected.course_name }}
         • **Resource:** {{ ctx.collected.resource_name }}
 
         Please review the details above and confirm whether they are correct.
     on_confirm: resource_auto_ticket
+    on_cancel: satisfied
+
+  - id: other_format_message
+    type: ticket_confirm
+    prompt:
+      text: |
+        {% set r_type = "content module" %}
+        {% if ctx.collected.resource_mime_type == 'application/pdf' %}
+        {% set r_type = "PDF document" %}
+        {% elif ctx.collected.resource_mime_type == 'video/mp4' %}
+        {% set r_type = "video file" %}
+        {% elif ctx.collected.resource_mime_type == 'application/vnd.sunbird.questionset' %}
+        {% set r_type = "assessment" %}
+        {% endif %}
+        This {{ r_type }} requires further investigation. Would you like us to create a support ticket?
+    on_confirm: other_format_issue
     on_cancel: satisfied
 
   - id: other_format_issue
@@ -386,7 +458,7 @@ nodes:
         {% endif %}
         **Summary of Request:**
         You reported that {{ r_type }} is not opening. You would like us to investigate this issue further.
-        
+
         • **Course:** {{ ctx.collected.course_name }}
         • **Resource:** {{ ctx.collected.resource_name }}
 
@@ -411,6 +483,11 @@ nodes:
         Subject: "Resource Not Opening — {{ ctx.collected.course_name | default('Course') }}"
         Description: include course name, resource name, channel ({{ ctx.channel }}), resource type, and email.
         If mobile device details (mobile model, app version) are provided, include them as well.
+      key_facts:
+        - { field: course_name,  label: "Course Name" }
+        - { field: course_id,    label: "Course DO ID" }
+        - { field: resource_name, label: "Resource Name" }
+        - { field: resource_id,  label: "Resource DO ID" }
       priority_override: P3
     on_complete: confirm_ticket
     on_restart: ask_device_type
@@ -418,15 +495,6 @@ nodes:
   # ---------------------------------------------------------------------------
   # Empty-state nodes
   # ---------------------------------------------------------------------------
-  - id: no_enrolled_courses_found
-    type: message
-    prompt:
-      text: |
-        You do not have any enrolled courses or programs at the moment.
-
-        Please enrol in a course on the iGOT Karmayogi portal and try again.
-    next: satisfied
-
   - id: no_resources_found
     type: message
     prompt:

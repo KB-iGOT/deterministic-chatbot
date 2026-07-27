@@ -66,10 +66,15 @@ class KarmayogiService:
         Adds Karmayogi auth header. Unwraps Karmayogi's `{result: {...}}` envelope
         if present (so YAML `from: $.firstName` works instead of `$.result.firstName`).
 
+        Retries up to 3 attempts on transient failures (network errors, 5xx).
+        404 and 4xx client errors are not retried — they are definitive answers.
+
         Raises:
             IntegrationNotFound: on HTTP 404
-            httpx.HTTPError: on other failures (timeout, connection, 5xx)
+            httpx.HTTPError: on other failures after all retries exhausted
         """
+        import asyncio
+
         client = await self._get_client()
 
         merged_headers = {
@@ -78,22 +83,57 @@ class KarmayogiService:
             **(headers or {}),
         }
 
-        resp = await client.request(
-            method=method,
-            url=url,
-            params=params,
-            json=body,
-            headers=merged_headers,
-        )
+        last_exc: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                resp = await client.request(
+                    method=method,
+                    url=url,
+                    params=params,
+                    json=body,
+                    headers=merged_headers,
+                )
 
-        if resp.status_code == 404:
-            raise IntegrationNotFound(f"Karmayogi {method} {url} → 404")
-        if not resp.is_success:
-            log.error(
-                "Karmayogi API error: %s %s → HTTP %d  body: %s",
-                method, url, resp.status_code, resp.text[:500],
-            )
-        resp.raise_for_status()
+                if resp.status_code == 404:
+                    raise IntegrationNotFound(f"Karmayogi {method} {url} → 404")
+
+                # 4xx (except 404) are client errors — don't retry
+                if 400 <= resp.status_code < 500:
+                    log.error(
+                        "[karmayogi] Client error %d for %s %s — not retrying  body: %s",
+                        resp.status_code, method, url, resp.text[:500],
+                    )
+                    resp.raise_for_status()
+
+                # 5xx — log and retry
+                if not resp.is_success:
+                    log.warning(
+                        "[karmayogi] %s %s → HTTP %d (attempt %d/3) — retrying",
+                        method, url, resp.status_code, attempt,
+                    )
+                    last_exc = httpx.HTTPStatusError(
+                        f"HTTP {resp.status_code}", request=resp.request, response=resp
+                    )
+                    if attempt < 3:
+                        await asyncio.sleep(0.5 * attempt)
+                    continue
+
+                break  # success
+
+            except IntegrationNotFound:
+                raise
+            except httpx.RequestError as exc:
+                log.warning(
+                    "[karmayogi] Network error on attempt %d/3 for %s %s: %s",
+                    attempt, method, url, exc,
+                )
+                last_exc = exc
+                if attempt < 3:
+                    await asyncio.sleep(0.5 * attempt)
+
+        else:
+            log.error("[karmayogi] All 3 attempts failed for %s %s", method, url)
+            raise last_exc  # type: ignore[misc]
         data = resp.json()
 
         # Unwrap Karmayogi's {result: {...}} envelope if present, so YAML can

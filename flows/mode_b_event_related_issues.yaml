@@ -20,6 +20,7 @@ flow_type: deterministic_with_llm_fallback
 version: 1
 
 metadata:
+  enabled: false
   category:         event
   menu_label:       "📅 Event related issues"
   menu_group:       "Content Related Issue"
@@ -517,6 +518,6 @@ nodes:
   - id: resolution_generic_error
     type: message
     prompt:
-      text: "We ran into a temporary technical error while fetching the details. Please try again after some time."
+      text: "We're having trouble processing your request right now. Please try again in a few moments."
     next: satisfied
 

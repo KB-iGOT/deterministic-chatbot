@@ -10,14 +10,14 @@
 STEP 1   → POST /api/private/user/v1/search
                 ↓ Fetch user profile + transfer request status
                 ↓
-           user NOT found → stop; show support email
+           user NOT found → stop; show "account not found" message
 
 STEP 2   → POST /api/org/v1/search             (only if wfTransferRequest exists)
-                ↓ Resolve org name from rootOrgId (fallback if orgName missing)
+                ↓ Resolve org details by id (root/org/organisation ID) or by orgName fallback
                 ↓ Present pending transfer org to user for confirmation
 
 STEP 3   → POST /api/private/user/v1/search    (only if user confirms correct org)
-                ↓ Fetch MDO Admin by rootOrgId + role filter
+                ↓ Fetch MDO Admin by rootOrgId (from Step 2, else transfer request) + role filter
                 ↓
            MDO Admin found → share contact details
            MDO Admin NOT found → fallback to YP/SPOC lookup
@@ -27,10 +27,14 @@ STEP 4   → POST /api/org/hierarchy/ministry/search  OR
                 ↓ Fetch parent-level list (ministries or states)
 
 STEP 5   → POST /api/org/hierarchy/search            (Path B — department/org drill-down)
-                ↓ Fetch departments and organizations under selected parent
+                ↓ Ministry: one call straight to org list
+                ↓ State: two calls — departments, then orgs under selected department
+
+STEP 6   → POST /tickets (Zoho Desk)                 (only if no MDO Admin AND no YP/SPOC found)
+                ↓ Raise support ticket for manual resolution
 ```
 
-> **Note:** Steps 1–2 always run when a transfer request exists (Path A). Steps 4–5 run only for Path B when the user cannot find their organisation in the dropdown.
+> **Note:** Steps 1–2 always run when a transfer request exists (Path A). Steps 4–5 run only for Path B when the user cannot find their organisation in the dropdown. Step 6 runs from either path when no MDO Admin/YP/SPOC contact can be located.
 
 ---
 
@@ -69,13 +73,13 @@ curl -X POST \
 | `response.content[0].organisations[0].organisationId` | `collected.profile_root_org_id` | Current org ID (fallback) |
 | `response.content[0].channel` | `collected.user_channel` / `collected.org_channel` | Used for YP/SPOC lookup key |
 | `response.content[0].rootOrgId` | `collected.root_org_id` | User's root org |
-| `response.content[0].profileStatus` | `collected.profile_status` | Profile status |
+| `response.content[0].profileDetails.profileStatus` | `collected.profile_status` | Profile status (nested under `profileDetails`, not top-level) |
 
 ### Decision After Step 1
 
 | Condition | Outcome |
 |---|---|
-| `user_found_count == 0` | User not found; show support email; no further API calls |
+| `user_found_count == 0` | User not found; show "couldn't find an account matching your profile details" message; no further API calls |
 | `wf_transfer_id` is present and non-empty | `matched = true`; proceed to Step 2 (Path A) |
 | `wf_transfer_id` is absent/empty AND `profile_status.upper() == "VERIFIED"` | User's profile is still verified with their org — not actually revoked; show "access is active" message instead of transfer guidance |
 | `wf_transfer_id` is absent/empty AND `profile_status` is not `"VERIFIED"` | No transfer request raised; guide user to raise one (Path B) |
@@ -84,9 +88,11 @@ curl -X POST \
 
 ## Step 2 — Organisation Details Fetch (Path A only)
 
-> Resolves the organisation name from `rootOrgId` in case `orgName` is missing from the transfer request object.
+> Resolves the organisation details when the transfer request's `orgId`/`rootOrgId` is known, or by name when only `orgName`/`departmentName` is available.
 
 **Endpoint:** `POST /api/org/v1/search`
+
+> Filter key is **conditional**: `id` is used when any of `transfer_root_org_id` / `transfer_org_id` / `transfer_organisation_id` is present (value = whichever of those three is set, in that priority order); otherwise the filter falls back to `orgName` (value = `transfer_org_name` or `transfer_dept_name`). It is **not** a fixed `rootOrgId` filter.
 
 ```bash
 curl -X POST \
@@ -96,7 +102,7 @@ curl -X POST \
   -d '{
     "request": {
       "filters": {
-        "rootOrgId": "{{transfer_root_org_id}}"
+        "id": "{{transfer_root_org_id}}"
       },
       "limit": 1
     }
@@ -108,6 +114,9 @@ curl -X POST \
 | Field | Mapped To | Used For |
 |---|---|---|
 | `response.content[0].orgName` | `collected.fetched_org_name` | Resolved org name for display if `transfer_org_name` is null |
+| `response.content[0].ministryOrStateName` | `collected.fetched_ministry_name` | Ministry/state name; used as a YP/SPOC lookup key fallback |
+| `response.content[0].channel` | `collected.fetched_org_channel` | Org channel; used as a YP/SPOC lookup key fallback |
+| `response.content[0].rootOrgId` | `collected.fetched_root_org_id` | Resolved root org ID; takes priority over `transfer_root_org_id` in Step 3's MDO Admin search |
 
 ### Decision After Step 2
 
@@ -134,7 +143,7 @@ curl -X POST \
   -d '{
     "request": {
       "filters": {
-        "rootOrgId": "{{transfer_root_org_id}}",
+        "rootOrgId": "{{fetched_root_org_id or transfer_root_org_id or transfer_org_id or transfer_organisation_id}}",
         "organisations.roles": ["MDO_ADMIN"],
         "status": 1
       },
@@ -143,7 +152,7 @@ curl -X POST \
   }'
 ```
 
-> `rootOrgId` is always the target org from the transfer request (`transfer_root_org_id`). Never fall back to the current user's org for this call.
+> `rootOrgId` resolves in priority order: `fetched_root_org_id` (from Step 2's org lookup) → `transfer_root_org_id` → `transfer_org_id` → `transfer_organisation_id` → `''`. It is always the target org from the transfer request/Step 2 lookup; it never falls back to the current user's own org (`profile_root_org_id`).
 
 ### Response Fields Used
 
@@ -216,9 +225,9 @@ curl -X POST \
 
 ## Step 5 — Department / Organisation Drill-Down (Path B)
 
-> Fetches departments and leaf organisations under the selected parent using a shared hierarchy search endpoint.
+> Fetches departments and leaf organisations under the selected parent using a shared hierarchy search endpoint. **The Central Ministry and State Government sub-paths have different depths:** Ministry goes straight to a leaf-org list, while State has an extra intermediate department-picker level.
 
-**Endpoint:** `POST /api/org/hierarchy/search`
+**Endpoint:** `POST /api/org/hierarchy/search` (called once for Ministry, twice for State)
 
 ```bash
 curl -X POST \
@@ -243,28 +252,41 @@ curl -X POST \
   }'
 ```
 
-> For State sub-calls, add `"sbOrgType": "state"` to `filters`.
+> For all State sub-calls, add `"sbOrgType": "state"` to `filters`.
+
+### 5a — Central Ministry: Departments/Orgs (single call)
+
+`levelZeroOrgId = selected_parent_id` (the chosen ministry). Response is mapped straight to `collected.filtered_orgs` with the `append_others_org` transform applied — the user picks their final organisation directly from this list.
+
+### 5b — State: Departments (first call)
+
+`levelZeroOrgId = selected_parent_id` (the chosen state), `sbOrgType: "state"`. Response is mapped to `collected.state_departments` (**no** `append_others_org` transform — no "Others" option at this level). The user then picks a department via `state_dept_picker` (`id_field: identifier`, `label_field: orgName`), storing the choice in `collected.selected_dept_id` / `collected.dropdown_dept_name`.
+
+### 5c — State: Final Organisations (second call)
+
+`levelZeroOrgId = selected_dept_id` (the department chosen in 5b), `sbOrgType: "state"`. Response is mapped to `collected.filtered_orgs` with the `append_others_org` transform applied, same as 5a.
 
 ### Response Fields Used
 
 | Field | Mapped To | Used For |
 |---|---|---|
-| `response.content[]` | `collected.filtered_orgs` | Populate org/department picker |
-| `response.content[].identifier` | Option `id` field | Selected org ID |
-| `response.content[].orgName` | Option `label` field / `collected.dropdown_org_name` | Display name; shared with user on resolution |
+| `response.content[]` | `collected.filtered_orgs` (5a/5c) or `collected.state_departments` (5b) | Populate org/department picker |
+| `response.content[].identifier` | Option `id` field | Selected org/department ID |
+| `response.content[].orgName` | Option `label` field / `collected.dropdown_org_name` (or `collected.dropdown_dept_name` in 5b) | Display name; shared with user on resolution |
 
-> **`append_others_org` transform:** an "Others" option is appended to `filtered_orgs` by the `append_others_org` transform. If the user selects "Others", the flow falls back to YP/SPOC lookup.
+> **`append_others_org` transform:** an "Others" option is appended to `filtered_orgs` (5a/5c only) by the `append_others_org` transform. If the user selects "Others", the flow falls back to YP/SPOC lookup.
 
 ### Decision After Step 5
 
 | Condition | Outcome |
 |---|---|
-| Orgs returned (more than just "Others") | Show searchable org picker; user selects and confirms |
-| Only "Others" or empty list | Fall back to YP/SPOC lookup |
-| User selects "Others" | Fall back to YP/SPOC lookup |
-| User confirms org selection | Share exact org name for use in transfer request; resolution complete |
+| Orgs/departments returned | Show searchable picker; user selects |
+| 5a/5c: only "Others" or empty list | Fall back to YP/SPOC lookup |
+| 5b: empty department list | Fall back to YP/SPOC lookup |
+| User selects "Others" (5a/5c) | Fall back to YP/SPOC lookup |
+| User confirms final org selection | Share exact org name for use in transfer request; resolution complete |
 
-> Cache TTL: **3600 seconds**.
+> Cache TTL: **3600 seconds** for all hierarchy calls.
 
 ---
 
@@ -272,14 +294,17 @@ curl -X POST \
 
 > When no MDO Admin is found (Path A) or the org cannot be located in the hierarchy (Path B), the flow looks up the YP/SPOC contact via an internal data service (not a Karmayogi REST API).
 
-**Service:** `yp_lookup` (internal data lookup service)
+**Service:** `yp_lookup` (internal data lookup service). Three lookups are attempted in sequence, each falling through to the next on a miss:
 
 ### Lookup Key Priority
 
-| Priority | Key Used | Trigger |
-|---|---|---|
-| 1st | `org_channel` (user's department channel) | Path A MDO not found; Path B dept-level |
-| 2nd | `selected_parent_name` (ministry/state) | Fallback when dept-level lookup fails |
+| Order | Node | Key Used (first non-null wins) | Falls back to next on error |
+|---|---|---|---|
+| 1st | `lookup_yp_org` | `dropdown_org_name` → `transfer_org_name` → `fetched_org_name` → `'NO_ORG'` | `lookup_yp_dept` |
+| 2nd | `lookup_yp_dept` | `dropdown_dept_name` → `transfer_dept_name` → `'NO_DEPT'` | `lookup_yp_ministry` |
+| 3rd | `lookup_yp_ministry` | `selected_parent_name` → `fetched_ministry_name` → `org_channel` → `fetched_org_channel` → `'NO_MINISTRY'` | `yp_not_found` (raise ticket) |
+
+> This flow defines its own 3-tier lookup chain (org → dept → ministry/state/channel) rather than using the single-key `lookup_yp_contact` node from the shared `_yp_lookup` fragment.
 
 ### Response Fields Used
 
@@ -294,8 +319,44 @@ curl -X POST \
 
 | Condition | Outcome |
 |---|---|
-| YP/SPOC found | Display contact details; resolution complete |
-| YP/SPOC not found | Auto-raise a Zoho support ticket; notify user |
+| YP/SPOC found (any of the 3 lookups succeeds) | Display contact details; resolution complete |
+| All 3 lookups fail (`yp_not_found`) | Show a `ticket_confirm` summary and ask the user to confirm the details; on confirmation, silently raise a Zoho ticket (see below) and notify the user of the ticket ID |
+
+---
+
+## Ticket Creation (No MDO Admin / No YP-SPOC Found)
+
+> When neither an MDO Admin (Path A) nor a YP/SPOC contact (Path A or B) can be identified, the flow raises a Zoho Desk support ticket instead of leaving the user without a path forward.
+
+**Endpoint:** `POST /tickets` (integration: `zoho_desk_api`, imported via the shared `_zoho_ticket` fragment, params: `cf_category: profile`, `cf_sub_category: access_revoked`, `cf_flow_id: ACCESS_REVOKED`)
+
+### Flow
+
+1. `yp_not_found` (`ticket_confirm`) — shows the user a summary ("Access Revoked — No MDO/SPOC Contact Found", including the identified organization/ministry/state) and asks them to confirm.
+2. `raise_ticket_no_contact` (`transfer_llm`, `auto_raise: silent`) — an LLM drafts the ticket subject/description (including collected org/ministry/state/dept names and channel/root-org info) with `priority_override: P3`; no extra confirmation turn is shown to the user.
+3. `confirm_ticket` (`api_call`) — creates the ticket via `POST /tickets`.
+
+### Request Body (key fields)
+
+| Field | Value |
+|---|---|
+| `subject` | `[ITSM Support v2] - {{ ticket_draft.subject }}` |
+| `priority` | `{{ ticket_draft.priority }}` (P3, per `priority_override`) |
+| `cf.cf_category` / `cf.cf_sub_category` / `cf.cf_flow_id` | `profile` / `access_revoked` / `ACCESS_REVOKED` |
+| `cf.cf_llm_involved` | `"true"` |
+
+### Response Fields Used
+
+| Field | Mapped To | Used For |
+|---|---|---|
+| `$.ticketNumber` | `collected.ticket_id` | Displayed to the user as the ticket ID |
+
+### Decision After Ticket Creation
+
+| Condition | Outcome |
+|---|---|
+| Ticket created | Show "Ticket ID: #{{ ticket_id }}" confirmation message |
+| Ticket creation fails | Show technical-issue / retry-later message |
 
 ---
 
@@ -303,12 +364,15 @@ curl -X POST \
 
 | Step | Endpoint | Method | Auth Required | Caching | Purpose | Key Fields |
 |---|---|---|---|---|---|---|
-| 1 | `/api/private/user/v1/search` | POST | Yes | No | Fetch user profile + transfer request | `wfTransferRequest`, `wfId`, `rootOrgId` |
-| 2 | `/api/org/v1/search` | POST | Yes | No | Resolve org name from `rootOrgId` | `orgName` |
+| 1 | `/api/private/user/v1/search` | POST | Yes | No | Fetch user profile + transfer request | `wfTransferRequest`, `wfId`, `rootOrgId`, `profileDetails.profileStatus` |
+| 2 | `/api/org/v1/search` | POST | Yes | No | Resolve org details by `id` or `orgName` | `orgName`, `ministryOrStateName`, `channel`, `rootOrgId` |
 | 3 | `/api/private/user/v1/search` | POST | Yes | No | Find MDO Admin for target org | `mdo_admin_name`, `mdo_admin_email` |
 | 4a | `/api/org/hierarchy/ministry/search` | POST | Yes | 3600s | Fetch Central Ministry list | `id`, `channel` |
 | 4b | `/api/org/hierarchy/state/search` | POST | Yes | 3600s | Fetch State Government list | `id`, `channel` |
-| 5 | `/api/org/hierarchy/search` | POST | Yes | 3600s | Fetch departments/orgs under selected parent | `identifier`, `orgName` |
+| 5a | `/api/org/hierarchy/search` | POST | Yes | 3600s | Fetch orgs under selected ministry | `identifier`, `orgName` |
+| 5b | `/api/org/hierarchy/search` | POST | Yes | 3600s | Fetch departments under selected state | `identifier`, `orgName` |
+| 5c | `/api/org/hierarchy/search` | POST | Yes | 3600s | Fetch orgs under selected state department | `identifier`, `orgName` |
+| 6 | `/tickets` (Zoho Desk) | POST | Yes | No | Raise support ticket when no MDO/SPOC found | `ticketNumber` |
 
 ---
 

@@ -102,9 +102,10 @@ class TransferLLMNode(NodeHandler):
                     )
                     candidate = TicketDraft(**draft_dict)
                     if candidate.subject and candidate.description:
-                        # Carry over the template-built conversation trail — LLM doesn't return it
+                        # Carry over template-built fields the LLM doesn't return
                         draft = candidate.model_copy(update={
                             "conversation_trail": draft.conversation_trail,
+                            "key_facts_html": draft.key_facts_html,
                         })
                         llm_used = True
                 except Exception:  # noqa: BLE001
@@ -276,6 +277,41 @@ _READABLE_KEYS = {
 }
 
 
+def _build_key_facts_html(
+    collected: dict[str, Any],
+    key_facts: list[dict[str, Any]] | None,
+) -> str:
+    """Build an HTML <ul> of the fields a flow calls out via llm_directives.key_facts.
+
+    Surfaced first in the Zoho description (ahead of the prose summary) so the
+    support agent can note the flow's identifying fields at a glance, as real
+    bullet items rather than text folded into a paragraph.
+
+    Opt-in per flow — this node is shared across ~30 transfer_llm nodes, so
+    which fields matter (course/resource DO IDs, CAP name, etc.) is a per-flow
+    decision made in YAML, not something this shared node should assume.
+
+    llm_directives shape:
+        key_facts:
+          - { field: course_name, label: "Course Name" }
+          - { field: course_id,   label: "Course DO ID" }
+    """
+    if not key_facts:
+        return ""
+    items = []
+    for entry in key_facts:
+        field = entry.get("field")
+        label = entry.get("label") or field
+        value = collected.get(field)
+        if value is None or value == "":
+            continue
+        safe = str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        items.append(f"<li><b>{label}:</b> {safe}</li>")
+    if not items:
+        return ""
+    return "<ul>" + "".join(items) + "</ul>"
+
+
 def _build_template_draft(
     state: ConversationState,
     cfg: dict[str, Any],
@@ -288,10 +324,13 @@ def _build_template_draft(
     """
     collected = state.collected or {}
     priority = directives.get("priority_override", "P3")
+    key_facts = directives.get("key_facts")
 
-    # Fields to exclude from the summary body — either in the header table or internal routing
+    # Fields to exclude from the summary body — either in the header table,
+    # internal routing, or already surfaced up top by _build_key_facts_html
     _HEADER_FIELDS = {"email", "mobile", "first_name", "last_name", "user_id"}
     _SKIP_FIELDS   = {"category", "device_type", "youtube_restricted"}
+    _key_fact_fields = {e.get("field") for e in key_facts} if key_facts else set()
 
     field_items: list[tuple[str, Any]] = []
     for k, v in collected.items():
@@ -299,9 +338,9 @@ def _build_template_draft(
             continue
         if v is None or v == "" or v == [] or v == {}:
             continue
-        if k in _HEADER_FIELDS or k in _SKIP_FIELDS:
+        if k in _HEADER_FIELDS or k in _SKIP_FIELDS or k in _key_fact_fields:
             continue
-        
+
         val_str = str(v)
         if len(val_str) > 500:
             val_str = val_str[:500] + "... [truncated]"
@@ -339,6 +378,7 @@ def _build_template_draft(
         priority=priority,
         severity="Sev 3",
         conversation_trail=_build_conversation_trail(state),
+        key_facts_html=_build_key_facts_html(collected, key_facts),
     )
 
 

@@ -29,6 +29,10 @@
 #   [GAP-4] RESOLVED: Access Settings API userGroups criteria are now compared against
 #           the user's profileDetails.professionalDetails via the check_user_eligibility
 #           transform (criteriaKey "group", "designation", etc. matched field-by-field).
+#   [GAP-5] RESOLVED: composite_search no longer filters on primaryCategory. Filtering to
+#           ["Course", "Program"] silently excluded live content under other Karmayogi
+#           categories (e.g. "Curated Program"), causing real courses to never appear in
+#           results regardless of query match. Confirmed via manual API testing.
 # =============================================================================
 
 flow_id: FIND_COURSE
@@ -152,7 +156,7 @@ nodes:
       text: |
         **Profile Details Unavailable**
 
-        We're unable to fetch your profile details right now. Please try again in a little while.
+        We're having trouble processing your request right now. Please try again in a few moments.
     quick_replies:
       - { id: retry, label: "🔄 Try again" }
       - { id: done,  label: "✅ Exit" }
@@ -176,6 +180,10 @@ nodes:
   # Searches all statuses so DRAFT/REVIEW/RETIRED results surface with correct status message.
   # Also extracts secureSettings to detect moderated courses and evaluate metadata eligibility
   # in a single pass (avoids a separate round-trip later).
+  # NOTE: no primaryCategory filter — Karmayogi's taxonomy has more course-like categories
+  # than just "Course"/"Program" (e.g. "Curated Program"), and filtering on that field caused
+  # real, live courses to be excluded from results entirely. Confirmed via manual API testing
+  # that dropping the filter surfaces them. [GAP-5]
   - id: composite_search
     type: api_call
     integration: karmayogi
@@ -186,7 +194,6 @@ nodes:
         request:
           query: "{{ ctx.collected.search_term }}"
           filters:
-            primaryCategory: ["Course", "Program"]
             status: ["Live", "Review", "Draft", "Retired"]
           sort_by:
             createdOn: "desc"
@@ -290,7 +297,7 @@ nodes:
     type: resolution
     prompt:
       text: |
-        Good news — you're eligible for this moderated course.
+        You are eligible for this moderated course.
 
         📘 **Course Name:** {{ ctx.collected.course_name_found }}
 
@@ -358,14 +365,7 @@ nodes:
     action_button:
       label: "🔗 Open Course"
       url: "{{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.course_id }}/overview"
-    follow_up:
-      text: "Were you able to find and enroll in the course?"
-      quick_replies:
-        - { id: yes, label: "✅ Yes, found it" }
-        - { id: no,  label: "❌ No, still facing an issue" }
-    on_reply:
-      yes: satisfied
-      no:  ask_course_name
+    next: satisfied
 
   # ===========================================================================
   # STEP 10 — Multiple results: access check on top result
@@ -519,7 +519,6 @@ nodes:
 
         👤 **Name:** {{ ctx.collected.yp_name }}
         📧 **Email ID:** {{ ctx.collected.yp_email }}
-        📞 **Mobile:** {{ ctx.collected.yp_mobile }}
     steps: []
     next: satisfied
 
@@ -685,7 +684,7 @@ nodes:
         Please use the link below to access the event and proceed accordingly.
     steps: []
     action_button:
-      label: "🔗 Open Event"
+      label: "🔗 View Event"
       url: "{{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/event-hub/home/{{ ctx.collected.event_id }}"
     follow_up:
       text: "Were you able to find and join the event?"

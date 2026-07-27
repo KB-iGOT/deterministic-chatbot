@@ -30,6 +30,17 @@ For Use Cases 3 and 4, we extract specific fields from the root event item (usin
   - **Logic:** If the array is empty `[]`, it returns `False`. If it contains items, it returns `True`.
   - **Stored as:** `collected.certificate_issued`
 
+### Decision Logic — Use Case 3 (Progress Not Updating)
+No second API call is made for this use case; the branch runs directly off the fields extracted above.
+- If `time_spent_seconds < 600.0` → resolution message: event is still in progress, ask the user to complete it.
+- Otherwise (`>= 600.0`) → ticket confirmation → auto-raised ticket ("Event Progress Not Updating – Technical Issue").
+
+### Decision Logic — Use Case 4 (Certificate Not Generated)
+No second API call is made for this use case either.
+- If `time_spent_seconds < 600.0` → resolution message: event is still in progress.
+- Else if `certificate_issued == True` → resolution message with steps to download the certificate (portal already has it).
+- Otherwise (time met, no certificate) → ticket confirmation → auto-raised ticket ("Event Certificate Not Generated – Technical Issue").
+
 ---
 
 ## 2. Event Read API
@@ -44,16 +55,27 @@ Retrieves the configuration metadata for a specific event. Used to validate if t
 - **Event Duration (Use Case 1):**
   - **Path:** `$.event.duration`
   - **Stored as:** `collected.event_duration`
-  - **Validation Rule:** Checks if `collected.event_duration < 60.0`. If true, triggers a configuration issue technical ticket.
+  - **Validation Rule:** If `event_duration` is missing (null) **or** `< 60.0`, the flow treats it as a content configuration issue → ticket confirmation → auto-raised ticket ("Event Video Missing – Content Configuration Issue"). Otherwise (`>= 60.0`), the video is considered valid and the user is told to access/complete the event (no ticket).
 
 - **Registration Link (Use Case 2):**
   - **Path:** `$.event.registrationLink`
   - **Stored as:** `collected.registration_link`
   - **Validation Rule:** Extracted through the `is_youtube_embed_url` custom python transform (checks for `youtube.com/embed/` via regex).
   - **Stored as:** `collected.is_valid_youtube`
-  - **Logic:** If `registration_link` is missing or `is_valid_youtube` is False, triggers a configuration issue technical ticket.
+  - **Logic:**
+    - If `registration_link` is missing → ticket confirmation → auto-raised ticket ("Event Video Not Playing – Configuration Issue").
+    - Else if `is_valid_youtube` is `False` → same ticket confirmation/subject as above.
+    - Else (valid embed link) → the user is shown standard "clear cache / incognito / desktop mode" troubleshooting steps and asked if the issue persists. If it persists → a second ticket confirmation is raised ("Event Video Not Playing — Troubleshooting Failed"); if resolved, the flow ends with no ticket.
 
 ---
 
 ## Ticket Escalation
-If a technical issue or configuration error is detected, the flow initiates a standard Zoho service request ticket via the `_zoho_ticket` fragment. No engineering database logging is performed.
+If a technical issue or configuration error is detected, the user first sees a `ticket_confirm` summary node; on confirmation, a `transfer_llm` node (`auto_raise: silent`) drafts the ticket subject/description from `llm_directives` (per use case, e.g. "Event Video Missing – Content Configuration Issue — <event_name>") and hands off to the shared `_zoho_ticket` fragment, which does:
+
+**Endpoint:** `POST /tickets` (Zoho Desk integration)
+
+- Ticket fields set by the flow's fragment import parameters: `cf_category: event`, `cf_sub_category: event_related_issue`, `cf_flow_id: EVENT_RELATED_ISSUES`, `cf_llm_involved: true`.
+- Priority is fixed at `P3` for all four use cases (via `priority_override: P3` in each `llm_directives` block), consistent with the flow's `default_priority: P3`.
+- Response field used: `$.ticketNumber` → `collected.ticket_id` (shown to the user as the ticket confirmation number).
+
+No engineering database logging is performed.

@@ -593,7 +593,7 @@ nodes:
     type: resolution
     prompt:
       text: |
-        ✅ **Organization Found!**
+        ✅ **Organization Found**
 
         We found your organization in the system.
     steps:
@@ -660,11 +660,10 @@ nodes:
       text: |
         ✅ **SPOC Details Found**
 
-        Please get in touch with the concerned YP/SPOC using the details below:
+        Please contact the YP/SPOC below for further assistance:
 
         - **Name:** {{ ctx.collected.yp_name or "YP Contact" }}
         - **Email:** {{ ctx.collected.yp_email or "N/A" }}
-        - **Mobile:** {{ ctx.collected.yp_mobile or "N/A" }}
     steps:
       - "Coordinate with the SPOC for the creation of an MDO Leader/Admin."
       - "Request approval-related support for your transfer request."
@@ -676,11 +675,10 @@ nodes:
       text: |
         ✅ **SPOC Details Found**
 
-        Please get in touch with the concerned YP/SPOC using the details below:
+        Please contact the YP/SPOC below for further assistance:
 
         - **Name:** {{ ctx.collected.yp_name or "YP Contact" }}
         - **Email:** {{ ctx.collected.yp_email or "N/A" }}
-        - **Mobile:** {{ ctx.collected.yp_mobile or "N/A" }}
     steps:
       - "Connect with the shared SPOC using the details above."
       - "Request the creation of your organization."
@@ -735,7 +733,5 @@ nodes:
     type: message
     prompt:
       text: |
-        I'm sorry, I ran into a technical issue while checking your profile and can't proceed with the automated steps right now.
-
-        Please try again after some time — thank you for your patience.
+        We're having trouble processing your request right now. Please try again in a few moments.
     next: satisfied

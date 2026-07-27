@@ -343,7 +343,7 @@ nodes:
           (ctx.collected.profile_status or '').upper() == 'VERIFIED'
           or str(ctx.collected.profile_verified).lower() == 'true'
         then: show_profile_details
-    default: show_not_verified
+    default: ask_all_india_services_unverified
 
   # ===========================================================================
   # Step 3.3 — Inform user they are on iGOT / Karmayogi Prarambh Trainee
@@ -358,7 +358,6 @@ nodes:
 
         You'll need to raise a **Transfer Request** to move your profile to the correct department/organization. Once the transfer request is approved and your profile is mapped to the appropriate organization, the concerned authority will be able to assign the relevant training plans and courses.
 
-        We'll help you through the Transfer Request process.
     next: guide_transfer_request_apar
 
   # ===========================================================================
@@ -372,21 +371,22 @@ nodes:
 
         Follow the steps below to raise a Transfer Request and get mapped to your correct organization:
     steps:
-      - "**Step 1:** Log in to iGOT Karmayogi."
-      - "**Step 2:** Click on the **Profile Icon** (Top Right Corner)."
-      - "**Step 3:** Click on **View Profile**."
-      - "**Step 4:** Select **Make Transfer Request**."
-      - "**Step 5:** Select the **Correct Organization Name** from the dropdown."
-      - "**Step 6:** Choose your **Group** and **Designation** (if applicable)."
-      - "**Step 7:** Ensure all details are accurate and click **Submit**."
-      - "**Step 8:** Your request will be sent to the concerned MDO Admin for approval."
-      - "**Step 9:** Once approved, please recheck the APAR / Training Plan section on your profile."
+      - "Log in to iGOT Karmayogi."
+      - "Click on the **Profile Icon** (Top Right Corner)."
+      - "Click on **View Profile**."
+      - "Select **Make Transfer Request**."
+      - "Select the **Correct Organization Name** from the dropdown."
+      - "Choose your **Group** and **Designation** (if applicable)."
+      - "Ensure all details are accurate and click **Submit**."
+      - "Your request will be sent to the concerned MDO Admin for approval."
+      - "Once approved, please recheck the APAR / Training Plan section on your profile."
     next: satisfied
 
   # ===========================================================================
-  # SOP Section 7 — Profile NOT verified: show fetched details + notice
+  # SOP Section 7 + 7.1 — Profile NOT verified: show notice + ask AIS eligibility
+  # (single response — no separate lead-in message)
   # ===========================================================================
-  - id: show_not_verified
+  - id: ask_all_india_services_unverified
     type: message
     prompt:
       text: |
@@ -394,14 +394,6 @@ nodes:
 
         APAR training plans are assigned only after your profile is verified.
 
-        Let me check a few more details to help you further.
-    next: ask_all_india_services_unverified
-
-  # SOP Step 7.1 — Ask All India Services eligibility (not-verified path)
-  - id: ask_all_india_services_unverified
-    type: message
-    prompt:
-      text: |
         Could you confirm whether you belong to any of the All India Services, such as:
 
         - IAS
@@ -426,7 +418,7 @@ nodes:
     steps:
       - "Log in to **iGOT Karmayogi**."
       - "Click on **View Profile** from the top-right menu."
-      - "Navigate to **Primary Details** and click the ✏️ **Edit (pen) icon**."
+      - "Navigate to **Primary Details** and click the ✏️ **Edit icon**."
       - "Update the correct **Group**, **Designation**, and **Ministry / Department**."
       - "Click **Send for Approval** to submit the changes."
       - "The request will be sent to your **MDO Admin** for approval."
@@ -493,14 +485,14 @@ nodes:
 
         To correct your organization mapping, please raise a Transfer Request:
     steps:
-      - "**Step 1:** Log in to iGOT Karmayogi."
-      - "**Step 2:** Click on the **Profile Icon** (Top Right Corner)."
-      - "**Step 3:** Click on **View Profile**."
-      - "**Step 4:** Select **Make Transfer Request**."
-      - "**Step 5:** Select the **Correct Organization Name** from the dropdown."
-      - "**Step 6:** Choose your **Group** and **Designation** (if applicable)."
-      - "**Step 7:** Ensure all details are accurate and click **Submit**."
-      - "**Step 8:** Once approved, kindly recheck the APAR / Training Plan section on your profile."
+      - "Log in to iGOT Karmayogi."
+      - "Click on the **Profile Icon** (Top Right Corner)."
+      - "Click on **View Profile**."
+      - "Select **Make Transfer Request**."
+      - "Select the **Correct Organization Name** from the dropdown."
+      - "Choose your **Group** and **Designation** (if applicable)."
+      - "Ensure all details are accurate and click **Submit**."
+      - "Once approved, kindly recheck the APAR / Training Plan section on your profile."
     next: satisfied
 
   # SOP Step 6.2b — Designation incorrect → Designation Update guide
@@ -514,7 +506,7 @@ nodes:
     steps:
       - "Log in to **iGOT Karmayogi**."
       - "Click on **View Profile** from the top-right menu."
-      - "Navigate to **Primary Details** and click the ✏️ **Edit (pen) icon**."
+      - "Navigate to **Primary Details** and click the ✏️ **Edit icon**."
       - "Update the correct **Designation**."
       - "Click **Send for Approval** to submit the changes."
       - "The request will be sent to your **MDO Admin** for approval."
@@ -532,7 +524,7 @@ nodes:
     steps:
       - "Log in to **iGOT Karmayogi**."
       - "Click on **View Profile** from the top-right menu."
-      - "Navigate to **Primary Details** and click the ✏️ **Edit (pen) icon**."
+      - "Navigate to **Primary Details** and click the ✏️ **Edit icon**."
       - "Update the correct **Group** and any other required details."
       - "Click **Send for Approval** to submit the changes."
       - "The request will be sent to your **MDO Admin** for approval."
@@ -591,8 +583,6 @@ nodes:
 
         
 
-        Thank you,
-        **Karmayogi Bharat Support Team**
     next: satisfied
 
   # ===========================================================================
@@ -629,6 +619,7 @@ nodes:
         {% endif %}
 
         - **Name:** {{ ctx.collected.mdo_admin_name }}
+
         - **Email ID:** {{ ctx.collected.mdo_admin_email}}
     next: satisfied
 
@@ -649,10 +640,8 @@ nodes:
         {% endif %}
 
         - **Name:** {{ ctx.collected.yp_name}}
+
         - **Email ID:** {{ ctx.collected.yp_email}}
-        {%- if ctx.collected.yp_mobile %}
-        - **Mobile:** {{ ctx.collected.yp_mobile }}
-        {%- endif %}
     next: satisfied
 
   - id: yp_not_found
@@ -721,9 +710,7 @@ nodes:
     type: message
     prompt:
       text: |
-        I'm sorry, I ran into a technical issue while fetching your profile details.
-
-        Please try again after some time — thank you for your patience.
+        We're having trouble processing your request right now. Please try again in a few moments.
     next: satisfied
 
 

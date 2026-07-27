@@ -221,7 +221,7 @@ nodes:
 
         Please contact your **MDO Leader** for further clarification and to request domain addition:
 
-        👤 **{{ ctx.collected.mdo_leader_name or ctx.collected.mdo_leader_name_fallback }} {{ ctx.collected.mdo_leader_surname or '' }}**
+        👤 **{{ ctx.collected.mdo_leader_name or ctx.collected.mdo_leader_name_fallback }}{{ (' ' ~ ctx.collected.mdo_leader_surname) if ctx.collected.mdo_leader_surname else '' }}**
         📧 {{ ctx.collected.mdo_leader_email or ctx.collected.mdo_leader_email_fallback }}
     next: satisfied
 
@@ -398,9 +398,9 @@ nodes:
     type: message
     prompt:
       text: |
-        The **{{ ctx.collected.new_identifier }}** you provided is already the active {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} on your current account!
+        The **{{ ctx.collected.new_identifier }}** you provided is already the active {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} on your current account.
 
-        Would you like to try entering a different {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }}, or are you all set?
+        Would you like to try entering a different {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }}, or would you like to proceed?
     quick_replies:
       - { id: new, label: "🔄 Try another identifier" }
       - { id: resolved, label: "✅ All good, I'm done" }
@@ -422,7 +422,7 @@ nodes:
 
         1. Go to **View Profile**
         2. Open **Other Details**
-        3. Click the ✏️ **Edit (Pen) Icon** next to the {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} field
+        3. Click the ✏️ **Edit icon** next to the {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }} field
         4. Enter the new {{ 'Email ID' if ctx.collected.update_type == 'EMAIL' else 'Mobile Number' }}
         5. Click **Request OTP**
         6. Enter the OTP received
@@ -511,7 +511,7 @@ nodes:
       text: |
         If you're not receiving the OTP, please connect with the contact below for further assistance:
 
-        👤 **{{ ctx.collected.mdo_leader_name or ctx.collected.mdo_leader_name_fallback }} {{ ctx.collected.mdo_leader_surname or '' }}**
+        👤 **{{ ctx.collected.mdo_leader_name or ctx.collected.mdo_leader_name_fallback }}{{ (' ' ~ ctx.collected.mdo_leader_surname) if ctx.collected.mdo_leader_surname else '' }}**
         📧 {{ ctx.collected.mdo_leader_email or ctx.collected.mdo_leader_email_fallback }}
     next: satisfied
 
@@ -607,7 +607,7 @@ nodes:
     type: message
     prompt:
       text: |
-        No problem. Let's start over.
+        Understood. Let us start over.
 
         Please share the **Email ID or Mobile Number** you wish to update.
     next: ask_identifier_type

@@ -15,7 +15,7 @@
 #
 # APIs used:
 #   POST /api/course/private/v4/user/enrollment/list/{user_id}
-#   POST /api/content/v1/search
+#   POST /api/composite/v4/search
 #   GET  /api/user/private/v1/read/{user_id}
 #   PATCH /api/user/private/v1/update
 # =============================================================================
@@ -67,7 +67,7 @@ imports:
       field_prefix:  "c1_"
       next:          c1_read_course_content
       on_empty:      no_courses_found_cert
-      empty_message: 'You do not have any enrolled courses or programs with In-Progress or Completed status.\n\nPlease enrol in a course on the iGOT Karmayogi portal and try again.'
+      empty_message: 'You do not have any enrolled courses or programs.\n\nPlease enrol in a course on the iGOT Karmayogi portal and try again.'
 
 nodes:
 
@@ -77,7 +77,7 @@ nodes:
   - id: ask_certificate_issue
     type: message
     prompt:
-      text:  "What's the issue with your certificate?"
+      text:  "Please select the issue you are experiencing with your certificate:"
       voice: "Tell me what's wrong with your certificate. Press 1 or 2."
     quick_replies:
       - { id: C1, label: "Certificate not generated / not received", icon: "🎓" }
@@ -158,6 +158,9 @@ nodes:
         4. Expand each module (click the **+** icon)
         5. Complete all items without a blue tick mark
         6. Once all modules show a blue tick, the certificate generates within 24 hours
+    action_button:
+      label: "🔗 View Course"
+      url: "{{ env.KARMAYOGI_PORTAL_BASE_URL }}/app/toc/{{ ctx.collected.c1_course_id }}/overview"
     next: satisfied
 
   # Course completed — check timing
@@ -298,7 +301,9 @@ nodes:
         The course/program has been completed and more than 24 hours have passed, but the certificate has not been issued yet. You would like us to investigate and issue the certificate.
 
         • **Course Name:** {{ ctx.collected.c1_course_name }}
+
         • **Registered Email ID:** {{ ctx.collected.email }}
+
         • **Mobile Number:** {{ ctx.collected.mobile }}
 
         Please review the details above and confirm whether they are correct.
@@ -345,7 +350,7 @@ nodes:
     integration: karmayogi
     request:
       method: POST
-      url: "/api/content/v1/search"
+      url: "/api/composite/v4/search"
       body:
         request:
           filters:
@@ -365,10 +370,59 @@ nodes:
       - { from: "$.content[0].name",     to: collected.c1_incomplete_resource_name }
       - { from: "$.content[*].name",     to: collected.c1_incomplete_resource_names }
       - { from: "$.content[*].mimeType", to: collected.c1_has_scorm, transform: detect_scorm }
-    on_success: c1_branch_scorm
+      # Fallback support — identify which c1_incomplete_ids the composite
+      # search did NOT return (e.g. Draft/Retired edge cases, or partial
+      # results). c1_branch_on_missing_resource_names routes these to a
+      # one-by-one content/v1/read lookup so their names still reach the user.
+      - { from: "$.content[*].identifier", to: collected.c1_missing_resource_ids,
+          transform: diff_missing_resource_ids, transform_ctx_key: collected.c1_incomplete_ids }
+    on_success: c1_branch_on_missing_resource_names
+    # Composite search failed outright (HTTP-level error) — c1_missing_resource_ids
+    # was never set by response_mapping, so c1_fetch_resource_name_fallback's
+    # inline fallback (see below) falls through to the FULL c1_incomplete_ids list.
     on_error:
-      any: c1_branch_in_progress
+      any: c1_fetch_resource_name_fallback
     timeout_ms: 8000
+
+  # ---------------------------------------------------------------------------
+  # Composite Search Name Fallback (same pattern as mode_b_course_progress_issue.yaml
+  # / mode_b_resource_not_opening.yaml) — fetch names individually for any
+  # incomplete resource composite search missed, via content/v1/read.
+  # ---------------------------------------------------------------------------
+  - id: c1_branch_on_missing_resource_names
+    type: branch
+    rules:
+      - { if: "len(ctx.collected.c1_missing_resource_ids or []) > 0",
+          then: c1_fetch_resource_name_fallback }
+    default: c1_branch_scorm
+
+  - id: c1_fetch_resource_name_fallback
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      # c1_missing_resource_ids is set only when composite search succeeded but
+      # missed some IDs; if composite search failed outright it's unset/None,
+      # so the fallback covers every incomplete_id instead.
+      url: "/api/content/v1/read/{{ (ctx.collected.c1_missing_resource_ids if ctx.collected.c1_missing_resource_ids else ctx.collected.c1_incomplete_ids)[ctx.counters.c1_missing_name_idx] }}"
+    response_mapping:
+      - { from: "$.content.name", to: collected.c1_incomplete_resource_names,
+          transform: append_resource_name_to_list, transform_ctx_key: collected.c1_incomplete_resource_names }
+      - { from: "$.content.name", to: collected.c1_incomplete_resource_name,
+          transform: set_first_resource_name, transform_ctx_key: collected.c1_incomplete_resource_name }
+    on_success: c1_loop_missing_resource_names
+    on_error:
+      # Skip on error and still advance the loop so remaining IDs are checked.
+      any: c1_loop_missing_resource_names
+    timeout_ms: 8000
+
+  - id: c1_loop_missing_resource_names
+    type: increment_and_branch
+    counter: c1_missing_name_idx
+    rules:
+      - { if: "ctx.counters.c1_missing_name_idx < len(ctx.collected.c1_missing_resource_ids if ctx.collected.c1_missing_resource_ids else ctx.collected.c1_incomplete_ids)",
+          then: c1_fetch_resource_name_fallback }
+    default: c1_branch_scorm
 
   - id: c1_branch_scorm
     type: branch
@@ -506,9 +560,7 @@ nodes:
       url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
     response_mapping:
       - { from: "$.response.firstName",                                 to: collected.c3_first_name }
-      - { from: "$.response.lastName",                                  to: collected.c3_last_name }
       - { from: "$.response.profileDetails.personalDetails.firstname",  to: collected.c3_pd_firstname }
-      - { from: "$.response.profileDetails.personalDetails.surname",    to: collected.c3_pd_surname }
     on_success: c3_confirm_name
     on_error:
       any: resolution_generic
@@ -521,7 +573,7 @@ nodes:
       text: |
         We checked, and found that your current profile name is:
 
-        Name: **{{ ctx.collected.c3_first_name or ctx.collected.c3_pd_firstname }} {{ ctx.collected.c3_last_name or ctx.collected.c3_pd_surname }}**
+        Name: **{{ ctx.collected.c3_first_name or ctx.collected.c3_pd_firstname }}**
 
         Could you confirm whether this name is correct?
     quick_replies:
@@ -602,7 +654,7 @@ nodes:
     type: message
     prompt:
       text: |
-        No problem.
+        Understood.
 
         If you decide to update your profile name in the future, you can follow the steps below and re-download the certificate.
 
@@ -626,7 +678,7 @@ nodes:
   - id: resolution_generic
     type: resolution
     prompt:
-      text: "Let me give you some general guidance for certificate issues:"
+      text: "Here is some general guidance for certificate issues:"
     steps:
       - "Log out of iGOT and log back in."
       - "Try using a different browser or clearing your browser cache."
@@ -676,7 +728,7 @@ nodes:
     type: message
     prompt:
       text: |
-        You do not have any enrolled courses or programs with In-Progress or Completed status.
+        You do not have any enrolled courses or programs.
 
-        Please enrol in a course on the iGOT Karmayogi portal and try again.
+        Please enroll in a course on the iGOT Karmayogi portal and try again.
     next: satisfied

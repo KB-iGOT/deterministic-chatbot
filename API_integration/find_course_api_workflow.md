@@ -123,7 +123,6 @@ curl -X POST \
     "request": {
       "query": "<user_search_term>",
       "filters": {
-        "primaryCategory": ["Course", "Program"],
         "status": ["Live", "Review", "Draft", "Retired"]
       },
       "sort_by": { "createdOn": "desc" },
@@ -131,6 +130,12 @@ curl -X POST \
     }
   }'
 ```
+
+> **No `primaryCategory` filter.** Karmayogi's content taxonomy has more course-like
+> categories than just `"Course"`/`"Program"` (e.g. `"Curated Program"`). Filtering on
+> `primaryCategory: ["Course", "Program"]` silently excluded live courses under those
+> other categories from results, regardless of query match. Confirmed via manual API
+> testing that dropping the filter surfaces them correctly (see GAP-5).
 
 ### Response Fields Used
 
@@ -289,6 +294,31 @@ Supported `criteriaKey` values and their source in the user profile:
 
 ---
 
+## PATH B — Step 10: Access Settings Read (Multiple Non-Moderated Results)
+
+> When `composite_search` returns `count > 1` for a non-moderated course (no `secureSettings`),
+> the flow does **not** loop over every result — it runs the same access-settings eligibility
+> check against only the top result (`content[0]`), same as Step 3, using a separate node
+> (`fetch_access_settings_multi`) so it doesn't interfere with the single-result flow's state.
+
+**Endpoint:** `GET /api/accessSettings/read/{course_id}` — identical endpoint/headers/transform to Step 3.
+
+**Response Fields Used:** `result.accessControl.userGroups` → `collected.access_control_eligible` (via `check_user_eligibility`, same transform_ctx as Step 3).
+
+### Decision After Step 10
+
+| Condition | Outcome |
+|---|---|
+| API returns 404 / error | No access config — treat as public; show top course as recommendation |
+| `access_control_eligible == True` | Show top course as recommendation, with a follow-up asking if this was the right course (options: "Yes, found it" → close, or "Search with a different name" → re-ask course name) |
+| `access_control_eligible == False` | User does not meet criteria — proceed to MDO lookup (Step 4) |
+
+> **[GAP-2]** SOP §10 requires an eligibility check across *every* matching result. Only the
+> top result (`content[0]`) is checked; if it's the wrong course, the user can restart the
+> search with a more specific name via the follow-up quick reply.
+
+---
+
 ## PATH B — Step 4: MDO Admin Lookup
 
 > Looks up the MDO_ADMIN for the user's organization to provide escalation contact.
@@ -374,7 +404,7 @@ curl -X POST \
         "status": ["Live", "Review", "Draft", "Retired"]
       },
       "sort_by": { "createdOn": "desc" },
-      "limit": 10
+      "limit": 50
     }
   }'
 ```
@@ -405,6 +435,11 @@ curl -X GET \
 
 Same `check_user_eligibility` transform (ctx: `collected.user_eligibility_ctx`) and branching logic applies.
 
+> **Note:** Unlike the course path, the eligible-event link does **not** use the `/app/toc/{id}/overview`
+> pattern. It uses `{KARMAYOGI_PORTAL_BASE_URL}/app/event-hub/home/{event_id}` (see GAP-3). The
+> "View Event" resolution also has a follow-up ("Were you able to find and join the event?") —
+> "No" re-prompts for the event name (`ask_event_name`) instead of closing.
+
 ---
 
 ## Known Gaps
@@ -413,5 +448,6 @@ Same `check_user_eligibility` transform (ctx: `collected.user_eligibility_ctx`) 
 |---|---|
 | GAP-1 | SOP §4.2 requires semantic ≥90% similarity match. Approximated with keyword search via `query` field. No embedding/vector similarity in YAML. |
 | GAP-2 | SOP §10 requires per-course eligibility loop for multiple results. Only top result is processed; user is prompted to refine search if needed. |
-| GAP-3 | Course/event hyperlink URL pattern not confirmed. Placeholder used: `https://portal.karmayogibharat.net/app/toc/{id}/overview` |
+| GAP-3 | Hyperlink URL patterns not confirmed by API team. Two different placeholders are used depending on content type: **course** → `{KARMAYOGI_PORTAL_BASE_URL}/app/toc/{course_id}/overview`; **event** → `{KARMAYOGI_PORTAL_BASE_URL}/app/event-hub/home/{event_id}` (note: NOT the same `/app/toc/...` pattern as courses). Base URL is env-configured (`KARMAYOGI_PORTAL_BASE_URL`), e.g. `https://portal.uat.karmayogibharat.net` in UAT. |
 | GAP-4 | **RESOLVED** — Access Settings `result.accessControl.userGroups[].userGroupCriteriaList[]` criteria are now compared field-by-field against the user's `profileDetails.professionalDetails` via the `check_user_eligibility` transform. |
+| GAP-5 | **RESOLVED** — `primaryCategory` filter removed from composite search. Filtering to `["Course", "Program"]` silently excluded live content under other Karmayogi categories (e.g. `"Curated Program"`), so real courses never appeared in results regardless of query match. |

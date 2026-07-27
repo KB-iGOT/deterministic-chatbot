@@ -123,9 +123,13 @@ Extracts status for a specific `course_id` by looking for `operation_type == "CO
 | `acbp` | `addinfo.ACBP` | Identifies if the course is part of a Training Plan |
 | `has_assessment` | `addinfo.ASSESSMENT` | Identifies if the course has an assessment |
 | `completion_points` | `points` on completion entry | The actual points credited for completion |
+| `rating_points` | `points` on rating entry | The actual points credited for rating |
+| `course_name` | `addinfo.COURSENAME` (completion, else rating) | Used to display the course name in tickets/messages |
+
+Matching is done on `entry.context_id == course_id` (string-compared).
 
 #### 2. `kp_monthly_rank` (Course Context)
-Counts how many courses were completed in the same calendar month *before or at the same time* as the selected course. Used to enforce the **monthly karma limit** (only the first 4 completed courses in a month get points).
+Counts how many `COURSE_COMPLETION` entries (matched by `context_id`) fall in the same UTC calendar month, ranked by `credit_date`, *up to and including* the selected course. Used to enforce the **monthly karma limit** (only the first 4 completed courses in a month get points). Returns `0` if no matching completion entry is found for the course.
 
 #### 3. `kp_event_credited` (Event Context)
 Scans `kpList` for any entry matching the `event_id` to determine if karma points were credited for event participation.
@@ -136,12 +140,45 @@ Scans `kpList` for any entry matching the `event_id` to determine if karma point
 
 After data is fetched and transformed, the chatbot evaluates:
 
-### Course Logic
-- **Training Plan (ACBP = True):** Bypasses the monthly limit. If points are missing or incorrect (should be 15 with assessment, 10 without), a support ticket is raised.
-- **Standard Course (ACBP = False):** Subject to the monthly limit. If `monthly_rank >= 5`, informs the user of the 4-course limit. Otherwise, if points are missing or not 5, raises a ticket.
+### Course Logic — "Course Karma Points Not Credited"
+
+This branch only checks whether completion/rating credit is **present or missing** — it does
+**not** check the specific point value (that check belongs to the "Incorrect Karma Points"
+branch below).
+
+- **Both `completion_credited` and `rating_credited` = True:** Already credited — informs the user and closes.
+- **Neither credited (`kp_status_by_id` is `None`, or both flags False):** Raised as a discrepancy and a support ticket is created directly — the ACBP / monthly-limit checks below are **not** evaluated in this case.
+- **Exactly one of completion/rating credited (partial credit):** Checks the `acbp` flag:
+  - **`acbp = True` (Training Plan):** Bypasses the monthly limit entirely — a support ticket is raised immediately (no point-value check).
+  - **`acbp = False` (Standard course):** Subject to the monthly limit — if `kp_monthly_rank >= 5`, informs the user of the 4-course monthly limit (no ticket); otherwise raises a support ticket for the discrepancy.
+
+### Incorrect Points Logic — "Received Fewer/More Points Than Expected"
+
+This branch (separate from the one above) checks the actual `completion_points` value against
+what is expected, based on `acbp` and `has_assessment`:
+
+| Condition | Expected Points | Outcome if mismatched |
+|---|---|---|
+| `acbp = True`, `has_assessment = True` | 15 | Support ticket raised |
+| `acbp = True`, `has_assessment = False` | 10 | Support ticket raised |
+| `acbp = False` | 5 | **No ticket** — informs the user of the 4-course monthly limit (mismatch is assumed to be due to the monthly cap) |
+| Points match expectation | — | Informs the user the points are correct; no ticket |
 
 ### Event Logic
-- **4-Hour Live Rule Check:** Compares `completedOn` and `startDateTimeInEpoch`. If the difference is > 4 hours, it's considered non-live participation and no points are awarded. If ≤ 4 hours, it checks `kp_event_credited` and raises a ticket if missing.
+- **4-Hour Live Rule Check:** Compares `completedOn` and `startDateTimeInEpoch` (via `hours_since()` on each). If the gap is > 4 hours, it's considered non-live participation and no points are awarded (no ticket). If the event's start time is unavailable, this check is skipped entirely and the flow proceeds straight to the credited check.
+- **Credited Check:** If ≤ 4 hours (or start time unknown), checks `kp_event_credited` — if already `True`, informs the user it's already credited; if `False`, raises a support ticket for the discrepancy.
+
+---
+
+## Ticket Escalation
+
+Every discrepancy branch above (course not-credited, event not-credited, incorrect points —
+except the `acbp = False` "expected 5" mismatch, which is informational only) routes through the
+shared `_zoho_ticket` fragment: `ticket_confirm` (user confirms details) → `transfer_llm`
+(auto-raises the ticket, `auto_raise: silent`, using an LLM-drafted subject/description) →
+`confirm_ticket`, which performs `POST /tickets` against the ZohoDesk API. This flow imports the
+fragment with `cf_category: platform`, `cf_sub_category: karma_points`, `cf_flow_id:
+KARMA_POINTS_ISSUE` — these are set as custom fields (`cf`) on the created ticket.
 
 ---
 
@@ -149,6 +186,11 @@ After data is fetched and transformed, the chatbot evaluates:
 
 | Step | Endpoint | Method | Context | Key Data Extracted |
 |---|---|---|---|---|
-| 1 | `/api/course/private/v4/user/enrollment/list/{user_id}` | POST | Course Selection | Completed course details |
+| 1 | `/api/course/private/v4/user/enrollment/list/{user_id}` | POST | Course Selection (Not Credited & Incorrect Points branches) | Completed course details |
 | 1 | `/api/user/private/v1/events/list/{user_id}` | GET | Event Selection | Completed event details & start time |
 | 2 | `/api/karmapoints/read` | POST | Karma Checking | Karma history, ACBP flag, credited points |
+| 3 | `/tickets` (ZohoDesk, via `_zoho_ticket` fragment) | POST | Ticket Escalation | Raises a support ticket for confirmed discrepancies |
+
+> Three additional entry points from the initial menu — **Leaderboard vs Overall Mismatch**,
+> **Learner Pathway Points**, and **Course Added to Training Plan After Completion** — are static
+> informational messages with no API calls, and are intentionally not covered above.

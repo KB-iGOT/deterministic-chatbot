@@ -603,5 +603,5 @@ nodes:
     type: message
     prompt:
       text: |
-        I'm unable to retrieve your activity data right now. Please try again in a few minutes.
+        We're having trouble processing your request right now. Please try again in a few moments.
     next: satisfied

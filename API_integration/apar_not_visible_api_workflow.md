@@ -10,7 +10,7 @@
 STEP 1   → POST /api/private/user/v1/search
                 ↓ Fetch user profile (id, rootOrgId, channel, org, profileStatus)
                 ↓
-           user NOT found → stop; show support email
+           user NOT found → stop; apologize and ask user to try again later (no ticket, no support email shown)
            org == iGOT / Prarambh → redirect to Transfer Request guide
 
 STEP 2   → GET  /api/supportportal/cbplan/v2/admin/user/list/{userId}
@@ -36,6 +36,10 @@ STEP 4   → POST /api/private/user/v1/search                 (MDO Admin lookup)
                 ↓
            MDO found     → share contact details
            MDO NOT found → YP/SPOC data lookup fallback
+                                ↓
+                           YP/SPOC found     → share contact details
+                           YP/SPOC NOT found → offer to raise a Zoho support ticket
+                                                (POST /tickets, category=course/apar_not_visible, P3)
 
 EC1      → POST /api/course/private/v4/user/enrollment/list/{userId}
                 ↓ Edge Case 1: specific course missing — check enrollment & completion
@@ -86,7 +90,7 @@ curl -X POST \
 
 | Condition | Outcome |
 |---|---|
-| `user_found_count == 0` or `fetched_user_id == null` | User not found; show support email; stop |
+| `user_found_count == 0` or `fetched_user_id == null` | User not found; apologize and stop (no support email is displayed, no ticket raised) |
 | `org_channel == "igot"` or `org_name` contains "prarambh" | Wrong org; guide to raise Transfer Request |
 | Default | Proceed to Step 2 |
 
@@ -157,17 +161,28 @@ curl -X POST \
 
 | Field | Mapped To | Used For |
 |---|---|---|
-| `courses` | `collected.all_enrollment_list` | Matched against `contentList[].identifier` to derive per-course status |
+| `courses` | `collected.all_enrollment_list` | Raw enrollment list (not directly displayed) |
+| `courses` (transform: `nested_apar_courses`) | `collected.apar_picker_list` | Picker options for the APAR course list (grouped by Plan) |
+| `courses` (transform: `nested_non_apar_courses`) | `collected.non_apar_picker_list` | Picker options for the Non-APAR course list (grouped by Plan) |
 
-### Status Calculation Logic (applied in display templates)
+> Both transforms take `courses` (this enrollment response) plus the already-fetched `collected.all_courses` (Step 2 plan content) as input.
 
-| Enrollment `status` | Derived Display Status |
+### Status Calculation Logic (applied by the `nested_apar_courses` / `nested_non_apar_courses` transforms)
+
+> **Note:** an older `flatten_apar_courses` / `flatten_non_apar_courses` transform pair (percentage-based "Incomplete (X%)" status using `progress` / `leafNodesCount`) exists in the codebase but is **not referenced by this flow** — do not rely on it for current behavior.
+
+The two Plans (one per `isApar` value) from Step 2's `all_courses` are grouped into a picker list of `"Plan 1"`, `"Plan 2"`, … entries — sorted ascending by the Plan's `endDate` (nearest due date first; Plans with no parseable `endDate` sort last) — each with a `children` array of its individual courses:
+
+| Enrollment `status` (matched by `contentList[].identifier` == enrollment `courseId`) | Derived Display Status |
 |---|---|
-| `2` or `"Completed"` | `Completed` |
-| `1` or `"In-Progress"` | `Incomplete (X%)` — calculated as `(progress / leafNodesCount) * 100` |
-| Not enrolled | `Not Started` |
+| `2` | `Completed` |
+| `1` | `In Progress` |
+| Not enrolled / no match | `Not Started` |
 
-> If `leafNodesCount == 0`, treat as `1` to avoid division by zero. Cap percentage at 100.
+- Each Plan's `combinedMeta` shown in the picker is `"Ends: DD/MM/YYYY"` (or blank if no parseable `endDate`).
+- Each course's `courseId` / `courseName` come straight from `contentList[].identifier` / `contentList[].name`.
+- **Cross-category exclusion:** if the same course `identifier` appears in a Plan of the *opposite* `isApar` value, it is excluded from both the APAR and Non-APAR picker lists (the portal doesn't surface such a course as either category).
+- Plans that end up with zero qualifying courses are dropped from the picker entirely (and do not consume a "Plan N" number).
 
 ### Decision After Step 2b
 
@@ -187,7 +202,7 @@ curl -X GET \
   -H "Authorization: Bearer {{KARMAYOGI_API_KEY}}"
 ```
 
-> Timeout: **5000 ms**. On API error, escalate to offer-ticket node.
+> Timeout: **5000 ms**. On API error, show a static "couldn't verify your organization / MDO details" message advising the user to contact their MDO Admin directly, and end — **no ticket is offered** on this error path.
 
 ### Response Fields Used
 
@@ -212,6 +227,8 @@ curl -X GET \
 | `org_channel == "igot"` or `org_name` contains "prarambh" | Wrong org; guide Transfer Request |
 | `profile_status == "VERIFIED"` or `profile_verified == true` | Profile verified; show details for user confirmation → Step 4 |
 | Default | Profile not verified; guide profile verification (SOP §7) |
+
+> **Note:** the "verified" path does not go straight to Step 4. After the user confirms their org/designation/group, they're asked an All India Services (AIS) eligibility question. If AIS and any of `cadre_details` / `service_details` / `batch_details` / `central_deputation` (all fetched in this step) is missing, the user is told to complete those profile fields instead of proceeding to Step 4. Only when AIS is "no", or AIS is "yes" with all four fields present, does the flow proceed to the Step 4 MDO Admin lookup.
 
 ---
 
@@ -349,7 +366,27 @@ curl -X GET \
 | Condition | Outcome |
 |---|---|
 | YP/SPOC found | Display contact details; resolution complete |
-| YP/SPOC not found | Show generic helpdesk message; resolution complete |
+| YP/SPOC not found | Offer to raise a Zoho support ticket (see below) — **not** a generic helpdesk message |
+
+---
+
+## Ticket Creation — No MDO Admin AND No YP/SPOC Found
+
+> Reached only when both the MDO Admin lookup (Step 4) and the YP/SPOC data lookup return nothing. The user is asked to confirm before a ticket is raised; declining ends the conversation with no ticket.
+
+**Endpoint:** `POST /tickets` (integration: `zoho_desk_api`, via the shared `_zoho_ticket` fragment)
+
+- Ticket is generated by an LLM step (`transfer_llm`, `auto_raise: silent`) with directives: subject `"Training Plan / APAR Not Visible — No Admin or YP Contact Found"`, description including the user's organization/channel and noting neither contact could be found, `priority_override: P3`.
+- Custom fields set via the flow's `_zoho_ticket` import parameters: `cf_category: course`, `cf_sub_category: apar_not_visible`, `cf_flow_id: APAR_NOT_VISIBLE`.
+- On success: `$.ticketNumber` → `collected.ticket_id`; user is shown the ticket number. On failure: generic "couldn't raise the ticket" message.
+
+### Decision
+
+| Condition | Outcome |
+|---|---|
+| User confirms ticket creation | Raise Zoho ticket; show ticket ID |
+| User declines | End conversation; no ticket raised |
+| Ticket API fails | Show failure message; end |
 
 ---
 
@@ -359,11 +396,12 @@ curl -X GET \
 |---|---|---|---|---|---|---|
 | 1 | `/api/private/user/v1/search` | POST | Yes | — | Fetch user profile + org context | `id`, `rootOrgId`, `channel`, `profileStatus` |
 | 2 | `/api/supportportal/cbplan/v2/admin/user/list/{userId}` | GET | Yes | `x-authenticated-user-orgid: igot` | Fetch CBP training plan | `count`, `content[].isApar`, `contentList` |
-| 2b | `/api/course/private/v4/user/enrollment/list/{userId}` | POST | Yes | — | Fetch enrollments for status calculation | `courses[].courseId`, `status`, `progress` |
+| 2b | `/api/course/private/v4/user/enrollment/list/{userId}` | POST | Yes | — | Fetch enrollments for status calculation | `courses[].courseId`, `status` |
 | 3 | `/api/user/private/v1/read/{userId}` | GET | Yes | — | Fetch extended profile for no-plan diagnosis | `designation`, `group`, `verifiedKarmayogi`, cadre/service fields |
 | 4 | `/api/private/user/v1/search` | POST | Yes | — | MDO Admin lookup | `mdo_admin_name`, `mdo_admin_email` |
 | EC1 | `/api/course/private/v4/user/enrollment/list/{userId}` | POST | Yes | — | Check completion of specific course | `courses[].courseName`, `status`, `completionPercentage` |
 | EC2 | `/api/user/private/v1/read/{userId}` | GET | Yes | — | Re-fetch designation/group for EC2 profile confirm | `designation`, `group` |
+| Ticket | `/tickets` (zoho_desk_api) | POST | Yes | — | Raise support ticket when neither MDO Admin nor YP/SPOC contact is found | `ticketNumber` |
 
 ---
 

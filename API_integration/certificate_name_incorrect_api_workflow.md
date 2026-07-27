@@ -1,6 +1,8 @@
 # UC-02: Incorrect Name on Certificate — API Integration Guide
 
 > Karmayogi platform APIs consumed by the chatbot, in execution order. Intended for iGot developers integrating or extending this workflow.
+>
+> **Source:** `flows/mode_b_certificate_download.yaml`, the `C3` sub-scenario (nodes prefixed `c3_`). This flow file is shared with UC-03 (Certificate Not Generated / Not Received, the `C1` sub-scenario) — the user first picks which certificate issue they have via the `ask_certificate_issue` node, and `C3` is a distinct path with no course lookup or ticket-raising of its own.
 
 ---
 
@@ -8,8 +10,8 @@
 
 ```
 STEP 1   → GET   /api/user/private/v1/read/{user_id}
-                ↓ Profile read: get current firstName, lastName, and personalDetails
-                ↓ Show current name on certificate
+                ↓ Profile read: get current firstName (fallback: profileDetails.personalDetails.firstname)
+                ↓ Show current first name on certificate
                 ↓
            Ask: "Is the name correct?"
            User says YES   → Guide to re-download certificate, stop
@@ -36,12 +38,10 @@ curl -X GET \
 
 | Field path | Purpose |
 |---|---|
-| `result.response.firstName` | Current first name shown on certificate |
-| `result.response.lastName` | Current last name shown on certificate |
-| `result.response.profileDetails.personalDetails.firstname` | Cross-check display vs personal details |
-| `result.response.profileDetails.personalDetails.surname` | Cross-check display vs personal details |
+| `result.response.firstName` | Current first name shown on certificate; primary value displayed to the user |
+| `result.response.profileDetails.personalDetails.firstname` | Fallback used only if `firstName` is empty (`c3_first_name or c3_pd_firstname`) |
 
-**Surname-Duplication Detection** (Handled downstream by the UI/Platform, the chatbot directly presents the retrieved name for user confirmation).
+> **Note:** Only the first name is fetched and shown. `lastName` and `profileDetails.personalDetails.surname` are **not** requested by this node — there is no surname-duplication check in this flow (that logic lives in UC-08's profile update flow, see `API_integration/profile_update_api_workflow.md`).
 
 ### Decision After Step 1
 
@@ -58,4 +58,4 @@ curl -X GET \
 
 | Step | Endpoint | Method | Purpose | Key Fields |
 |---|---|---|---|---|
-| 1 | `/api/user/private/v1/read/{user_id}` | GET | Fetch current name on certificate | `firstName`, `lastName`, `profileDetails.personalDetails` |
+| 1 | `/api/user/private/v1/read/{user_id}` | GET | Fetch current first name to confirm with the user | `firstName`, `profileDetails.personalDetails.firstname` (fallback only) |

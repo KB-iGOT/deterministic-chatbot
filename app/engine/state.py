@@ -44,6 +44,7 @@ class TicketDraft(BaseModel):
     severity: str = "Sev 3"
     portal: str = "Learner Portal"
     conversation_trail: str = ""  # HTML <ol> — user's readable selections for Zoho body
+    key_facts_html: str = ""  # HTML <ul> — course/resource name + DO ID, surfaced first in Zoho body
 
 
 class ConversationState(BaseModel):

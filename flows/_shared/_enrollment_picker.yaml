@@ -70,6 +70,17 @@ nodes:
           - { from: completionPercentage, to: collected.{{ params.field_prefix }}completion_pct }
           - { from: langContentStatus,    to: collected.{{ params.field_prefix }}completed_ids,      transform: extract_completed_ids }
           - { from: langContentStatus,    to: collected.{{ params.field_prefix }}incomplete_ids,     transform: extract_incomplete_ids }
+          # Fallback for Program / Curated Program (CAP) enrollments, whose own
+          # langContentStatus is always empty even when resources are genuinely
+          # complete — those enrollments carry per-resource completion in
+          # contentStatus instead. These mappings run AFTER the langContentStatus
+          # ones above and only overwrite completed_ids/incomplete_ids when
+          # contentStatus actually has data (the transform returns None, which the
+          # picker's extra_fields merge treats as "no value" and skips, when
+          # contentStatus is empty/absent) — so Course/Assessment enrollments,
+          # which never populate contentStatus, are completely unaffected.
+          - { from: contentStatus,        to: collected.{{ params.field_prefix }}completed_ids,      transform: completed_ids_from_content_status }
+          - { from: contentStatus,        to: collected.{{ params.field_prefix }}incomplete_ids,     transform: incomplete_ids_from_content_status }
           - { from: status,              to: collected.{{ params.field_prefix }}enrollment_status,  transform: enrollment_status_to_int }
           - { from: completedOn,         to: collected.{{ params.field_prefix }}completed_on_iso,   transform: unix_ms_to_iso }
           - { from: issuedCertificates,  to: collected.{{ params.field_prefix }}issued_certificates }
