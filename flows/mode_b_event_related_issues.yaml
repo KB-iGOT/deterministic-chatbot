@@ -22,7 +22,7 @@ flow_type: deterministic_with_llm_fallback
 version: 1
 
 metadata:
-  enabled: true
+  enabled: false
   category:         event
   menu_label:       "📅 Event related issues"
   menu_group:       "Content Related Issue"
