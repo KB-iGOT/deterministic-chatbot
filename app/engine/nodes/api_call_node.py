@@ -1993,6 +1993,36 @@ def _extract_event_time_spent(event: Any) -> float | None:
     return None
 
 
+def _extract_event_duration_minutes(event: Any) -> float | None:
+    """Extract an event's video duration in minutes.
+
+    Primary source is 'duration' (already in minutes — confirmed against a
+    live sample where duration=15 matched endDateTimeInEpoch - startDateTimeInEpoch).
+    Falls back to the start/end epoch timestamps when 'duration' is missing,
+    since those are always present and unambiguous (unlike the timezone-suffixed
+    'startTime'/'endTime' strings, which carry no date).
+    """
+    if not isinstance(event, dict):
+        return None
+
+    duration = event.get("duration")
+    if duration is not None:
+        try:
+            return float(duration)
+        except (TypeError, ValueError):
+            pass
+
+    start_epoch = event.get("startDateTimeInEpoch")
+    end_epoch = event.get("endDateTimeInEpoch")
+    if start_epoch is not None and end_epoch is not None:
+        try:
+            return (float(end_epoch) - float(start_epoch)) / 60000.0
+        except (TypeError, ValueError):
+            pass
+
+    return None
+
+
 def _is_youtube_embed_url(url: Any) -> bool:
     """Return True if the URL is a valid YouTube embed link."""
     if not isinstance(url, str):
@@ -2594,6 +2624,7 @@ _TRANSFORMS: dict[str, Any] = {
     "flatten_cadre_services":        _flatten_cadre_services,
     # Event related issues SOP transforms
     "extract_event_time_spent":      _extract_event_time_spent,
+    "extract_event_duration_minutes": _extract_event_duration_minutes,
     "is_youtube_embed_url":          _is_youtube_embed_url,
     "filter_orgs_by_parent":         _filter_orgs_by_parent,
     "append_others_org":             _append_others_org,

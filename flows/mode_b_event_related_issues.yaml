@@ -22,7 +22,7 @@ flow_type: deterministic_with_llm_fallback
 version: 1
 
 metadata:
-  enabled: false
+  enabled: true
   category:         event
   menu_label:       "📅 Event related issues"
   menu_group:       "Content Related Issue"
@@ -174,7 +174,7 @@ nodes:
       method: GET
       url: "/api/event/v4/read/{{ ctx.collected.event_id }}"
     response_mapping:
-      - { from: "$.event.duration", to: collected.event_duration }
+      - { from: "$.event", to: collected.event_duration, transform: extract_event_duration_minutes }
     on_success: branch_uc1_duration
     on_error:
       any: resolution_generic_error
@@ -184,7 +184,7 @@ nodes:
     type: branch
     rules:
       - { if: "ctx.collected.event_duration == None", then: confirm_ticket_uc1 }
-      - { if: "float(ctx.collected.event_duration) < 60.0", then: confirm_ticket_uc1 }
+      - { if: "float(ctx.collected.event_duration) < 1.0", then: confirm_ticket_uc1 }
     default: resolution_uc1_case_b
 
   - id: confirm_ticket_uc1

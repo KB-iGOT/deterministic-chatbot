@@ -53,9 +53,10 @@ Retrieves the configuration metadata for a specific event. Used to validate if t
 *Note: The Karmayogi backend adapter automatically unwraps the `{"result": ...}` envelope. The paths below begin inside the result envelope.*
 
 - **Event Duration (Use Case 1):**
-  - **Path:** `$.event.duration`
+  - **Path:** `$.event`, via the `extract_event_duration_minutes` transform → **minutes** (confirmed against a live sample where `duration: 15` matched `endTime (19:40) - startTime (19:25)`)
+  - **Logic:** Primarily reads `event.duration` directly (already in minutes). If that field is missing/null, falls back to `(event.endDateTimeInEpoch - event.startDateTimeInEpoch) / 60000` — the epoch fields are used over the `startTime`/`endTime` strings since those carry no date component and are harder to parse unambiguously.
   - **Stored as:** `collected.event_duration`
-  - **Validation Rule:** If `event_duration` is missing (null) **or** `< 60.0`, the flow treats it as a content configuration issue → ticket confirmation → auto-raised ticket ("Event Video Missing – Content Configuration Issue"). Otherwise (`>= 60.0`), the video is considered valid and the user is told to access/complete the event (no ticket).
+  - **Validation Rule:** If `event_duration` is missing (null) **or** `< 1.0`, the flow treats it as a content configuration issue → ticket confirmation → auto-raised ticket ("Event Video Missing – Content Configuration Issue"). Otherwise (`>= 1.0`), the video is considered valid and the user is told to access/complete the event (no ticket).
 
 - **Registration Link (Use Case 2):**
   - **Path:** `$.event.registrationLink`
