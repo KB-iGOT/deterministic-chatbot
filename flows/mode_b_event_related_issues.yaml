@@ -363,7 +363,7 @@ nodes:
   - id: branch_uc3_progress
     type: branch
     rules:
-      - { if: "float(ctx.collected.time_spent_seconds) < 600.0", then: resolution_uc3_case_a }
+      - { if: "not has(ctx.collected.time_spent_seconds) or float(ctx.collected.time_spent_seconds) <= 600.0", then: resolution_uc3_case_a }
     default: confirm_ticket_uc3
 
   - id: resolution_uc3_case_a
