@@ -154,6 +154,8 @@ nodes:
         extra_fields:
           - { from: event.name,  to: collected.event_name }
           - { from: "$", to: collected.time_spent_seconds, transform: extract_event_time_spent }
+          - { from: completionPercentage, to: collected.completion_percentage }
+          - { from: issuedCertificates, to: collected.certificate_issued, transform: has_issued_certificates }
       search:     { enabled: true, placeholder: "Search your enrolled events..." }
       pagination: { enabled: true, page_size: 10 }
       cache_ttl:  300
@@ -363,8 +365,24 @@ nodes:
   - id: branch_uc3_progress
     type: branch
     rules:
+      - { if: "ctx.collected.certificate_issued == True or (has(ctx.collected.completion_percentage) and float(ctx.collected.completion_percentage) >= 100.0)", then: resolution_uc3_already_completed }
       - { if: "not has(ctx.collected.time_spent_seconds) or float(ctx.collected.time_spent_seconds) <= 600.0", then: resolution_uc3_case_a }
     default: confirm_ticket_uc3
+
+  - id: resolution_uc3_already_completed
+    type: resolution
+    prompt:
+      text: |
+        We checked your event progress and found that the event is already completed and the completion criteria have been met. Kindly follow the steps below to access and download your certificate.
+    steps:
+      - "Log in to the iGOT Karmayogi portal."
+      - "Navigate to My Learning."
+      - "Open the completed event."
+      - "Complete any pending feedback form, survey, questionnaire, or mandatory activity if available."
+      - "Refresh the page."
+      - "Click on Download Certificate."
+      - "Save the certificate to your device."
+    next: satisfied
 
   - id: resolution_uc3_case_a
     type: message
