@@ -30,10 +30,16 @@ For Use Cases 3 and 4, we extract specific fields from the root event item (usin
   - **Logic:** If the array is empty `[]`, it returns `False`. If it contains items, it returns `True`.
   - **Stored as:** `collected.certificate_issued`
 
+- **Completion Percentage:** Extracted directly from the `completionPercentage` field on the event item (no transform).
+  - **Stored as:** `collected.completion_percentage`
+
 ### Decision Logic — Use Case 3 (Progress Not Updating)
-No second API call is made for this use case; the branch runs directly off the fields extracted above.
-- If `time_spent_seconds < 600.0` → resolution message: event is still in progress, ask the user to complete it.
-- Otherwise (`>= 600.0`) → ticket confirmation → auto-raised ticket ("Event Progress Not Updating – Technical Issue").
+No second API call is made for this use case; the branch runs directly off the fields extracted above, in this order:
+1. If `certificate_issued == True` **or** `completion_percentage >= 100.0` → the event is already complete (e.g. the certificate/completion record simply hasn't reflected back to the user's progress view). Resolution message: completion criteria have been met → steps to download the certificate (Log in → My Learning → open the event → complete any pending feedback/survey/questionnaire → refresh → Download Certificate → save).
+2. Else if `time_spent_seconds` is missing **or** `<= 600.0` → resolution message: event is still in progress, ask the user to complete it.
+3. Otherwise (`> 600.0`, not complete) → ticket confirmation → auto-raised ticket ("Event Progress Not Updating – Technical Issue").
+
+> A missing `time_spent_seconds` (no progress data returned at all) is treated the same as "still in progress," not as a technical issue, since the API returning no progress record is not itself evidence of a stuck completion. Exactly `600.0` seconds is also treated as "still in progress" (`<=`, not `<`).
 
 ### Decision Logic — Use Case 4 (Certificate Not Generated)
 No second API call is made for this use case either.
