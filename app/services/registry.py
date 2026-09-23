@@ -13,6 +13,7 @@ from app.adapters.presidio import PresidioRedactor
 from app.adapters.translation import TranslationService
 from app.adapters.zoho import ZohoDeskAdapter
 from app.services.karmayogi import KarmayogiService
+from app.services.youtube import YouTubeService
 from app.services.yp_lookup import YPLookupService
 
 
@@ -26,6 +27,7 @@ class ServiceRegistry(dict):
       'presidio'     — PresidioRedactor  (in-process PII redaction)
       'translation'  — TranslationService (composite translation chain)
       'yp_lookup'    — YPLookupService   (in-memory YP allocation from Excel)
+      'youtube'      — YouTubeService    (YouTube Data API v3 — video metadata)
     """
 
     @classmethod
@@ -37,6 +39,7 @@ class ServiceRegistry(dict):
         reg["presidio"]      = PresidioRedactor()
         reg["translation"]   = TranslationService.from_settings()
         reg["yp_lookup"]     = YPLookupService()
+        reg["youtube"]       = YouTubeService()
         return reg
 
     async def aclose(self) -> None:

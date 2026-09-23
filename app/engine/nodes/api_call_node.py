@@ -2031,6 +2031,53 @@ def _is_youtube_embed_url(url: Any) -> bool:
     return bool(re.search(r"youtube\.com/embed/", url, re.IGNORECASE))
 
 
+def _extract_youtube_video_id(url: Any) -> str | None:
+    """Extract the 11-character YouTube video ID from a registrationLink URL.
+
+    Handles embed (youtube.com/embed/{id}), short (youtu.be/{id}), and
+    watch (?v={id}) URL forms — e.g. 'https://www.youtube.com/embed/TFtxq-Eg_p8?si=...'
+    → 'TFtxq-Eg_p8'. Returns None when no ID can be parsed.
+    """
+    if not isinstance(url, str) or not url:
+        return None
+    import re
+    for pattern in (
+        r"youtube\.com/embed/([A-Za-z0-9_-]{11})",
+        r"youtu\.be/([A-Za-z0-9_-]{11})",
+        r"[?&]v=([A-Za-z0-9_-]{11})",
+    ):
+        match = re.search(pattern, url, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _iso8601_duration_to_seconds(duration: Any) -> float | None:
+    """Parse a YouTube Data API ISO-8601 duration (e.g. 'PT57M30S') into seconds.
+
+    Supports the hour/minute/second components YouTube actually emits
+    (PT#H#M#S — any subset present). Returns None when the field is absent
+    or malformed, so branch rules can fall back to the fixed-threshold check.
+    """
+    if not isinstance(duration, str) or not duration:
+        return None
+    import re
+    match = re.fullmatch(
+        r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?", duration.strip(), re.IGNORECASE
+    )
+    if not match or not any(match.groups()):
+        return None
+    hours, minutes, seconds = match.groups()
+    total = 0.0
+    if hours:
+        total += float(hours) * 3600.0
+    if minutes:
+        total += float(minutes) * 60.0
+    if seconds:
+        total += float(seconds)
+    return total
+
+
 def _filter_orgs_by_parent(orgs: Any, parent_id: Any) -> list[dict]:
     """Filter list of organizations by parent ministry or state ID."""
     if not isinstance(orgs, list):
@@ -2626,6 +2673,8 @@ _TRANSFORMS: dict[str, Any] = {
     "extract_event_time_spent":      _extract_event_time_spent,
     "extract_event_duration_minutes": _extract_event_duration_minutes,
     "is_youtube_embed_url":          _is_youtube_embed_url,
+    "extract_youtube_video_id":      _extract_youtube_video_id,
+    "iso8601_duration_to_seconds":   _iso8601_duration_to_seconds,
     "filter_orgs_by_parent":         _filter_orgs_by_parent,
     "append_others_org":             _append_others_org,
     "append_others_language":        _append_others_language,

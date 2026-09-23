@@ -177,14 +177,51 @@ nodes:
       url: "/api/event/v4/read/{{ ctx.collected.event_id }}"
     response_mapping:
       - { from: "$.event", to: collected.event_duration, transform: extract_event_duration_minutes }
-    on_success: branch_uc1_duration
+      - { from: "$.event.registrationLink", to: collected.registration_link }
+      # Video ID parsed from registrationLink (e.g. youtube.com/embed/{id}) —
+      # feeds the actual video-duration lookup below, which is the authoritative
+      # "is there really a video" signal (the event's own duration/epoch fields
+      # describe the scheduled session, not the embedded video, and produced
+      # false "video missing" tickets for real videos longer than 1 minute).
+      - { from: "$.event.registrationLink", to: collected.youtube_video_id, transform: extract_youtube_video_id }
+    on_success: branch_uc1_has_video_id
     on_error:
       any: resolution_generic_error
+    timeout_ms: 8000
+
+  - id: branch_uc1_has_video_id
+    type: branch
+    rules:
+      - { if: "has(ctx.collected.youtube_video_id)", then: api_read_youtube_duration_uc1 }
+    default: branch_uc1_duration
+
+  - id: api_read_youtube_duration_uc1
+    type: api_call
+    integration: youtube
+    request:
+      method: GET
+      url: "/videos"
+      params:
+        part: contentDetails
+        id: "{{ ctx.collected.youtube_video_id }}"
+    response_mapping:
+      - { from: "$.items[0].contentDetails.duration", to: collected.video_duration_seconds, transform: iso8601_duration_to_seconds }
+    on_success: branch_uc1_duration
+    # Fail open — if the YouTube lookup errors, video_duration_seconds stays
+    # unset and branch_uc1_duration falls back to the event-duration check.
+    on_error:
+      any: branch_uc1_duration
     timeout_ms: 8000
 
   - id: branch_uc1_duration
     type: branch
     rules:
+      # Authoritative path: real video duration fetched from YouTube.
+      # Uses an explicit None check (not has()) because has() treats 0.0 as
+      # falsy — and a 0-second duration is itself a valid "video missing" signal.
+      - { if: "ctx.collected.video_duration_seconds != None and float(ctx.collected.video_duration_seconds) < 60.0", then: confirm_ticket_uc1 }
+      - { if: "ctx.collected.video_duration_seconds != None", then: resolution_uc1_case_b }
+      # Fallback path: YouTube lookup unavailable (no video ID parsed, or API error) — use event duration as before.
       - { if: "ctx.collected.event_duration == None", then: confirm_ticket_uc1 }
       - { if: "float(ctx.collected.event_duration) < 1.0", then: confirm_ticket_uc1 }
     default: resolution_uc1_case_b
