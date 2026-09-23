@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     # Internal deployments: http://kong:8000  |  Local dev: https://portal.uat.karmayogibharat.net
     karmayogi_portal_base_url: str = "http://kong:8000"
 
+    # YouTube Data API v3 (video duration lookup — Event Video Missing SOP)
+    google_youtube_api_key: str = ""
+    google_youtube_api_base_url: str = "https://www.googleapis.com/youtube/v3"
+
     # Langfuse (observability / tracing)
     # Set LANGFUSE_ENABLED=true + keys to activate; all other settings have safe defaults.
     langfuse_enabled: bool = False
