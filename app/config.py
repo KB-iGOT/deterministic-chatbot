@@ -25,6 +25,21 @@ class Settings(BaseSettings):
 
     # Database
     postgres_url: str = "postgresql+asyncpg://igot_chatbot:password@localhost:5432/igot_chatbot"
+    # Checkpointer connection pool (psycopg_pool). max_idle/max_lifetime recycle
+    # connections before PostgreSQL / pgbouncer / firewalls drop them silently.
+    postgres_pool_min_size: int = 2
+    postgres_pool_max_size: int = 20
+    postgres_pool_max_idle: float = 240.0  # below typical 4–5 min LB/NAT idle timeouts
+    postgres_pool_max_lifetime: float = 1800.0
+    # Max seconds a request waits for a free pooled connection before PoolTimeout.
+    postgres_pool_timeout: float = 30.0
+    # Whether Postgres checkpointing is mandatory. None = required only in prod, so
+    # prod never silently degrades to in-memory state; dev/staging may fall back.
+    postgres_required: bool | None = None
+    # Startup retry window: keep retrying the Postgres connection this long (seconds)
+    # before giving up (fail in prod / fall back to MemorySaver elsewhere). 0 = no retry.
+    postgres_startup_retry_seconds: float = 60.0
+    postgres_startup_retry_interval: float = 3.0
 
     # Redis
     redis_url: str = "redis://localhost:6379/3"
@@ -146,6 +161,12 @@ class Settings(BaseSettings):
         if not self.keycloak_issuer:
             self.keycloak_issuer = realm_base
         return self
+
+    @property
+    def postgres_is_required(self) -> bool:
+        if self.postgres_required is not None:
+            return self.postgres_required
+        return self.igot_env == "prod"
 
     @property
     def cors_origins_list(self) -> list[str]:
