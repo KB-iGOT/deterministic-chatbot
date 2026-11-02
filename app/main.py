@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router as chat_router
 from app.config import settings
@@ -18,6 +19,7 @@ from app.services.registry import ServiceRegistry
 
 # Initialise logging before anything else so all startup messages are captured.
 configure_logging(level=settings.log_level, log_file=settings.log_file)
+log = logging.getLogger(__name__)
 
 # ── Google Cloud credentials bootstrap ───────────────────────────────────────
 # pydantic-settings reads GOOGLE_APPLICATION_CREDENTIALS into Settings but does
@@ -41,22 +43,10 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
 
     # Checkpointer — Postgres in dev/prod (persistent across restarts), fallback to in-memory.
     # AsyncPostgresSaver.setup() is idempotent — creates the 4 LangGraph checkpoint tables if absent.
-    checkpointer: Any
-    _pg_cm = None
-    try:
-        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from app.services.checkpointer import init_checkpointer
 
-        # Build a plain asyncpg connection string from settings (strip the +asyncpg driver prefix)
-        pg_dsn = settings.postgres_url.replace("postgresql+asyncpg://", "postgresql://")
-        _pg_cm = AsyncPostgresSaver.from_conn_string(pg_dsn)
-        checkpointer = await _pg_cm.__aenter__()
-        await checkpointer.setup()
-        print("✅ Checkpointer: AsyncPostgresSaver (Postgres)")
-    except Exception as e:  # noqa: BLE001
-        from langgraph.checkpoint.memory import MemorySaver
-        print(f"⚠️  Postgres checkpointer unavailable ({e}), falling back to MemorySaver")
-        checkpointer = MemorySaver()
-        _pg_cm = None
+    cp_handle = await init_checkpointer(settings)
+    checkpointer = cp_handle.checkpointer
 
     # Session store — Redis-backed user→session_id mapping for cross-device resume.
     # Falls back gracefully: GET /sessions/mine returns null when Redis is unavailable.
@@ -114,6 +104,7 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
     app.state.channel_adapters = channel_adapters
     app.state.graphs = compiled
     app.state.checkpointer = checkpointer
+    app.state.checkpointer_handle = cp_handle
     app.state.system_messages = system_messages
     app.state.sessions: dict[str, dict] = {}  # in-memory session metadata
     app.state.session_store = session_store   # Redis-backed; None when Redis unavailable
@@ -138,8 +129,7 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
     # ── Shutdown ──────────────────────────────────────────────────────────────
     tracing.shutdown()
     await services.aclose()
-    if _pg_cm is not None:
-        await _pg_cm.__aexit__(None, None, None)
+    await cp_handle.aclose()
     if _redis_client is not None:
         await _redis_client.aclose()
     if engineering_db is not None:
@@ -185,6 +175,27 @@ if settings.igot_env in ("dev", "staging"):
 @app.get("/health", tags=["meta"])
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/ready", tags=["meta"])
+async def ready(request: Request) -> JSONResponse:
+    """Readiness: verifies the checkpoint store. 503 when Postgres is required but unusable."""
+    handle = request.app.state.checkpointer_handle
+    if handle.kind == "postgres":
+        try:
+            async with handle.pool.connection(timeout=3) as conn:
+                await conn.execute("SELECT 1")
+        except Exception as e:  # noqa: BLE001
+            log.error("Readiness: Postgres check failed (%s: %s) pool=%s",
+                      type(e).__name__, e, handle.pool.get_stats())
+            return JSONResponse(
+                {"status": "unavailable", "checkpointer": "postgres", "error": type(e).__name__},
+                status_code=503,
+            )
+        return JSONResponse({"status": "ready", "checkpointer": "postgres"})
+    if settings.postgres_is_required:
+        return JSONResponse({"status": "unavailable", "checkpointer": "memory"}, status_code=503)
+    return JSONResponse({"status": "ready", "checkpointer": "memory", "persistent": False})
 
 
 @app.get("/", tags=["meta"])
