@@ -634,3 +634,5 @@ The implementation lives in `app/services/tracing.py`. It wraps the Langfuse Pyt
 ### Frontend / integration contract
 
 See [`docs/INTEGRATION_CONTRACT.md`](docs/INTEGRATION_CONTRACT.md) for the complete frontend integration specification, including session lifecycle and header requirements.
+
+
