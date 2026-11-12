@@ -1212,17 +1212,36 @@ nodes:
       url: "/api/user/private/v1/read/{{ ctx.user_id_hash }}"
     # karmayogi.py unwraps only result → data is under $.response.*
     # Paths verified against live UAT API (2026-06-02)
+    # Each has_* flag is true only when the field is present and non-blank.
     response_mapping:
-      - { from: "$.response.firstName",                               to: collected.first_name }
-      - { from: "$.response.profileDetails.profileImageUrl",          to: collected.avatar_url }
-      - { from: "$.response.profileCompletionPercentage",             to: collected.completion_pct }
-      - { from: "$.response.profileDetails.verifiedKarmayogi",        to: collected.username_verified }
-      - { from: "$.response.profileDetails.profileDesignationStatus", to: collected.designation_status }
-      - { from: "$.response.profileDetails.profileGroupStatus",       to: collected.group_status }
-      - { from: "$.response.profileDetails.profileBannerUrl",         to: collected.banner_url }
-      - { from: "$.response.profileDetails.employmentDetails.aboutme", to: collected.about_me }
-      - { from: "$.response.rootOrgId",                                to: collected.root_org_id }
-      - { from: "$.response.channel",                                  to: collected.org_channel }
+      - { from: "$.response.firstName",                                                to: collected.first_name }
+      - { from: "$.response.firstName",                                                to: collected.has_name,        transform: non_blank }
+      - { from: "$.response.profileDetails.profileImageUrl",                           to: collected.has_avatar,      transform: non_blank }
+      - { from: "$.response.profileDetails.profileBannerUrl",                          to: collected.has_banner,      transform: non_blank }
+      - { from: "$.response.profileDetails.employmentDetails.aboutme",                 to: collected.has_about_me,    transform: non_blank }
+      - { from: "$.response.profileDetails.professionalDetails[0].designation",        to: collected.has_designation, transform: non_blank }
+      - { from: "$.response.profileDetails.professionalDetails[0].group",              to: collected.has_group,       transform: non_blank }
+      - { from: "$.response.profileCompletionPercentage",                              to: collected.completion_pct }
+      - { from: "$.response.rootOrgId",                                                to: collected.root_org_id }
+      - { from: "$.response.channel",                                                  to: collected.org_channel }
+    on_success: fetch_extended_profile
+    on_error:
+      any: escalate_api_error
+    timeout_ms: 5000
+
+  # Extended profile API — location, education and service history live here,
+  # not in the private read API. Response is {result: {response: {...}}}.
+  - id: fetch_extended_profile
+    type: api_call
+    integration: karmayogi
+    request:
+      method: GET
+      url: "/api/chatbot/v2/admin/extended/all/{{ ctx.user_id_hash }}"
+    response_mapping:
+      # Location is complete only if at least one entry has BOTH state and district
+      - { from: "$.response.locationDetails.data",           to: collected.has_location,        transform: has_complete_location }
+      - { from: "$.response.educationalQualifications.data", to: collected.has_education,       transform: has_items }
+      - { from: "$.response.serviceHistory.data",            to: collected.has_service_history, transform: has_items }
     on_success: diagnose_missing_fields
     on_error:
       any: escalate_api_error
@@ -1234,6 +1253,9 @@ nodes:
       # completion_pct may be float or string (e.g. "100.0" or 100.0) from the API
       - { if: "ctx.collected.completion_pct != None and float(ctx.collected.completion_pct) >= 100.0",
           then: already_complete }
+      # Below 100% but every field we check is present → nothing to guide the user on
+      - { if: "ctx.collected.has_name and ctx.collected.has_avatar and ctx.collected.has_banner and ctx.collected.has_about_me and ctx.collected.has_designation and ctx.collected.has_group and ctx.collected.has_location and ctx.collected.has_education and ctx.collected.has_service_history",
+          then: no_gap_found }
     default: show_missing_summary
 
   - id: already_complete
@@ -1242,46 +1264,68 @@ nodes:
       text: "Your profile is already at **100%** complete. No further action is needed."
     next: satisfied
 
+  # Percentage < 100 but all checked fields are present: hand over to support
+  - id: no_gap_found
+    type: message
+    prompt:
+      text: "We checked your profile and all the standard details look filled in, but your profile completion is still below 100%. We'll raise a ticket so the team can investigate."
+    next: transfer_to_llm
+
   - id: show_missing_summary
     type: message
     prompt:
       text: |
         We've checked your profile and found that certain details are missing. Please update the following details to achieve 100% profile completion:
 
-        {% if not ctx.collected.avatar_url %}
+        {% if not ctx.collected.has_name %}
+        - **Name**
+        {% endif %}
+        {% if not ctx.collected.has_avatar %}
         - **Profile Photo**
         {% endif %}
-        {% if not ctx.collected.banner_url %}
+        {% if not ctx.collected.has_banner %}
         - **Cover Photo**
         {% endif %}
-        {% if ctx.collected.username_verified == 'False' or not ctx.collected.username_verified %}
-        - **Username Verification Tick**
-        {% endif %}
-        {% if not ctx.collected.about_me %}
+        {% if not ctx.collected.has_about_me %}
         - **About Me**
         {% endif %}
-        {% if ctx.collected.designation_status != 'VERIFIED' %}
+        {% if not ctx.collected.has_designation %}
         - **Designation**
         {% endif %}
-        {% if ctx.collected.group_status != 'VERIFIED' %}
+        {% if not ctx.collected.has_group %}
         - **Group**
+        {% endif %}
+        {% if not ctx.collected.has_location %}
+        - **Location (State and District)**
+        {% endif %}
+        {% if not ctx.collected.has_service_history %}
+        - **Service History**
+        {% endif %}
+        {% if not ctx.collected.has_education %}
+        - **Educational Qualification**
         {% endif %}
 
         The profile completion percentage will reach 100% only after all mandatory fields are updated. Please update the missing details in your profile to complete it to 100%. Which field would you like to fix first?
     quick_replies:
+      - { id: name,        label: "🪪 Name" }
       - { id: photo,       label: "📷 Profile Photo" }
       - { id: cover,       label: "🖼️ Cover Photo" }
-      - { id: username,    label: "✔️ Username Verification" }
+      - { id: about,       label: "📝 About Me" }
       - { id: designation, label: "💼 Designation" }
       - { id: group,       label: "🏛️ Group" }
-      - { id: about,       label: "📝 About Me" }
+      - { id: location,    label: "📍 Location" }
+      - { id: service,     label: "🗂️ Service History" }
+      - { id: education,   label: "🎓 Education" }
     on_reply:
+      name:        show_name_steps
       photo:       show_profile_photo_steps
       cover:       show_cover_photo_steps
-      username:    show_username_tick_steps
+      about:       show_about_me_steps
       designation: show_designation_steps
       group:       show_group_steps
-      about:       show_about_me_steps
+      location:    show_location_steps
+      service:     svc_history_add_steps
+      education:   edu_qual_steps
 
   # — §13 per-field resolution nodes —
 
@@ -1301,7 +1345,7 @@ nodes:
         - { id: more,  label: "❌ Another field is missing" }
     on_reply:
       yes:   satisfied
-      more:  re_diagnose_skip_photo
+      more:  fetch_user_profile
 
   - id: show_cover_photo_steps
     type: resolution
@@ -1319,7 +1363,7 @@ nodes:
         - { id: more,  label: "❌ Another field" }
     on_reply:
       yes:   satisfied
-      more:  re_diagnose_skip_cover
+      more:  fetch_user_profile
 
   - id: show_username_tick_steps
     type: resolution
@@ -1338,7 +1382,7 @@ nodes:
         - { id: mdo,  label: "⏰ Yes, more than 2 days" }
     on_reply:
       yes:  satisfied
-      more: re_diagnose_skip_tick
+      more: fetch_user_profile
       mdo:  lookup_mdo_for_tick
 
   - id: lookup_mdo_for_tick
@@ -1399,7 +1443,7 @@ nodes:
         - { id: more,  label: "❌ Another field" }
     on_reply:
       yes:   satisfied
-      more:  re_diagnose_skip_about
+      more:  fetch_user_profile
 
   - id: show_group_steps
     type: resolution
@@ -1416,7 +1460,7 @@ nodes:
         - { id: more,  label: "❌ Another field" }
     on_reply:
       yes:   satisfied
-      more:  re_diagnose_skip_group
+      more:  fetch_user_profile
 
   - id: show_designation_steps
     type: resolution
@@ -1433,7 +1477,42 @@ nodes:
         - { id: more, label: "❌ Another field missing" }
     on_reply:
       yes:  satisfied
-      more: re_diagnose_skip_desig
+      more: fetch_user_profile
+
+  - id: show_name_steps
+    type: resolution
+    prompt:
+      text: "Your **Name** is missing from your profile."
+    steps:
+      - "Click **View Profile** → **three dots (⋮)** → **Edit Profile**."
+      - "Enter your **Name** exactly as per your official records."
+      - "Click **Save**."
+    follow_up:
+      text: "Has this been completed?"
+      quick_replies:
+        - { id: yes,   label: "✅ Yes" }
+        - { id: more,  label: "❌ Another field" }
+    on_reply:
+      yes:   satisfied
+      more:  fetch_user_profile
+
+  - id: show_location_steps
+    type: resolution
+    prompt:
+      text: "Your **Location** is incomplete. Both **State** and **District** are required."
+    steps:
+      - "Click **View Profile**."
+      - "Navigate to the **Location** section and click **Edit ✏️** (or the **Plus (+)** icon if empty)."
+      - "Select your **State** and then your **District**."
+      - "Click **Save**."
+    follow_up:
+      text: "Has this been completed?"
+      quick_replies:
+        - { id: yes,   label: "✅ Yes" }
+        - { id: more,  label: "❌ Another field" }
+    on_reply:
+      yes:   satisfied
+      more:  fetch_user_profile
 
   - id: show_general_steps
     type: resolution
@@ -1446,6 +1525,10 @@ nodes:
       - "4. **About Me** — Edit Profile → About Me (min 30 chars)"
       - "5. **Group** — Primary Details → Edit"
       - "6. **Designation** — Primary Details → Edit"
+      - "7. **Name** — Edit Profile"
+      - "8. **Location** — State and District, both required"
+      - "9. **Service History** — at least one entry"
+      - "10. **Educational Qualification** — at least one entry"
     follow_up:
       text: "Which one do you need help with?"
       quick_replies:
@@ -1455,7 +1538,15 @@ nodes:
         - { id: go_about, label: "📝 About Me" }
         - { id: go_group, label: "👥 Group" }
         - { id: go_desig, label: "💼 Designation" }
+        - { id: go_name,  label: "🪪 Name" }
+        - { id: go_loc,   label: "📍 Location" }
+        - { id: go_svc,   label: "🗂️ Service History" }
+        - { id: go_edu,   label: "🎓 Education" }
     on_reply:
+      go_name:  show_name_steps
+      go_loc:   show_location_steps
+      go_svc:   svc_history_add_steps
+      go_edu:   edu_qual_steps
       go_photo: show_profile_photo_steps
       go_cover: show_cover_photo_steps
       go_tick:  show_username_tick_steps
@@ -1475,8 +1566,16 @@ nodes:
       - { id: go_about,   label: "📝 About Me / bio" }
       - { id: go_group,   label: "👥 Group" }
       - { id: go_desig,   label: "💼 Designation" }
+      - { id: go_name,    label: "🪪 Name" }
+      - { id: go_loc,     label: "📍 Location" }
+      - { id: go_svc,     label: "🗂️ Service History" }
+      - { id: go_edu,     label: "🎓 Education" }
       - { id: go_general, label: "❓ Something else" }
     on_reply:
+      go_name:    show_name_steps
+      go_loc:     show_location_steps
+      go_svc:     svc_history_add_steps
+      go_edu:     edu_qual_steps
       go_photo:   show_profile_photo_steps
       go_cover:   show_cover_photo_steps
       go_tick:    show_username_tick_steps
@@ -1484,108 +1583,6 @@ nodes:
       go_group:   show_group_steps
       go_desig:   show_designation_steps
       go_general: show_general_steps
-
-  - id: re_diagnose_skip_photo
-    type: message
-    prompt:
-      text: "Which other profile field do you need help with?"
-    quick_replies:
-      - { id: go_cover,  label: "🖼️ Cover photo" }
-      - { id: go_tick,   label: "✓ Username verification tick" }
-      - { id: go_about,  label: "📝 About Me / bio" }
-      - { id: go_group,  label: "👥 Group" }
-      - { id: go_desig,  label: "💼 Designation" }
-    on_reply:
-      go_cover:  show_cover_photo_steps
-      go_tick:   show_username_tick_steps
-      go_about:  show_about_me_steps
-      go_group:  show_group_steps
-      go_desig:  show_designation_steps
-
-  - id: re_diagnose_skip_cover
-    type: message
-    prompt:
-      text: "Which other profile field do you need help with?"
-    quick_replies:
-      - { id: go_photo,  label: "📷 Profile photo" }
-      - { id: go_tick,   label: "✓ Username verification tick" }
-      - { id: go_about,  label: "📝 About Me / bio" }
-      - { id: go_group,  label: "👥 Group" }
-      - { id: go_desig,  label: "💼 Designation" }
-    on_reply:
-      go_photo:  show_profile_photo_steps
-      go_tick:   show_username_tick_steps
-      go_about:  show_about_me_steps
-      go_group:  show_group_steps
-      go_desig:  show_designation_steps
-
-  - id: re_diagnose_skip_tick
-    type: message
-    prompt:
-      text: "Which other profile field do you need help with?"
-    quick_replies:
-      - { id: go_photo,  label: "📷 Profile photo" }
-      - { id: go_cover,  label: "🖼️ Cover photo" }
-      - { id: go_about,  label: "📝 About Me / bio" }
-      - { id: go_group,  label: "👥 Group" }
-      - { id: go_desig,  label: "💼 Designation" }
-    on_reply:
-      go_photo:  show_profile_photo_steps
-      go_cover:  show_cover_photo_steps
-      go_about:  show_about_me_steps
-      go_group:  show_group_steps
-      go_desig:  show_designation_steps
-
-  - id: re_diagnose_skip_about
-    type: message
-    prompt:
-      text: "Which other profile field do you need help with?"
-    quick_replies:
-      - { id: go_photo,  label: "📷 Profile photo" }
-      - { id: go_cover,  label: "🖼️ Cover photo" }
-      - { id: go_tick,   label: "✓ Username verification tick" }
-      - { id: go_group,  label: "👥 Group" }
-      - { id: go_desig,  label: "💼 Designation" }
-    on_reply:
-      go_photo:  show_profile_photo_steps
-      go_cover:  show_cover_photo_steps
-      go_tick:   show_username_tick_steps
-      go_group:  show_group_steps
-      go_desig:  show_designation_steps
-
-  - id: re_diagnose_skip_group
-    type: message
-    prompt:
-      text: "Which other profile field do you need help with?"
-    quick_replies:
-      - { id: go_photo,  label: "📷 Profile photo" }
-      - { id: go_cover,  label: "🖼️ Cover photo" }
-      - { id: go_tick,   label: "✓ Username verification tick" }
-      - { id: go_about,  label: "📝 About Me / bio" }
-      - { id: go_desig,  label: "💼 Designation" }
-    on_reply:
-      go_photo:  show_profile_photo_steps
-      go_cover:  show_cover_photo_steps
-      go_tick:   show_username_tick_steps
-      go_about:  show_about_me_steps
-      go_desig:  show_designation_steps
-
-  - id: re_diagnose_skip_desig
-    type: message
-    prompt:
-      text: "Which other profile field do you need help with?"
-    quick_replies:
-      - { id: go_photo,  label: "📷 Profile photo" }
-      - { id: go_cover,  label: "🖼️ Cover photo" }
-      - { id: go_tick,   label: "✓ Username verification tick" }
-      - { id: go_about,  label: "📝 About Me / bio" }
-      - { id: go_group,  label: "👥 Group" }
-    on_reply:
-      go_photo:  show_profile_photo_steps
-      go_cover:  show_cover_photo_steps
-      go_tick:   show_username_tick_steps
-      go_about:  show_about_me_steps
-      go_group:  show_group_steps
 
   # ═══════════════════════════════════════════════════════════════════════════
   # YP (YOUNG PROFESSIONAL) LOOKUP — shared fallback when no MDO Admin is found

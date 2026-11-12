@@ -1649,6 +1649,34 @@ def _check_secure_settings_eligibility(secure_settings: Any, user_eligibility_ct
     return all_passed
 
 
+def _non_blank(value: Any) -> bool:
+    """True if value is a non-empty string (after strip) or any other non-None value.
+
+    Used by the profile-completion flow so that ``""``, ``"  "`` and ``None``
+    all count as "field not filled in".
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
+def _has_items(value: Any) -> bool:
+    """True if value is a non-empty list (e.g. educationalQualifications.data[])."""
+    return isinstance(value, list) and len(value) > 0
+
+
+def _has_complete_location(entries: Any) -> bool:
+    """True if at least one locationDetails.data[] entry has BOTH state and district non-blank."""
+    if not isinstance(entries, list):
+        return False
+    return any(
+        isinstance(e, dict) and _non_blank(e.get("state")) and _non_blank(e.get("district"))
+        for e in entries
+    )
+
+
 def _has_issued_certificates(issued_certificates: Any) -> bool:
     """Return True if the enrollment's issuedCertificates list contains at least one entry.
 
@@ -2600,6 +2628,10 @@ _TRANSFORMS: dict[str, Any] = {
     # True  = non-empty list (certificate generated)
     # False = null / empty list (not yet generated)
     "has_issued_certificates":     _has_issued_certificates,
+    # Profile completion — field-presence checks (see mode_b_profile_completion.yaml §13)
+    "non_blank":                   _non_blank,
+    "has_items":                   _has_items,
+    "has_complete_location":       _has_complete_location,
     # Admin Content State API — consumption record normalisation
     # Converts result.consumptionRecords[*] → list of {contentid, language, status}
     "extract_consumption_records":       _extract_consumption_records,
