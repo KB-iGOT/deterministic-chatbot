@@ -195,11 +195,18 @@ class TestLifecycleAndInternals:
         assert len(await svc.get_all()) == len(ROWS)
         assert svc.count == len(ROWS)
 
-    async def test_lookup_returns_designations_key(self, monkeypatch):
-        svc, _ = service_with(monkeypatch, [make_xlsx(["Clerk"])])
-        assert await svc.lookup("ignored") == {
-            "designations": [{"id": "Clerk", "designation": "Clerk"}]
-        }
+    async def test_lookup_empty_key_returns_all(self, monkeypatch):
+        svc, _ = service_with(monkeypatch, [make_xlsx(ROWS)])
+        for key in ("", "   "):
+            res = await svc.lookup(key)
+            assert [d["designation"] for d in res["designations"]] == sorted(ROWS, key=str.lower)
+
+    async def test_lookup_with_key_filters_without_limit(self, monkeypatch):
+        many = [f"Deputy Officer {i}" for i in range(25)] + ["Clerk"]
+        svc, _ = service_with(monkeypatch, [make_xlsx(many)])
+        res = await svc.lookup("deputy")
+        assert len(res["designations"]) == 25  # not capped at the search default of 10
+        assert await svc.lookup("zzz") == {"designations": []}
 
     async def test_background_refresh_skipped_when_fresh(self, monkeypatch):
         svc, calls = service_with(monkeypatch, [make_xlsx(ROWS)])

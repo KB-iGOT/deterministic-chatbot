@@ -141,8 +141,8 @@ class DesignationMasterService:
             except Exception as exc:  # noqa: BLE001
                 raise DesignationMasterUnavailable(str(exc)) from exc
 
-    async def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
-        """Return up to ``limit`` designations matching ``query``.
+    async def search(self, query: str, limit: int | None = 10) -> list[dict[str, Any]]:
+        """Return up to ``limit`` designations matching ``query`` (all matches if ``limit`` is None).
 
         Every whitespace-separated token in the query must appear in the name.
         Ranking: name starts with the query, then a word starts with it, then
@@ -172,11 +172,15 @@ class DesignationMasterService:
         ]
 
     async def lookup(self, key: str = "") -> dict[str, Any]:
-        """Adapter for the ``data_lookup`` flow node: all designations as ``{"designations": [...]}``.
+        """Adapter for the ``data_lookup`` flow node, returning ``{"designations": [...]}``.
 
-        ``key`` is ignored. Raises DesignationMasterUnavailable when nothing could be
-        loaded, which the node routes to its ``on_error`` branch.
+        An empty ``key`` returns every designation (what the flow uses). A non-empty
+        ``key`` returns only the designations matching it, as ``search`` does.
+        Raises DesignationMasterUnavailable when nothing could be loaded, which the
+        node routes to its ``on_error`` branch.
         """
+        if key.strip():
+            return {"designations": await self.search(key, limit=None)}
         return {"designations": await self.get_all()}
 
     async def get_all(self) -> list[dict[str, Any]]:
