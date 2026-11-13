@@ -12,6 +12,7 @@ from app.adapters.llm import LLMAdapter
 from app.adapters.presidio import PresidioRedactor
 from app.adapters.translation import TranslationService
 from app.adapters.zoho import ZohoDeskAdapter
+from app.services.designation_master import DesignationMasterService
 from app.services.karmayogi import KarmayogiService
 from app.services.youtube import YouTubeService
 from app.services.yp_lookup import YPLookupService
@@ -28,6 +29,7 @@ class ServiceRegistry(dict):
       'translation'  — TranslationService (composite translation chain)
       'yp_lookup'    — YPLookupService   (in-memory YP allocation from Excel)
       'youtube'      — YouTubeService    (YouTube Data API v3 — video metadata)
+      'designation_master' — DesignationMasterService (designation list from the master Excel)
     """
 
     @classmethod
@@ -40,6 +42,7 @@ class ServiceRegistry(dict):
         reg["translation"]   = TranslationService.from_settings()
         reg["yp_lookup"]     = YPLookupService()
         reg["youtube"]       = YouTubeService()
+        reg["designation_master"] = DesignationMasterService()
         return reg
 
     async def aclose(self) -> None:

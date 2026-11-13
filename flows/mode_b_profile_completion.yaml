@@ -139,27 +139,15 @@ nodes:
   # §3  DESIGNATION NOT FOUND
   # ═══════════════════════════════════════════════════════════════════════════
   # ── §3A  Fetch designation list → source:context picker ─────────────────────
+  # Designation list comes from the master Excel (designation_master service:
+  # downloaded once, parsed in memory, refreshed hourly) — no per-user API call.
+  # The Excel has names only, so each item's id is the designation name.
   - id: designation_fetch_list
-    type: api_call
-    integration: karmayogi
-    request:
-      method: POST
-      url: "/apis/public/v8/designation/search"
-      body:
-        pageNumber: 1
-        pageSize: 100
-        filterCriteriaMap: {status: "Active"}
-        requestedFields: ["id", "designation"]
-    cache:
-      ttl_seconds: 3600
-    paginate:
-      total_count_path: "$.result.totalCount"
-      list_path: "$.result.data"
-      page_param: pageNumber
-      page_size: 100
+    type: data_lookup
+    service: designation_master
+    key: ""
     response_mapping:
-      - from: "$.result.data"
-        to: collected._designation_list
+      - { from: designations, to: collected._designation_list }
     on_success: designation_search_and_pick
     on_error:
       any: designation_no_match_options
