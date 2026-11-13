@@ -97,22 +97,56 @@ nodes:
         Please select the issue you are facing:
     quick_replies:
       - { id: find_enroll, label: "🔍 Unable to enroll or find a igot course / igot marketplace course / event" }
-      - { id: unenroll,    label: "🚫 How to unenroll from the course" }
+      - { id: unenroll,    label: "🚫 How to unenroll from the course/program/event" }
     disable_input: true
     on_reply:
       find_enroll: ask_marketplace_question
-      unenroll:    inform_unavailable
+      unenroll:    ask_unenroll_content_type
 
   # ===========================================================================
   # Unenroll request guidance (moved from mode_b_unenroll_request.yaml,
   # UNENROLL_REQUEST flow_id) — pure informational guidance, no API calls,
   # no ticket, per that flow's SOP.
   # ===========================================================================
+  - id: ask_unenroll_content_type
+    type: message
+    prompt:
+      text: |
+        Could you let me know what you would like to unenroll from?
+    quick_replies:
+      - { id: course,        label: "📘 A Course" }
+      - { id: program_event, label: "🎓 A Program / 📅 An Event" }
+    disable_input: true
+    on_reply:
+      save_to: collected.unenroll_content_type
+      course:        inform_unenroll_course
+      program_event: inform_unavailable
+
+  # COURSE — the Unenroll option is now available on the portal
+  - id: inform_unenroll_course
+    type: message
+    prompt:
+      text: |
+        
+        To unenroll from a course, please follow the steps below:
+
+        1. Log in to your iGOT Karmayogi account.
+        2. Locate the course you wish to unenroll from.
+        3. Click on the **three dots** visible on the course thumbnail.
+        4. Select the **Unenroll** option.
+
+        Once you unenroll from the course, it will be removed from your In-Progress/Continue Learning list.
+
+        Please feel free to reach out to us if you require any further assistance.
+    disable_input: true
+    next: unenroll_end
+
+  # PROGRAM / EVENT — unenroll not supported
   - id: inform_unavailable
     type: message
     prompt:
       text: |
-        Currently, there is **no functionality available on our platform to unenroll** from an enrolled course, program, or event.
+        Currently, there is **no functionality available on our platform to unenroll** from an enrolled program or event.
 
         You may **continue and complete** the enrolled content.
         Alternatively, you may **ignore the enrolled content** — it will remain in your profile but will not affect your other courses or progress.
