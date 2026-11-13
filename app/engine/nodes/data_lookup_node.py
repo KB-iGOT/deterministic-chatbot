@@ -18,7 +18,8 @@ YAML shape:
         any: show_static_yp_fallback          # routed when result is None or service missing
 
 ``response_mapping`` entries use plain field names (not JSONPath) to read from
-the flat dict returned by the service's ``lookup()`` method.
+the flat dict returned by the service's ``lookup()`` method. ``lookup()`` may be
+a plain function or a coroutine function; coroutines are awaited.
 
 Routing follows the same convention as ``api_call``:
   - ``on_success`` is the default next edge (no error written to collected).
@@ -29,6 +30,7 @@ Routing follows the same convention as ``api_call``:
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any, Callable
 
@@ -87,6 +89,8 @@ class DataLookupNode(NodeHandler):
             # Call lookup
             try:
                 result: dict | None = svc.lookup(key_value)
+                if inspect.isawaitable(result):  # async services (e.g. designation_master)
+                    result = await result
             except Exception as exc:
                 log.exception("[data_lookup] node=%s lookup() raised: %s", node_id, exc)
                 return _record_error(state, cfg, f"lookup_error:{exc}")
