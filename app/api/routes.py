@@ -126,6 +126,42 @@ async def _translate_activities(
     return translated
 
 
+# ── Session metadata: Redis (shared across pods) ──────────────────────────────
+#
+# Redis is the source of truth. request.app.state.sessions is only a local
+# fallback for when Redis is unavailable: it cannot be the source of truth, because
+# with multiple pods consecutive turns of one session often land on different pods.
+# An entry is written to it only when saving to Redis fails (or Redis is not configured).
+
+async def _load_session(request: Request, sid: str) -> dict[str, Any] | None:
+    """Load session metadata from Redis; use this pod's local fallback only if Redis has none."""
+    store = getattr(request.app.state, "session_store", None)
+    if store is not None:
+        meta = await store.get_meta(sid)
+        if meta is not None:
+            return meta
+    return request.app.state.sessions.get(sid)
+
+
+async def _save_session(request: Request, sid: str, session: dict[str, Any]) -> None:
+    """Persist session metadata to Redis; keep a local copy only if that fails."""
+    store = getattr(request.app.state, "session_store", None)
+    ttl = session.get("ttl_minutes", settings.igot_web_session_ttl_minutes)
+    if store is not None and await store.save_meta(sid, session, ttl):
+        # Redis holds it now; drop any stale local copy from an earlier outage.
+        request.app.state.sessions.pop(sid, None)
+        return
+    request.app.state.sessions[sid] = session
+
+
+async def _delete_session(request: Request, sid: str) -> None:
+    """Remove session metadata everywhere (expired / ended)."""
+    request.app.state.sessions.pop(sid, None)
+    store = getattr(request.app.state, "session_store", None)
+    if store is not None:
+        await store.delete_meta(sid)
+
+
 @router.get("/health", tags=["meta"])
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -147,8 +183,8 @@ async def start_session(
         else settings.igot_web_session_ttl_minutes
     )
 
-    # Store session metadata
-    request.app.state.sessions[str(session_id)] = {
+    # Session metadata — persisted to Redis (shared across pods) before returning
+    _sess: dict[str, Any] = {
         "user_id_hash": user_id_hash,
         "channel": body.channel,
         "language": body.language,
@@ -213,9 +249,10 @@ async def start_session(
         )
 
     # Persist LF trace chain IDs so subsequent turns link into the same trace
-    _sess = request.app.state.sessions[_sid_str]
     _sess["_lf_trace_id"] = _lf_tid
     _sess["_lf_obs_id"] = _lf_oid
+    # Publish metadata to Redis so any pod can serve the next turn.
+    await _save_session(request, _sid_str, _sess)
 
     return StartSessionResponse(
         session_id=session_id,
@@ -233,11 +270,13 @@ async def submit_turn(
     request: Request,
     claims: dict[str, Any] = Depends(require_jwt),
 ) -> TurnResponse:
-    """Process one user action and return the resulting bot activities."""
+    """Process one user action and return the resulting bot activities.
 
+    Session metadata is loaded from Redis (shared by all pods) before the turn and
+    written back afterwards, even if the turn raises or returns early.
+    """
     sid = str(session_id)
-    sessions: dict = request.app.state.sessions
-    session = sessions.get(sid)
+    session = await _load_session(request, sid)
 
     _expired_msg = JSONResponse(
         status_code=status.HTTP_404_NOT_FOUND,
@@ -248,9 +287,26 @@ async def submit_turn(
         return _expired_msg
 
     if datetime.now(timezone.utc) > session.get("expires_at", datetime.max.replace(tzinfo=timezone.utc)):
-        sessions.pop(sid, None)
+        await _delete_session(request, sid)
         return _expired_msg
 
+    # The handler mutates `session` in place (status, flow_id, turn_count, expires_at,
+    # trace ids, ...). Persist it on every exit path so the next turn sees the update
+    # regardless of which pod serves it.
+    try:
+        return await _process_turn(session_id, sid, session, body, request, claims)
+    finally:
+        await _save_session(request, sid, session)
+
+
+async def _process_turn(
+    session_id: UUID,
+    sid: str,
+    session: dict[str, Any],
+    body: TurnRequest,
+    request: Request,
+    claims: dict[str, Any],
+) -> TurnResponse | JSONResponse:
     user_id = claims["sub"]
 
     # Translation service + session language (used throughout this handler)
@@ -795,8 +851,8 @@ async def get_my_session(
     if not session_id:
         return ActiveSessionResponse()
 
-    # Return any in-memory metadata we have alongside the session_id
-    meta = request.app.state.sessions.get(session_id, {})
+    # Return the session metadata (Redis-shared, so any pod can answer) alongside the session_id
+    meta = await _load_session(request, session_id) or {}
     return ActiveSessionResponse(
         session_id=session_id,
         status=meta.get("status"),
@@ -863,7 +919,7 @@ async def get_session_history(
     user_id_hash = hash_user_id(user_id)
 
     # Locate the right graph — need flow_id from session metadata or checkpointer
-    session_meta = request.app.state.sessions.get(sid)
+    session_meta = await _load_session(request, sid)
     flow_id = session_meta.get("flow_id") if session_meta else None
 
     graphs: dict = getattr(request.app.state, "graphs", {})
