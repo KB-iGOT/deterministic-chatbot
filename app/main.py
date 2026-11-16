@@ -120,7 +120,9 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
     app.state.checkpointer = checkpointer
     app.state.checkpointer_handle = cp_handle
     app.state.system_messages = system_messages
-    app.state.sessions: dict[str, dict] = {}  # in-memory session metadata
+    # Session metadata lives in Redis (shared across pods). This per-pod dict is only a
+    # fallback used when Redis is unavailable — multi-pod deployments must not rely on it.
+    app.state.sessions: dict[str, dict] = {}
     app.state.session_store = session_store   # Redis-backed; None when Redis unavailable
 
     # Engineering tickets DB setup
