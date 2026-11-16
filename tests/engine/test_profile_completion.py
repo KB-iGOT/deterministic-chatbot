@@ -442,3 +442,13 @@ class TestProfileFetchApiError:
     def test_other_escalate_api_error_callers_unchanged(self, nodes):
         for node_id in ("fetch_user_for_desig", "check_mdo_import", "fetch_user_for_svc_history"):
             assert nodes[node_id]["on_error"] == {"any": "escalate_api_error"}
+
+
+class TestAllowNoContentOptIn:
+    def test_only_extended_fetch_opts_in(self, flow, nodes):
+        assert nodes["fetch_extended_profile"]["allow_no_content"] is True
+        others = [
+            n["id"] for n in flow["nodes"]
+            if n.get("type") == "api_call" and n.get("allow_no_content")
+        ]
+        assert others == ["fetch_extended_profile"]

@@ -1225,6 +1225,8 @@ nodes:
     request:
       method: GET
       url: "/api/chatbot/v2/admin/extended/all/{{ ctx.user_id_hash }}"
+    # extended API returns 204 No Content when nothing is filled → treat as empty, not an error
+    allow_no_content: true
     response_mapping:
       # Location is complete only if at least one entry has BOTH state and district
       - { from: "$.response.locationDetails.data",           to: collected.has_location,        transform: has_complete_location }

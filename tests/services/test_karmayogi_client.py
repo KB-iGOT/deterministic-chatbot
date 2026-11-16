@@ -1,4 +1,4 @@
-"""Karmayogi client must treat 204 / empty bodies as an empty result, not an error."""
+"""Karmayogi client behaviour (204 is raised as NoContentResponse; never swallowed by the client)."""
 
 from __future__ import annotations
 
@@ -16,10 +16,24 @@ def _client_with(handler) -> KarmayogiService:
     return service
 
 
-@pytest.mark.parametrize("status,content", [(204, b""), (200, b""), (200, b"  \n")])
-async def test_empty_body_returns_empty_dict(status, content):
-    k = _client_with(lambda req: httpx.Response(status, content=content))
-    assert await k.execute_request("GET", "/api/chatbot/v2/admin/extended/all/abc") == {}
+async def test_204_raises_no_content_response():
+    from app.engine.nodes.api_call_node import NoContentResponse
+
+    k = _client_with(lambda req: httpx.Response(204))
+    with pytest.raises(NoContentResponse):
+        await k.execute_request("GET", "/x")
+
+
+@pytest.mark.parametrize("content", [b"", b"  \n", b"<html>bad gateway</html>"])
+async def test_200_empty_or_malformed_body_raises_plain_decode_error(content):
+    import json
+
+    from app.engine.nodes.api_call_node import NoContentResponse
+
+    k = _client_with(lambda req: httpx.Response(200, content=content))
+    with pytest.raises(json.JSONDecodeError) as ei:
+        await k.execute_request("GET", "/x")
+    assert not isinstance(ei.value, NoContentResponse)
 
 
 async def test_normal_envelope_still_unwrapped():

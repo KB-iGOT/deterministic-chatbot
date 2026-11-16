@@ -108,6 +108,10 @@ class ApiCallNode(NodeHandler):
         request_cfg: dict = cfg["request"]
         response_mapping: list = cfg.get("response_mapping", [])
         timeout_ms: int = cfg.get("timeout_ms", 10_000)
+        # Opt-in: treat an HTTP 204 No Content (surfaced by the integration as
+        # NoContentResponse) as an empty result instead of an error. Any other
+        # empty / malformed body stays an error.
+        allow_no_content: bool = bool(cfg.get("allow_no_content"))
 
         async def run(state: ConversationState) -> dict:
             node_id = cfg["id"]
@@ -198,6 +202,16 @@ class ApiCallNode(NodeHandler):
                     )
                     return _record_error(state, cfg, "not_found")
 
+                except json.JSONDecodeError as e:
+                    if allow_no_content and isinstance(e, NoContentResponse):
+                        log.info("[api_call] node=%s got 204 No Content — treated as empty result", node_id)
+                        result = {}
+                    else:
+                        log.error(
+                            "[api_call] node=%s got a non-JSON/empty response  (integration=%s %s %s)",
+                            node_id, integration_name, rendered["method"], rendered["url"],
+                        )
+                        return _record_error(state, cfg, "any:invalid_json")
                 except Exception as e:  # noqa: BLE001
                     log.error(
                         "[api_call] node=%s raised %s: %s  (integration=%s %s %s)",
@@ -358,6 +372,18 @@ class ApiCallNode(NodeHandler):
 
 class IntegrationNotFound(Exception):
     """Raised by an adapter when the resource doesn't exist (404-like)."""
+
+
+class NoContentResponse(json.JSONDecodeError):
+    """Raised by an adapter on HTTP 204 No Content.
+
+    Subclasses JSONDecodeError so flows that don't opt in behave exactly as before
+    (an empty body is an error); only api_call nodes with `allow_no_content: true`
+    treat it as an empty result.
+    """
+
+    def __init__(self, message: str = "204 No Content") -> None:
+        super().__init__(message, "", 0)
 
 
 def _resolve_ctx_path(ctx: dict[str, Any], dotted_path: str) -> Any:
