@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 from uuid import UUID
 
@@ -212,6 +213,31 @@ def test_processing_error_response_is_500():
     resp = routes._processing_error_response()
     assert resp.status_code == 500
     assert b"trouble processing" in resp.body
+
+
+def test_utc_now_iso_is_naive_utc_iso_string():
+    before = datetime.now(timezone.utc).replace(tzinfo=None)
+    stamp = routes._utc_now_iso()
+    after = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    assert "+" not in stamp and not stamp.endswith("Z")  # same format as legacy utcnow().isoformat()
+    parsed = datetime.fromisoformat(stamp)
+    assert parsed.tzinfo is None
+    assert before - timedelta(seconds=1) <= parsed <= after + timedelta(seconds=1)
+
+
+async def test_append_history_writes_user_and_bot_messages_with_utc_timestamps():
+    graph = Graph()
+    request = _request(graphs={"f1": graph})
+    activities = [{"type": "markdown", "content": "hi"}]
+
+    await routes._append_history(request, "sid", "f1", _choice("c", user_says="Label"), activities)
+
+    user_msg, bot_msg = graph.updates[0]["messages"]
+    assert (user_msg["role"], user_msg["text"], user_msg["action"]) == ("user", "Label", "select_choice")
+    assert (bot_msg["role"], bot_msg["activities"]) == ("bot", activities)
+    for msg in (user_msg, bot_msg):
+        assert datetime.fromisoformat(msg["ts"]).tzinfo is None
 
 
 async def test_append_history_noop_without_flow_or_graph():

@@ -371,6 +371,11 @@ async def _prefetch_user_profile(
         pass  # fail-open: flow continues without profile data
 
 
+def _utc_now_iso() -> str:
+    """Naive-UTC ISO timestamp (same format as the legacy ``datetime.utcnow().isoformat()``)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
+
 async def _append_history(
     request: Request,
     sid: str,
@@ -383,8 +388,8 @@ async def _append_history(
     if graph is None:
         return
     user_text = body.user_says or body.text or body.choice_id or body.item_label or body.other_query
-    user_msg = {"role": "user", "action": body.action, "text": user_text, "ts": datetime.utcnow().isoformat()}
-    bot_msg = {"role": "bot", "activities": activities, "ts": datetime.utcnow().isoformat()}
+    user_msg = {"role": "user", "action": body.action, "text": user_text, "ts": _utc_now_iso()}
+    bot_msg = {"role": "bot", "activities": activities, "ts": _utc_now_iso()}
     try:
         await graph.aupdate_state(
             {"configurable": {"thread_id": sid}},
