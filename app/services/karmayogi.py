@@ -134,6 +134,13 @@ class KarmayogiService:
         else:
             log.error("[karmayogi] All 3 attempts failed for %s %s", method, url)
             raise last_exc  # type: ignore[misc]
+        # 204 No Content / empty body is a valid "nothing to return" answer
+        # (e.g. extended profile API for a user with no extended data filled).
+        # Return an empty dict so response_mapping yields missing values
+        # instead of the node failing with a JSON decode error.
+        if resp.status_code == 204 or not resp.content.strip():
+            return {}
+
         data = resp.json()
 
         # Unwrap Karmayogi's {result: {...}} envelope if present, so YAML can

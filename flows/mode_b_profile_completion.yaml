@@ -1214,7 +1214,7 @@ nodes:
       - { from: "$.response.channel",                                                  to: collected.org_channel }
     on_success: fetch_extended_profile
     on_error:
-      any: escalate_api_error
+      any: profile_fetch_api_error
     timeout_ms: 5000
 
   # Extended profile API — location, education and service history live here,
@@ -1229,10 +1229,13 @@ nodes:
       # Location is complete only if at least one entry has BOTH state and district
       - { from: "$.response.locationDetails.data",           to: collected.has_location,        transform: has_complete_location }
       - { from: "$.response.educationalQualifications.data", to: collected.has_education,       transform: has_items }
+      # Service history is auto-populated from designation + department, so it is
+      # treated as present whenever a designation is filled (checked in diagnose /
+      # summary below); the extended API value is only used when designation is blank.
       - { from: "$.response.serviceHistory.data",            to: collected.has_service_history, transform: has_items }
     on_success: diagnose_missing_fields
     on_error:
-      any: escalate_api_error
+      any: profile_fetch_api_error
     timeout_ms: 5000
 
   - id: diagnose_missing_fields
@@ -1242,7 +1245,7 @@ nodes:
       - { if: "ctx.collected.completion_pct != None and float(ctx.collected.completion_pct) >= 100.0",
           then: already_complete }
       # Below 100% but every field we check is present → nothing to guide the user on
-      - { if: "ctx.collected.has_name and ctx.collected.has_avatar and ctx.collected.has_banner and ctx.collected.has_about_me and ctx.collected.has_designation and ctx.collected.has_group and ctx.collected.has_location and ctx.collected.has_education and ctx.collected.has_service_history",
+      - { if: "ctx.collected.has_name and ctx.collected.has_avatar and ctx.collected.has_banner and ctx.collected.has_about_me and ctx.collected.has_designation and ctx.collected.has_group and ctx.collected.has_location and ctx.collected.has_education and (ctx.collected.has_service_history or ctx.collected.has_designation)",
           then: no_gap_found }
     default: show_missing_summary
 
@@ -1286,7 +1289,7 @@ nodes:
         {% if not ctx.collected.has_location %}
         - **Location (State and District)**
         {% endif %}
-        {% if not ctx.collected.has_service_history %}
+        {% if not (ctx.collected.has_service_history or ctx.collected.has_designation) %}
         - **Service History**
         {% endif %}
         {% if not ctx.collected.has_education %}
@@ -1688,6 +1691,19 @@ nodes:
       priority_override: P3
       ticket_tags: [fallback_from_deterministic, profile_update]
     on_complete: confirm_ticket
+
+  # ── PROFILE COMPLETION CHECK — API ERROR (no ticket; user can retry) ──────
+  - id: profile_fetch_api_error
+    type: message
+    prompt:
+      text: |
+        We're having trouble processing your request right now. Please try again in a few moments.
+    quick_replies:
+      - { id: retry, label: "🔄 Try again" }
+      - { id: done,  label: "✅ Exit" }
+    on_reply:
+      retry: fetch_user_profile
+      done:  satisfied
 
   # ── API ERROR ESCALATION ──────────────────────────────────────────────────
   - id: escalate_api_error

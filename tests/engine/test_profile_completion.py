@@ -182,7 +182,7 @@ class TestFetchUserProfile:
                     assert m["transform"] in _TRANSFORMS, m
 
     def test_error_escalates(self, nodes):
-        assert nodes["fetch_user_profile"]["on_error"]["any"] == "escalate_api_error"
+        assert nodes["fetch_user_profile"]["on_error"]["any"] == "profile_fetch_api_error"
 
 
 class TestFetchExtendedProfile:
@@ -195,7 +195,7 @@ class TestFetchExtendedProfile:
     def test_routes(self, nodes):
         node = nodes["fetch_extended_profile"]
         assert node["on_success"] == "diagnose_missing_fields"
-        assert node["on_error"]["any"] == "escalate_api_error"
+        assert node["on_error"]["any"] == "profile_fetch_api_error"
 
     def test_mappings(self, nodes):
         m = _mappings(nodes["fetch_extended_profile"])
@@ -267,9 +267,22 @@ class TestDiagnoseBranch:
     def test_unknown_pct_all_present_is_no_gap(self, evaluate):
         assert evaluate(self._all_present(completion_pct=None)) == "no_gap_found"
 
-    @pytest.mark.parametrize("flag", HAS_FLAGS)
+    @pytest.mark.parametrize("flag", [f for f in HAS_FLAGS if f != "has_service_history"])
     def test_any_missing_flag_shows_summary(self, evaluate, flag):
         assert evaluate(self._all_present(**{flag: False})) == "show_missing_summary"
+
+    def test_service_history_ignored_when_designation_filled(self, evaluate):
+        # Service history is auto-fetched from designation + department.
+        assert evaluate(self._all_present(has_service_history=False)) == "no_gap_found"
+
+    def test_service_history_missing_without_designation(self, evaluate):
+        c = self._all_present(has_service_history=False, has_designation=False)
+        assert evaluate(c) == "show_missing_summary"
+
+    def test_extended_api_empty_still_flags_location_and_education(self, evaluate):
+        # 204 from extended API → location/education/service_history all falsy
+        c = self._all_present(has_location=False, has_education=False, has_service_history=False)
+        assert evaluate(c) == "show_missing_summary"
 
     def test_no_gap_found_hands_off_to_support(self, nodes):
         node = nodes["no_gap_found"]
@@ -286,6 +299,14 @@ class TestMissingSummary:
     def _items(rendered):
         return [ln.strip() for ln in rendered.splitlines() if ln.strip().startswith("- **")]
 
+    def test_service_history_listed_only_when_designation_also_missing(self, text):
+        collected = {f: True for f in HAS_FLAGS}
+        collected.update(has_designation=False, has_service_history=False)
+        assert self._items(render(text, {"collected": collected})) == [
+            "- **Designation**",
+            "- **Service History**",
+        ]
+
     def test_everything_missing(self, text):
         rendered = render(text, {"collected": {f: False for f in HAS_FLAGS}})
         assert self._items(rendered) == [
@@ -297,6 +318,19 @@ class TestMissingSummary:
             "- **Group**",
             "- **Location (State and District)**",
             "- **Service History**",
+            "- **Educational Qualification**",
+        ]
+
+    def test_service_history_not_listed_when_designation_filled(self, text):
+        collected = {f: True for f in HAS_FLAGS}
+        collected["has_service_history"] = False
+        assert self._items(render(text, {"collected": collected})) == []
+
+    def test_extended_api_empty_lists_location_and_education_only(self, text):
+        collected = {f: True for f in HAS_FLAGS}
+        collected.update(has_location=False, has_education=False, has_service_history=False)
+        assert self._items(render(text, {"collected": collected})) == [
+            "- **Location (State and District)**",
             "- **Educational Qualification**",
         ]
 
@@ -314,7 +348,6 @@ class TestMissingSummary:
             ("has_designation", "Designation"),
             ("has_group", "Group"),
             ("has_location", "Location (State and District)"),
-            ("has_service_history", "Service History"),
             ("has_education", "Educational Qualification"),
         ],
     )
@@ -392,3 +425,20 @@ def test_every_menu_with_go_name_routes_all_new_fields(nodes):
         assert {"go_name", "go_loc", "go_svc", "go_edu"} <= set(n["on_reply"])
         ids = {q["id"] for q in n.get("quick_replies") or n["follow_up"]["quick_replies"]}
         assert {"go_name", "go_loc", "go_svc", "go_edu"} <= ids
+
+
+class TestProfileFetchApiError:
+    @pytest.mark.parametrize("node_id", ["fetch_user_profile", "fetch_extended_profile"])
+    def test_fetch_errors_route_to_retry_node(self, nodes, node_id):
+        assert nodes[node_id]["on_error"] == {"any": "profile_fetch_api_error"}
+
+    def test_retry_and_exit_without_ticket(self, nodes):
+        node = nodes["profile_fetch_api_error"]
+        assert node["type"] == "message"
+        assert node["on_reply"] == {"retry": "fetch_user_profile", "done": "satisfied"}
+        assert {q["id"] for q in node["quick_replies"]} == {"retry", "done"}
+        assert "ticket" not in node["prompt"]["text"].lower()
+
+    def test_other_escalate_api_error_callers_unchanged(self, nodes):
+        for node_id in ("fetch_user_for_desig", "check_mdo_import", "fetch_user_for_svc_history"):
+            assert nodes[node_id]["on_error"] == {"any": "escalate_api_error"}
