@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -40,6 +41,19 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
 
     # Service registry (adapters: Karmayogi, Zoho, LLM, Presidio, Translation)
     services = ServiceRegistry.from_env()
+
+    # Designation master Excel — warm the in-memory list in the background so the
+    # first user doesn't wait for the download. Non-fatal: the first lookup retries.
+    designation_master = services.get("designation_master")
+    warm_task = None
+    if designation_master is not None and designation_master.is_configured:
+        async def _warm_designations() -> None:
+            try:
+                await designation_master.ensure_loaded()
+                print(f"✅ Designation master: {designation_master.count} designations")
+            except Exception as e:  # noqa: BLE001
+                print(f"⚠️  Designation master not loaded ({e})")
+        warm_task = asyncio.create_task(_warm_designations())
 
     # Checkpointer — Postgres in dev/prod (persistent across restarts), fallback to in-memory.
     # AsyncPostgresSaver.setup() is idempotent — creates the 4 LangGraph checkpoint tables if absent.
@@ -128,6 +142,8 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
 
     # ── Shutdown ──────────────────────────────────────────────────────────────
     tracing.shutdown()
+    if warm_task is not None and not warm_task.done():
+        warm_task.cancel()
     await services.aclose()
     await cp_handle.aclose()
     if _redis_client is not None:
