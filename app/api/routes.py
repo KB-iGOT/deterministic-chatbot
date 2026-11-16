@@ -299,6 +299,530 @@ async def submit_turn(
         await _save_session(request, sid, session)
 
 
+_PROCESSING_ERROR_MSG = (
+    "We're having trouble processing your request right now. Please try again in a few moments."
+)
+
+
+def _processing_error_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"params": {"errmsg": _PROCESSING_ERROR_MSG}},
+    )
+
+
+def _advance_trace_chain(session: dict[str, Any], trace_id: str | None, obs_id: str | None) -> None:
+    """Link the next turn's trace to the span that just closed."""
+    if trace_id:
+        session["_lf_trace_id"] = trace_id
+    if obs_id:
+        session["_lf_obs_id"] = obs_id
+
+
+async def _menu_response(
+    session_id: UUID,
+    request: Request,
+    lang: str,
+    translation_svc: Any,
+    sys_key: str,
+    default_text: str,
+    choices: list[QuickReply],
+) -> TurnResponse:
+    """Markdown prompt + quick-reply menu, awaiting the user's next choice."""
+    activities = [
+        Activity.markdown(_sys(request, sys_key, default_text)).model_dump(exclude_none=True),
+        Activity.quick_replies(choices=choices).model_dump(exclude_none=True),
+    ]
+    activities = await _translate_activities(activities, lang, translation_svc)
+    return TurnResponse(
+        session_id=session_id,
+        activities=activities,
+        status=FlowStatus.AWAITING_USER.value,
+        flow_id=None,
+        current_node=None,
+    )
+
+
+async def _prefetch_user_profile(
+    request: Request, user_id_hash: str, state_dict: dict[str, Any]
+) -> None:
+    """Pre-fetch email/name/mobile once at flow start (fail-open)."""
+    karmayogi = getattr(request.app.state, "services", {}).get("karmayogi")
+    if karmayogi is None:
+        return
+    try:
+        profile = await karmayogi.execute_request(
+            "POST",
+            "/api/private/user/v1/search",
+            body={"request": {"filters": {"userId": user_id_hash}, "limit": 1}},
+        )
+        content = (profile.get("response") or {}).get("content") or []
+        if not content:
+            return
+        personal = (content[0].get("profileDetails") or {}).get("personalDetails") or {}
+        profile_fields = {
+            "email":      personal.get("primaryEmail"),
+            "mobile":     personal.get("mobile"),
+            "first_name": personal.get("firstname"),
+            "last_name":  personal.get("surname"),
+        }
+        state_dict["collected"].update({k: v for k, v in profile_fields.items() if v is not None})
+    except Exception:  # noqa: BLE001
+        pass  # fail-open: flow continues without profile data
+
+
+async def _append_history(
+    request: Request,
+    sid: str,
+    flow_id: str | None,
+    body: TurnRequest,
+    activities: list[dict],
+) -> None:
+    """Append user action + bot response to persistent conversation history."""
+    graph = request.app.state.graphs.get(flow_id) if flow_id else None
+    if graph is None:
+        return
+    user_text = body.user_says or body.text or body.choice_id or body.item_label or body.other_query
+    user_msg = {"role": "user", "action": body.action, "text": user_text, "ts": datetime.utcnow().isoformat()}
+    bot_msg = {"role": "bot", "activities": activities, "ts": datetime.utcnow().isoformat()}
+    try:
+        await graph.aupdate_state(
+            {"configurable": {"thread_id": sid}},
+            {"messages": [user_msg, bot_msg]},
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[history] failed to append messages for session=%s: %s", sid, exc)
+
+
+async def _finish_turn(
+    *,
+    session_id: UUID,
+    sid: str,
+    session: dict[str, Any],
+    body: TurnRequest,
+    request: Request,
+    user_id: str,
+    flow_id: str,
+    result: dict[str, Any],
+    lang: str,
+    translation_svc: Any,
+    starting_flow: bool = False,
+) -> TurnResponse:
+    """Shared end-of-turn bookkeeping after the graph has run.
+
+    ``starting_flow`` is True for the topic-selection turn: the session is switched to
+    ``in_flow`` here (after translation, as before) and the session store is cleaned up
+    before the flow-ended log/trace rather than after.
+    """
+    activities = result.get("pending_activities") or []
+    activities = await _translate_activities(activities, lang, translation_svc)
+    result_status = result.get("status", "active")
+    is_terminal = result_status in _TERMINAL_STATUSES
+
+    next_node = result.get("current_node")
+    if next_node:
+        session.setdefault("node_path", []).append(next_node)
+
+    if starting_flow:
+        session["flow_id"] = flow_id
+        session["status"] = "in_flow"
+
+    store = getattr(request.app.state, "session_store", None)
+    ticket_id = (result.get("collected") or {}).get("ticket_id")
+    if is_terminal:
+        session["status"] = "done"
+        if store and starting_flow:
+            await store.delete(session["user_id_hash"])
+        log.info(
+            "[activity] event=flow_ended  session=%s  user=%s  flow=%s  outcome=%s  ticket=%s",
+            sid, session["user_id_hash"], flow_id, result_status, ticket_id or "-",
+        )
+        tracing.record_session_end(
+            user_id=user_id,
+            session_id=sid,
+            flow_id=flow_id,
+            outcome=result_status,
+            ticket_id=ticket_id,
+            turn_count=session.get("turn_count", 0),
+            node_path=session.get("node_path", []),
+            channel=session.get("channel", "web"),
+            language=session.get("language", "en"),
+            trace_id=session.get("_lf_trace_id"),
+            parent_observation_id=session.get("_lf_obs_id"),
+        )
+        if store and not starting_flow:
+            await store.delete(session["user_id_hash"])
+    elif store:
+        await store.refresh(session["user_id_hash"], session["ttl_minutes"])
+
+    await _append_history(request, sid, flow_id, body, activities)
+
+    return TurnResponse(
+        session_id=session_id,
+        activities=activities,
+        status=result_status,
+        flow_id=flow_id,
+        current_node=next_node,
+        ticket_id=ticket_id if is_terminal else None,
+    )
+
+
+async def _handle_category_selection(
+    session_id: UUID,
+    sid: str,
+    session: dict[str, Any],
+    body: TurnRequest,
+    request: Request,
+    user_id: str,
+    lang: str,
+    translation_svc: Any,
+) -> tuple[TurnResponse | None, TurnRequest]:
+    """Phase: category selection. Returns (response, body); response is None to fall through."""
+    choice_id = body.choice_id or ""
+    cat_prefix = "__cat__"
+    category = choice_id[len(cat_prefix):] if choice_id.startswith(cat_prefix) else ""
+    sub_flows = _flows_for_category_quick_replies(request, category) if category else []
+
+    if not sub_flows:
+        # Invalid selection → re-offer categories
+        log.info(
+            "[activity] event=category_invalid  session=%s  user=%s  choice=%r",
+            sid, session["user_id_hash"], choice_id,
+        )
+        response = await _menu_response(
+            session_id, request, lang, translation_svc,
+            "unknown_topic",
+            "🤔 I didn't catch that — please choose one of the options below.",
+            _category_quick_replies(request),
+        )
+        return response, body
+
+    session["selected_category"] = category
+
+    if len(sub_flows) == 1:
+        # Only one flow under this category — skip the redundant submenu click and
+        # fall through to the `selecting_topic` phase by pretending it was chosen.
+        log.info(
+            "[activity] event=category_selected_single_flow  session=%s  user=%s  category=%r  flow=%s",
+            sid, session["user_id_hash"], category, sub_flows[0].id,
+        )
+        session["status"] = "selecting_topic"
+        return None, body.model_copy(update={"choice_id": sub_flows[0].id})
+
+    # Valid category with multiple flows — show its flows and advance state
+    log.info(
+        "[activity] event=category_selected  session=%s  user=%s  category=%r",
+        sid, session["user_id_hash"], category,
+    )
+    session["status"] = "selecting_topic"
+
+    with tracing.turn_trace(
+        user_id=user_id,
+        session_id=sid,
+        trace_name="category-selected",
+        tags=[session["channel"], session["language"]],
+        trace_id=session.get("_lf_trace_id"),
+        parent_observation_id=session.get("_lf_obs_id"),
+        category=category,
+        channel=session["channel"],
+    ):
+        trace_id, obs_id = tracing.get_current_span_ids()
+        tracing.set_span_io(
+            input={"user": f"Selected category: {category}"},
+            output={"bot": "Sub-flow menu shown", "flow_options": [qr.label for qr in sub_flows]},
+        )
+    _advance_trace_chain(session, trace_id, obs_id)
+
+    response = await _menu_response(
+        session_id, request, lang, translation_svc,
+        "select_issue",
+        "Please choose the specific issue you're facing:",
+        sub_flows,
+    )
+    return response, body
+
+
+async def _handle_topic_selection(
+    session_id: UUID,
+    sid: str,
+    session: dict[str, Any],
+    body: TurnRequest,
+    request: Request,
+    user_id: str,
+    session_token: str,
+    lang: str,
+    translation_svc: Any,
+) -> TurnResponse | JSONResponse:
+    """Phase: topic selection — validate the chosen flow and start it."""
+    # choice_id IS the flow_id — menu buttons are generated from flow YAML metadata.
+    choice_id = body.choice_id or ""
+    graphs: dict = getattr(request.app.state, "graphs", {})
+    compiler = getattr(request.app.state, "compiler", None)
+
+    # Accept the choice only if the flow is compiled AND enabled
+    # (metadata.enabled: false blocks the flow regardless of compilation).
+    flow_id = None
+    if choice_id in graphs and compiler is not None and compiler.is_flow_enabled(choice_id):
+        flow_id = choice_id
+
+    if not flow_id:
+        # Unknown topic → re-offer the sub-menu for the already-chosen category
+        # (falls back to the full flat menu when category was never set)
+        log.info(
+            "[activity] event=topic_invalid  session=%s  user=%s  choice=%r",
+            sid, session["user_id_hash"], choice_id,
+        )
+        selected_cat = session.get("selected_category")
+        fallback_choices = (
+            _flows_for_category_quick_replies(request, selected_cat)
+            if selected_cat
+            else _menu_quick_replies(request)
+        )
+        return await _menu_response(
+            session_id, request, lang, translation_svc,
+            "unknown_topic",
+            "🤔 I didn't catch that — please choose one of the options below.",
+            fallback_choices,
+        )
+
+    graph = graphs.get(flow_id)
+    if graph is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Flow '{flow_id}' not loaded — check server startup logs",
+        )
+
+    user_id_hash = session["user_id_hash"]
+    log.info(
+        "[activity] event=topic_selected  session=%s  user=%s  flow=%s",
+        sid, user_id_hash, flow_id,
+    )
+
+    state = initial_state(
+        session_id=session_id,
+        user_id_hash=user_id_hash,
+        channel=Channel(session["channel"]),
+        language=session["language"],
+        session_ttl_minutes=session["ttl_minutes"],
+    )
+    state_dict = state.model_dump(mode="json")
+    state_dict["flow_id"] = flow_id
+    # Seed user_id into collected; store raw JWT in session_token (not in collected —
+    # keeps it out of LLM context and YAML templates; accessible only via __SESSION_TOKEN__ sentinel)
+    state_dict.setdefault("collected", {})["user_id"] = user_id
+    state_dict["session_token"] = session_token
+
+    await _prefetch_user_profile(request, user_id_hash, state_dict)
+
+    session["turn_count"] = session.get("turn_count", 0) + 1
+    session["expires_at"] = datetime.now(timezone.utc) + timedelta(minutes=session["ttl_minutes"])
+    lg_config = {"configurable": {"thread_id": sid}}
+    try:
+        with tracing.turn_trace(
+            user_id=user_id,
+            session_id=sid,
+            trace_name=f"flow-start-{flow_id}",
+            tags=[session["channel"], session["language"], flow_id],
+            trace_id=session.get("_lf_trace_id"),
+            parent_observation_id=session.get("_lf_obs_id"),
+            flow_id=flow_id,
+            channel=session["channel"],
+            action="topic_selected",
+            user_choice=flow_id,
+            turn_count=session["turn_count"],
+        ):
+            trace_id, obs_id = tracing.get_current_span_ids()
+            # topic label comes from the menu — same as flow_id for built-in flows
+            topic_label = next(
+                (qr.label for qr in _menu_quick_replies(request) if qr.id == flow_id),
+                flow_id,
+            )
+            span_input = {"user": f"Selected topic: {topic_label}"}
+            tracing.set_span_io(input=span_input)
+            result = await graph.ainvoke(state_dict, lg_config)
+            tracing.set_span_io(
+                input=span_input,
+                output={
+                    "activities": _activities_for_trace(result.get("pending_activities") or []),
+                    "next_node": result.get("current_node"),
+                    "status": str(result.get("status", "active")),
+                },
+            )
+    except Exception:  # noqa: BLE001
+        log.exception("Flow start error for %s", flow_id)
+        return _processing_error_response()
+
+    _advance_trace_chain(session, trace_id, obs_id)
+
+    return await _finish_turn(
+        session_id=session_id, sid=sid, session=session, body=body, request=request,
+        user_id=user_id, flow_id=flow_id, result=result, lang=lang,
+        translation_svc=translation_svc, starting_flow=True,
+    )
+
+
+async def _validate_pending_text(
+    session_id: UUID,
+    request: Request,
+    body: TurnRequest,
+    flow_id: str,
+    flow_yaml: dict | None,
+    current_state_values: dict,
+    lang: str,
+    translation_svc: Any,
+) -> TurnResponse | None:
+    """Validate free-text input for the current collect field BEFORE touching graph state.
+
+    Returns an error response (graph state unchanged) or None when the input is acceptable.
+    """
+    if body.action != "send_message" or not body.text:
+        return None
+    current_node_id = current_state_values.get("current_node")
+    node_cfg = _find_node(flow_yaml, current_node_id)
+    if not node_cfg or node_cfg.get("type") != "collect":
+        return None
+    field_meta = _find_current_field(node_cfg, current_state_values.get("collected") or {})
+    if not field_meta:
+        return None
+    sys_msgs = getattr(request.app.state, "system_messages", {}) or {}
+    err = _validate_field_input(body.text, field_meta, sys_msgs)
+    if not err:
+        return None
+
+    err_activities = [
+        Activity.markdown(err).model_dump(exclude_none=True),
+        Activity.input(
+            input_id=field_meta.get("field", field_meta.get("name", "value")),
+            placeholder=field_meta.get("placeholder", ""),
+        ).model_dump(exclude_none=True),
+    ]
+    err_activities = await _translate_activities(err_activities, lang, translation_svc)
+    return TurnResponse(
+        session_id=session_id,
+        activities=err_activities,
+        status=FlowStatus.AWAITING_USER.value,
+        flow_id=flow_id,
+        current_node=current_node_id,
+    )
+
+
+async def _handle_active_flow(
+    session_id: UUID,
+    sid: str,
+    session: dict[str, Any],
+    body: TurnRequest,
+    request: Request,
+    user_id: str,
+    lang: str,
+    translation_svc: Any,
+) -> TurnResponse | JSONResponse:
+    """Phase: active flow — apply the user action and resume the graph."""
+    if session["status"] == "done":
+        activities = [
+            Activity.markdown(
+                _sys(request, "conversation_ended",
+                     "This conversation has ended. Please start a new session to continue.")
+            ).model_dump(exclude_none=True)
+        ]
+        activities = await _translate_activities(activities, lang, translation_svc)
+        return TurnResponse(
+            session_id=session_id,
+            activities=activities,
+            status="ended",
+            flow_id=session.get("flow_id"),
+            current_node=None,
+        )
+
+    flow_id = session.get("flow_id")
+    if not flow_id:
+        return _processing_error_response()
+
+    graph = getattr(request.app.state, "graphs", {}).get(flow_id)
+    if graph is None:
+        raise HTTPException(status_code=503, detail=f"Flow '{flow_id}' not loaded")
+
+    lg_config = {"configurable": {"thread_id": sid}}
+    flow_yaml = request.app.state.compiler.get_flow(flow_id)
+
+    # Get current graph state for save_to / field lookups
+    try:
+        snapshot = await graph.aget_state(lg_config)
+        current_state_values: dict = snapshot.values if snapshot else {}
+    except Exception:  # noqa: BLE001
+        current_state_values = {}
+
+    invalid_input = await _validate_pending_text(
+        session_id, request, body, flow_id, flow_yaml, current_state_values, lang, translation_svc,
+    )
+    if invalid_input is not None:
+        return invalid_input
+
+    # Log the user action (never log free text — PII; log length only)
+    log.info(
+        "[activity] event=user_turn  session=%s  user=%s  flow=%s  node=%s  action=%s  %s",
+        sid, session["user_id_hash"], flow_id,
+        current_state_values.get("current_node", "-"),
+        body.action, _action_summary(body),
+    )
+
+    # Build state update from user action (collected fields + message history)
+    update = _build_state_update(body, current_state_values, flow_yaml)
+
+    # Safe label for Langfuse — never log free text (PII); use structured fields only
+    user_choice = (
+        body.user_says                                              # frontend label e.g. "Certificate issue"
+        or body.item_label                                          # picker selection e.g. "Foundation Course on AI"
+        or (body.choice_id if body.action == "select_choice" else None)  # internal id fallback
+        or body.action                                              # action type as last resort
+    )
+    session["turn_count"] = session.get("turn_count", 0) + 1
+    session["expires_at"] = datetime.now(timezone.utc) + timedelta(minutes=session["ttl_minutes"])
+
+    current_node = current_state_values.get("current_node", "")
+    try:
+        with tracing.turn_trace(
+            user_id=user_id,
+            session_id=sid,
+            trace_name=f"turn-{flow_id}",
+            tags=[session.get("channel", "web"), session.get("language", "en"), flow_id],
+            trace_id=session.get("_lf_trace_id"),
+            parent_observation_id=session.get("_lf_obs_id"),
+            flow_id=flow_id,
+            action=body.action,
+            node=current_node,
+            user_choice=user_choice,
+            turn_count=session["turn_count"],
+        ):
+            trace_id, obs_id = tracing.get_current_span_ids()
+            # Human-readable user label — never log raw text (PII)
+            user_label = _user_input_label(body, user_choice, current_node, flow_yaml)
+            span_input = {"user": user_label, "node": current_node}
+            tracing.set_span_io(input=span_input)
+            await graph.aupdate_state(lg_config, update)
+            result = await graph.ainvoke(None, lg_config)
+            out: dict = {
+                "activities": _activities_for_trace(result.get("pending_activities") or []),
+                "next_node": result.get("current_node"),
+                "status": str(result.get("status", "active")),
+            }
+            turn_ticket_id = (result.get("collected") or {}).get("ticket_id")
+            if turn_ticket_id:
+                out["ticket_id"] = turn_ticket_id
+            tracing.set_span_io(input=span_input, output=out)
+    except Exception:  # noqa: BLE001
+        log.exception("Flow resume error for session %s", sid)
+        return _processing_error_response()
+
+    # Advance trace-chain IDs so the next turn links to THIS turn's span
+    _advance_trace_chain(session, trace_id, obs_id)
+
+    return await _finish_turn(
+        session_id=session_id, sid=sid, session=session, body=body, request=request,
+        user_id=user_id, flow_id=flow_id, result=result, lang=lang,
+        translation_svc=translation_svc,
+    )
+
+
 async def _process_turn(
     session_id: UUID,
     sid: str,
@@ -321,504 +845,22 @@ async def _process_turn(
 
     # ── Phase: category selection (top-level menu, before topic/flow selection) ─
     if session["status"] == "selecting_category":
-        choice_id = body.choice_id or ""
-        compiler = getattr(request.app.state, "compiler", None)
-
-        _cat_prefix = "__cat__"
-        category = choice_id[len(_cat_prefix):] if choice_id.startswith(_cat_prefix) else ""
-        sub_flows = _flows_for_category_quick_replies(request, category) if category else []
-
-        if not sub_flows:
-            # Invalid selection → re-offer categories
-            log.info(
-                "[activity] event=category_invalid  session=%s  user=%s  choice=%r",
-                sid, session["user_id_hash"], choice_id,
-            )
-            activities = [
-                Activity.markdown(
-                    _sys(request, "unknown_topic",
-                         "🤔 I didn't catch that — please choose one of the options below.")
-                ).model_dump(exclude_none=True),
-                Activity.quick_replies(
-                    choices=_category_quick_replies(request)
-                ).model_dump(exclude_none=True),
-            ]
-            activities = await _translate_activities(activities, lang, translation_svc)
-            return TurnResponse(
-                session_id=session_id,
-                activities=activities,
-                status=FlowStatus.AWAITING_USER.value,
-                flow_id=None,
-                current_node=None,
-            )
-
-        session["selected_category"] = category
-
-        if len(sub_flows) == 1:
-            # Only one flow under this category (e.g. "Application Crashing / Not
-            # Loading" → "Auto logout / App crash") — skip the redundant submenu
-            # click and go straight into that flow. Falls through to the
-            # `selecting_topic` phase below by pretending the flow was chosen.
-            log.info(
-                "[activity] event=category_selected_single_flow  session=%s  user=%s  category=%r  flow=%s",
-                sid, session["user_id_hash"], category, sub_flows[0].id,
-            )
-            session["status"] = "selecting_topic"
-            body = body.model_copy(update={"choice_id": sub_flows[0].id})
-        else:
-            # Valid category with multiple flows — show its flows and advance state
-            log.info(
-                "[activity] event=category_selected  session=%s  user=%s  category=%r",
-                sid, session["user_id_hash"], category,
-            )
-            session["status"] = "selecting_topic"
-
-            _lf_tid_cat: str | None = None
-            _lf_oid_cat: str | None = None
-            with tracing.turn_trace(
-                user_id=user_id,
-                session_id=sid,
-                trace_name=f"category-selected",
-                tags=[session["channel"], session["language"]],
-                trace_id=session.get("_lf_trace_id"),
-                parent_observation_id=session.get("_lf_obs_id"),
-                category=category,
-                channel=session["channel"],
-            ):
-                _lf_tid_cat, _lf_oid_cat = tracing.get_current_span_ids()
-                tracing.set_span_io(
-                    input={"user": f"Selected category: {category}"},
-                    output={"bot": "Sub-flow menu shown", "flow_options": [qr.label for qr in sub_flows]},
-                )
-
-            if _lf_tid_cat:
-                session["_lf_trace_id"] = _lf_tid_cat
-            if _lf_oid_cat:
-                session["_lf_obs_id"] = _lf_oid_cat
-
-            activities = [
-                Activity.markdown(
-                    _sys(request, "select_issue",
-                         "Please choose the specific issue you're facing:")
-                ).model_dump(exclude_none=True),
-                Activity.quick_replies(choices=sub_flows).model_dump(exclude_none=True),
-            ]
-            activities = await _translate_activities(activities, lang, translation_svc)
-            return TurnResponse(
-                session_id=session_id,
-                activities=activities,
-                status=FlowStatus.AWAITING_USER.value,
-                flow_id=None,
-                current_node=None,
-            )
+        response, body = await _handle_category_selection(
+            session_id, sid, session, body, request, user_id, lang, translation_svc,
+        )
+        if response is not None:
+            return response
 
     # ── Phase: topic selection (before any flow is started) ──────────────────
     if session["status"] == "selecting_topic":
-        # choice_id IS the flow_id — no separate mapping table needed.
-        # The menu buttons are generated from flow YAML metadata (menu_label).
-        choice_id = body.choice_id or ""
-        graphs: dict = getattr(request.app.state, "graphs", {})
-        compiler = getattr(request.app.state, "compiler", None)
-
-        # Accept the choice only if the flow is compiled AND enabled.
-        # metadata.enabled: false blocks the flow at the API level regardless
-        # of whether it is compiled (useful for WIP / paused flows).
-        flow_id = None
-        if choice_id in graphs and compiler is not None and compiler.is_flow_enabled(choice_id):
-            flow_id = choice_id
-
-        if not flow_id:
-            # Unknown topic → re-offer the sub-menu for the already-chosen category
-            # (falls back to the full flat menu when category was never set)
-            log.info(
-                "[activity] event=topic_invalid  session=%s  user=%s  choice=%r",
-                sid, session["user_id_hash"], choice_id,
-            )
-            _selected_cat = session.get("selected_category")
-            _fallback_choices = (
-                _flows_for_category_quick_replies(request, _selected_cat)
-                if _selected_cat
-                else _menu_quick_replies(request)
-            )
-            activities = [
-                Activity.markdown(
-                    _sys(request, "unknown_topic",
-                         "🤔 I didn't catch that — please choose one of the options below.")
-                ).model_dump(exclude_none=True),
-                Activity.quick_replies(choices=_fallback_choices).model_dump(exclude_none=True),
-            ]
-            activities = await _translate_activities(activities, lang, translation_svc)
-            return TurnResponse(
-                session_id=session_id,
-                activities=activities,
-                status=FlowStatus.AWAITING_USER.value,
-                flow_id=None,
-                current_node=None,
-            )
-
-        # Start the matched flow (graphs dict already resolved above)
-        graph = graphs.get(flow_id)
-        if graph is None:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Flow '{flow_id}' not loaded — check server startup logs",
-            )
-
-        user_id_hash = session["user_id_hash"]
-        log.info(
-            "[activity] event=topic_selected  session=%s  user=%s  flow=%s",
-            sid, user_id_hash, flow_id,
-        )
-
-        state = initial_state(
-            session_id=session_id,
-            user_id_hash=user_id_hash,
-            channel=Channel(session["channel"]),
-            language=session["language"],
-            session_ttl_minutes=session["ttl_minutes"],
-        )
-        state_dict = state.model_dump(mode="json")
-        state_dict["flow_id"] = flow_id
-        # Seed user_id into collected; store raw JWT in _session_token (not in collected —
-        # keeps it out of LLM context and YAML templates; accessible only via __SESSION_TOKEN__ sentinel)
-        state_dict.setdefault("collected", {})["user_id"] = user_id
-        state_dict["session_token"] = request.headers.get(settings.auth_header_name, "")
-
-        # Pre-fetch user profile (email/name/mobile) once at flow start so every
-        # flow has it available without per-flow profile fetch nodes.
-        _karmayogi = getattr(request.app.state, "services", {}).get("karmayogi")
-        if _karmayogi is not None:
-            try:
-                _profile = await _karmayogi.execute_request(
-                    "POST",
-                    "/api/private/user/v1/search",
-                    body={"request": {"filters": {"userId": user_id_hash}, "limit": 1}},
-                )
-                _content = (_profile.get("response") or {}).get("content") or []
-                if _content:
-                    _personal = (_content[0].get("profileDetails") or {}).get("personalDetails") or {}
-                    _profile_fields = {
-                        "email":      _personal.get("primaryEmail"),
-                        "mobile":     _personal.get("mobile"),
-                        "first_name": _personal.get("firstname"),
-                        "last_name":  _personal.get("surname"),
-                    }
-                    state_dict["collected"].update(
-                        {k: v for k, v in _profile_fields.items() if v is not None}
-                    )
-            except Exception:  # noqa: BLE001
-                pass  # fail-open: flow continues without profile data
-
-        session["turn_count"] = session.get("turn_count", 0) + 1
-        session["expires_at"] = datetime.now(timezone.utc) + timedelta(minutes=session["ttl_minutes"])
-        lg_config = {"configurable": {"thread_id": sid}}
-        _lf_tid_phase1: str | None = None
-        _lf_oid_phase1: str | None = None
-        try:
-            with tracing.turn_trace(
-                user_id=user_id,
-                session_id=sid,
-                trace_name=f"flow-start-{flow_id}",
-                tags=[session["channel"], session["language"], flow_id],
-                trace_id=session.get("_lf_trace_id"),
-                parent_observation_id=session.get("_lf_obs_id"),
-                flow_id=flow_id,
-                channel=session["channel"],
-                action="topic_selected",
-                user_choice=flow_id,
-                turn_count=session["turn_count"],
-            ):
-                _lf_tid_phase1, _lf_oid_phase1 = tracing.get_current_span_ids()
-                # topic label comes from the menu — same as flow_id for built-in flows
-                _topic_label = next(
-                    (qr.label for qr in _menu_quick_replies(request) if qr.id == flow_id),
-                    flow_id,
-                )
-                tracing.set_span_io(input={"user": f"Selected topic: {_topic_label}"})
-                result = await graph.ainvoke(state_dict, lg_config)
-                result_status = result.get("status", "active")
-                _pending = result.get("pending_activities") or []
-                tracing.set_span_io(
-                    input={"user": f"Selected topic: {_topic_label}"},
-                    output={
-                        "activities": _activities_for_trace(_pending),
-                        "next_node": result.get("current_node"),
-                        "status": str(result_status),
-                    },
-                )
-        except Exception:  # noqa: BLE001
-            log.exception("Flow start error for %s", flow_id)
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"params": {"errmsg": "We're having trouble processing your request right now. Please try again in a few moments."}},
-            )
-
-        # Update session trace-chain IDs (span just closed, IDs captured above)
-        if _lf_tid_phase1:
-            session["_lf_trace_id"] = _lf_tid_phase1
-        if _lf_oid_phase1:
-            session["_lf_obs_id"] = _lf_oid_phase1
-
-        activities = result.get("pending_activities") or []
-        activities = await _translate_activities(activities, lang, translation_svc)
-        result_status = result.get("status", "active")
-
-        # Track node progression for this session
-        _next_node = result.get("current_node")
-        if _next_node:
-            session.setdefault("node_path", []).append(_next_node)
-
-        session["flow_id"] = flow_id
-        session["status"] = "in_flow" if result_status not in _TERMINAL_STATUSES else "done"
-
-        _store = getattr(request.app.state, "session_store", None)
-        if _store:
-            if result_status in _TERMINAL_STATUSES:
-                await _store.delete(session["user_id_hash"])
-            else:
-                await _store.refresh(session["user_id_hash"], session["ttl_minutes"])
-
-        _ticket_id = (result.get("collected") or {}).get("ticket_id")
-        if result_status in _TERMINAL_STATUSES:
-            log.info(
-                "[activity] event=flow_ended  session=%s  user=%s  flow=%s  outcome=%s  ticket=%s",
-                sid, user_id_hash, flow_id, result_status, _ticket_id or "-",
-            )
-            tracing.record_session_end(
-                user_id=user_id,
-                session_id=sid,
-                flow_id=flow_id,
-                outcome=result_status,
-                ticket_id=_ticket_id,
-                turn_count=session.get("turn_count", 0),
-                node_path=session.get("node_path", []),
-                channel=session.get("channel", "web"),
-                language=session.get("language", "en"),
-                trace_id=session.get("_lf_trace_id"),
-                parent_observation_id=session.get("_lf_obs_id"),
-            )
-
-        # Append user action + bot response to persistent conversation history
-        _history_graph = request.app.state.graphs.get(flow_id) if flow_id else None
-        if _history_graph is not None:
-            _user_text = (
-                body.user_says or body.text or body.choice_id or body.item_label or body.other_query
-            )
-            _user_msg = {"role": "user", "action": body.action, "text": _user_text, "ts": datetime.utcnow().isoformat()}
-            _bot_msg  = {"role": "bot", "activities": activities, "ts": datetime.utcnow().isoformat()}
-            try:
-                await _history_graph.aupdate_state(
-                    {"configurable": {"thread_id": sid}},
-                    {"messages": [_user_msg, _bot_msg]},
-                )
-            except Exception as _exc:  # noqa: BLE001
-                log.warning("[history] failed to append messages for session=%s: %s", sid, _exc)
-
-        return TurnResponse(
-            session_id=session_id,
-            activities=activities,
-            status=result_status,
-            flow_id=flow_id,
-            current_node=result.get("current_node"),
-            ticket_id=_ticket_id if result_status in _TERMINAL_STATUSES else None,
+        return await _handle_topic_selection(
+            session_id, sid, session, body, request, user_id,
+            request.headers.get(settings.auth_header_name, ""), lang, translation_svc,
         )
 
     # ── Phase: active flow ────────────────────────────────────────────────────
-    if session["status"] == "done":
-        activities = [
-            Activity.markdown(
-                _sys(request, "conversation_ended",
-                     "This conversation has ended. Please start a new session to continue.")
-            ).model_dump(exclude_none=True)
-        ]
-        activities = await _translate_activities(activities, lang, translation_svc)
-        return TurnResponse(
-            session_id=session_id,
-            activities=activities,
-            status="ended",
-            flow_id=session.get("flow_id"),
-            current_node=None,
-        )
-
-    flow_id = session.get("flow_id")
-    if not flow_id:
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"params": {"errmsg": "We're having trouble processing your request right now. Please try again in a few moments."}},
-        )
-
-    graphs = getattr(request.app.state, "graphs", {})
-    graph = graphs.get(flow_id)
-    if graph is None:
-        raise HTTPException(status_code=503, detail=f"Flow '{flow_id}' not loaded")
-
-    lg_config = {"configurable": {"thread_id": sid}}
-    compiler = request.app.state.compiler
-
-    # Get current graph state for save_to / field lookups
-    try:
-        snapshot = await graph.aget_state(lg_config)
-        current_state_values: dict = snapshot.values if snapshot else {}
-    except Exception:  # noqa: BLE001
-        current_state_values = {}
-
-    flow_yaml = compiler.get_flow(flow_id)
-
-    # Validate text input BEFORE touching graph state (uses already-translated English text)
-    if body.action == "send_message" and body.text:
-        current_node_id = current_state_values.get("current_node")
-        node_cfg = _find_node(flow_yaml, current_node_id)
-        if node_cfg and node_cfg.get("type") == "collect":
-            field_meta = _find_current_field(node_cfg, current_state_values.get("collected") or {})
-            if field_meta:
-                sys_msgs = getattr(request.app.state, "system_messages", {}) or {}
-                err = _validate_field_input(body.text, field_meta, sys_msgs)
-                if err:
-                    # Return immediately — graph state unchanged, user must re-enter
-                    err_activities = [
-                        Activity.markdown(err).model_dump(exclude_none=True),
-                        Activity.input(
-                            input_id=field_meta.get("field", field_meta.get("name", "value")),
-                            placeholder=field_meta.get("placeholder", ""),
-                        ).model_dump(exclude_none=True),
-                    ]
-                    err_activities = await _translate_activities(err_activities, lang, translation_svc)
-                    return TurnResponse(
-                        session_id=session_id,
-                        activities=err_activities,
-                        status=FlowStatus.AWAITING_USER.value,
-                        flow_id=flow_id,
-                        current_node=current_node_id,
-                    )
-
-    # Log the user action (never log free text — PII; log length only)
-    _action_detail = _action_summary(body)
-    log.info(
-        "[activity] event=user_turn  session=%s  user=%s  flow=%s  node=%s  action=%s  %s",
-        sid, session["user_id_hash"], flow_id,
-        current_state_values.get("current_node", "-"),
-        body.action, _action_detail,
-    )
-
-    # Build state update from user action (collected fields + message history)
-    update = _build_state_update(body, current_state_values, flow_yaml)
-
-    # Safe label for Langfuse — never log free text (PII); use structured fields only
-    _user_choice = (
-        body.user_says                                              # frontend label e.g. "Certificate issue"
-        or body.item_label                                          # picker selection e.g. "Foundation Course on AI"
-        or (body.choice_id if body.action == "select_choice" else None)  # internal id fallback
-        or body.action                                              # action type as last resort
-    )
-    session["turn_count"] = session.get("turn_count", 0) + 1
-    session["expires_at"] = datetime.now(timezone.utc) + timedelta(minutes=session["ttl_minutes"])
-
-    _lf_tid_active: str | None = None
-    _lf_oid_active: str | None = None
-    try:
-        with tracing.turn_trace(
-            user_id=user_id,
-            session_id=sid,
-            trace_name=f"turn-{flow_id}",
-            tags=[session.get("channel", "web"), session.get("language", "en"), flow_id],
-            trace_id=session.get("_lf_trace_id"),
-            parent_observation_id=session.get("_lf_obs_id"),
-            flow_id=flow_id,
-            action=body.action,
-            node=current_state_values.get("current_node", ""),
-            user_choice=_user_choice,
-            turn_count=session["turn_count"],
-        ):
-            _lf_tid_active, _lf_oid_active = tracing.get_current_span_ids()
-            # Build a human-readable user label — never log raw text (PII)
-            _current_node = current_state_values.get("current_node", "")
-            _user_label = _user_input_label(body, _user_choice, _current_node, flow_yaml)
-            tracing.set_span_io(input={"user": _user_label, "node": _current_node})
-            await graph.aupdate_state(lg_config, update)
-            result = await graph.ainvoke(None, lg_config)
-            result_status = result.get("status", "active")
-            _pending = result.get("pending_activities") or []
-            _out: dict = {
-                "activities": _activities_for_trace(_pending),
-                "next_node": result.get("current_node"),
-                "status": str(result_status),
-            }
-            _turn_ticket_id = (result.get("collected") or {}).get("ticket_id")
-            if _turn_ticket_id:
-                _out["ticket_id"] = _turn_ticket_id
-            tracing.set_span_io(input={"user": _user_label, "node": _current_node}, output=_out)
-    except Exception:  # noqa: BLE001
-        log.exception("Flow resume error for session %s", sid)
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"params": {"errmsg": "We're having trouble processing your request right now. Please try again in a few moments."}},
-        )
-
-    # Advance trace-chain IDs so the next turn links to THIS turn's span
-    if _lf_tid_active:
-        session["_lf_trace_id"] = _lf_tid_active
-    if _lf_oid_active:
-        session["_lf_obs_id"] = _lf_oid_active
-
-    activities = result.get("pending_activities") or []
-    activities = await _translate_activities(activities, lang, translation_svc)
-    result_status = result.get("status", "active")
-
-    # Track node progression
-    _next_node = result.get("current_node")
-    if _next_node:
-        session.setdefault("node_path", []).append(_next_node)
-
-    _store = getattr(request.app.state, "session_store", None)
-    _ticket_id = (result.get("collected") or {}).get("ticket_id")
-    if result_status in _TERMINAL_STATUSES:
-        session["status"] = "done"
-        log.info(
-            "[activity] event=flow_ended  session=%s  user=%s  flow=%s  outcome=%s  ticket=%s",
-            sid, session["user_id_hash"], flow_id, result_status, _ticket_id or "-",
-        )
-        tracing.record_session_end(
-            user_id=user_id,
-            session_id=sid,
-            flow_id=flow_id,
-            outcome=result_status,
-            ticket_id=_ticket_id,
-            turn_count=session.get("turn_count", 0),
-            node_path=session.get("node_path", []),
-            channel=session.get("channel", "web"),
-            language=session.get("language", "en"),
-            trace_id=session.get("_lf_trace_id"),
-            parent_observation_id=session.get("_lf_obs_id"),
-        )
-        if _store:
-            await _store.delete(session["user_id_hash"])
-    else:
-        if _store:
-            await _store.refresh(session["user_id_hash"], session["ttl_minutes"])
-
-    # Append user action + bot response to persistent conversation history
-    _history_graph = request.app.state.graphs.get(flow_id) if flow_id else None
-    if _history_graph is not None:
-        _user_text = (
-            body.user_says or body.text or body.choice_id or body.item_label or body.other_query
-        )
-        _user_msg = {"role": "user", "action": body.action, "text": _user_text, "ts": datetime.utcnow().isoformat()}
-        _bot_msg  = {"role": "bot", "activities": activities, "ts": datetime.utcnow().isoformat()}
-        try:
-            await _history_graph.aupdate_state(
-                {"configurable": {"thread_id": sid}},
-                {"messages": [_user_msg, _bot_msg]},
-            )
-        except Exception as _exc:  # noqa: BLE001
-            log.warning("[history] failed to append messages for session=%s: %s", sid, _exc)
-
-    return TurnResponse(
-        session_id=session_id,
-        activities=activities,
-        status=result_status,
-        flow_id=flow_id,
-        current_node=result.get("current_node"),
-        ticket_id=_ticket_id if result_status in _TERMINAL_STATUSES else None,
+    return await _handle_active_flow(
+        session_id, sid, session, body, request, user_id, lang, translation_svc,
     )
 
 
