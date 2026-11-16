@@ -26,7 +26,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
-from app.engine.nodes.api_call_node import IntegrationNotFound
+from app.engine.nodes.api_call_node import IntegrationNotFound, NoContentResponse
 
 log = logging.getLogger(__name__)
 
@@ -134,6 +134,12 @@ class KarmayogiService:
         else:
             log.error("[karmayogi] All 3 attempts failed for %s %s", method, url)
             raise last_exc  # type: ignore[misc]
+
+        # 204 has no body to parse. Surface it as a distinct error; only api_call nodes
+        # that opt in with `allow_no_content: true` treat it as an empty result.
+        if resp.status_code == 204:
+            raise NoContentResponse(f"Karmayogi {method} {url} → 204 No Content")
+
         data = resp.json()
 
         # Unwrap Karmayogi's {result: {...}} envelope if present, so YAML can
